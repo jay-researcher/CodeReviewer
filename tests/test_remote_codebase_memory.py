@@ -51,8 +51,8 @@ class RemoteCodebaseMemoryTests(unittest.TestCase):
                 {},
                 timeout=10,
             )
+            self.assertTrue(remote_enabled())
 
-        self.assertTrue(remote_enabled())
         self.assertEqual(completed.returncode, 0)
         remote.assert_called_once()
 

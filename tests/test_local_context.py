@@ -283,7 +283,10 @@ build-repository:
 
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].branches, ["7.5.0", "7.5.1"])
-        self.assertEqual(entries[0].local_path, Path("D:/repos/client"))
+        expected_path = Path("D:/repos/client")
+        if not expected_path.is_absolute():
+            expected_path = Path.cwd() / expected_path
+        self.assertEqual(entries[0].local_path, expected_path)
 
     def test_project_context_reads_the_requested_git_ref(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -39,13 +39,17 @@ class CliMultiJiraTests(unittest.TestCase):
         self.assertTrue(batch_review.call_args.kwargs["list_only"])
 
     def test_cli_rejects_multi_jira_with_single_mr_mode(self) -> None:
-        with self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(io.StringIO()):
+        with tempfile.TemporaryDirectory() as temp, self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(
+            io.StringIO()
+        ):
             review.main(
                 [
                     "--jira",
                     "ECHNL-1001,ECHNL-1002",
                     "--mr-url",
                     "https://gitlab.example.com/group/project/-/merge_requests/1",
+                    "--output-dir",
+                    str(Path(temp) / "reports"),
                 ]
             )
         self.assertEqual(raised.exception.code, 2)
