@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.env
+.claude/
+.pycache-smoke/
+.pytest_cache/
+.coverage
+htmlcov/
+logs/
+reports/
+sprint_review/
+data/*
+!data/china-mainland-work-calendar.json
+tools/codebase-memory-mcp/*.exe
+Jira Sprint issues.txt
+select
+*.log
+*.tmp

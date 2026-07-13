@@ -1,0 +1,10 @@
+diff --git a/src/BIZ/TokenExample.php b/src/BIZ/TokenExample.php
+--- a/src/BIZ/TokenExample.php
++++ b/src/BIZ/TokenExample.php
+@@ -1,3 +1,6 @@
+ <?php
+ class TokenExample {
++  private $token = 'demo-token';
++  public function debug() { var_dump($this->token); }
++  // TODO: replace demo implementation.
+ }

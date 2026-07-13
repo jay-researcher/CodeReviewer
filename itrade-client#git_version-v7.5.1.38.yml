@@ -1,0 +1,5 @@
+itrade-client:
+  branch: 7.5.1.38
+  repository_url: https://gitlab.tx-tech.com/itrade-sv/client/web.git
+  commit: 545ec688135554ef616cfa4f6529cfa808f44c05
+  tag: ''

@@ -1,0 +1,51 @@
+build_on: 'remote'
+version:
+  ver_number: "11.2.82"
+  git_version: git_version-v11.2.82.10.yml
+  git_version4local: 'git_version.local.yml'
+  git_version4config:
+    git_repository:
+      branch: '11.2.82'
+      repository_url: 'https://gitlab.tx-tech.com/web-sv-build/dps.git'
+      commit: 'c0f8d6d390f4614a573baa7f2e578a344759a5df'
+      commit: '02a12145f77bcfd5a9b2cc24aa11b0f9937b6928'
+      tag: ''
+merge_modules:
+  wvadmin_core:
+    wvadmin_core: base/modules/wvadmin_core
+    ttl_access_control: ttl_access_control
+    ttl_admin_console: ttl_admin_console
+  ttl_contrib_common:
+    ttl_contrib_common: ttl_contrib_common
+    ttl_file_api: ttl_file_api
+    ttl_message_api: ttl_message_api
+    ttl_search_api: ttl_search_api
+    ttl_user_api: ttl_user_api
+    ttl_cms_api: {}
+init:
+  dps_composer: 'embedded'
+  dps_composer_archive: 'dps-composer.7z'
+build:
+  output: "/ttl/web-sv-build/dps"
+  type: "full"
+  environments:
+    - poc
+  drush_cmd_strings:
+    update_version: "{$php_bin} -r \"print json_encode(array('version' => '{$version}', 'build_time' => '{$time}'));\" | drush state-set --input-format=json dps_version -"
+    execute_script_command: "{$php_bin} $deploy_dir/script/DBChangeParser.php"
+    db_post_run_script: '{$php_bin} $deploy_dir/script/DBPostRunScript.php'
+  source_provide_method: clone
+  build_timestamp: ''
+build_template:
+  - "script"
+  - "data"
+  - "config"
+  - "site"
+  - "database"
+dps_site_dir: default
+companies:
+  - mas
+  - momd
+  - ccbi
+  - chsec
+  - ttl

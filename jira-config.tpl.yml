@@ -1,0 +1,10 @@
+sv-sprint: 
+  - 
+   sprint_name: e-Channel HotfixSprint1.4.68.2
+   sprint_id: 10355
+  - 
+    sprint_name: e-Channel Sprint1.4.69
+    sprint_id: 10065
+sprint-jira-issues:
+  - "ECHNL-5428"
+  - "ECHNL-5460"

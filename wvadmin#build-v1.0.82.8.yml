@@ -1,0 +1,35 @@
+companies:
+  - mas
+  - ccbi
+version:
+  ver_number: 1.0.82
+  git_version: git_version-v1.0.82.8.yml
+  git_repository:
+    branch: 1.0.82
+    repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/wvadmin.git
+    commit: 'd1f923247162c62b17f5fa0b584bb643501fe1f3'
+    tag: ''
+build:
+  source_provide_method: clone
+  source: /ttl/web-sv-build/wvadmin/source
+  output: /ttl/web-sv-build/wvadmin/build
+link_node_modules:
+  common: ''
+  base: ''
+  amo: ''
+  tmo: ''
+  lowcode: ''
+  lowcode-render: ''
+  wflow: ''
+node_version: '>=18.19.1'
+mo_client_app_config:
+  fetch_host: https://ttl-sv.tx-tech.com
+whitelabel_companies:
+  tickrswl:
+    - eddid
+    - vmf
+    - apex
+    - kuncy
+    - acb
+path_rewrite_companies:
+  - bociso

@@ -1,0 +1,40 @@
+common:
+  branch: 1.0.82
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/common.git
+  commit: 091ea869b29c2cce4e999b17faae3634362d3946
+  tag: ''
+base:
+  branch: 1.0.82
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/base.git
+  commit: d918b6e3dfa5442ca95643e50ba0358b7da1942f
+  tag: ''
+amo:
+  branch: 1.0.82
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/account-middle-office.git
+  commit: 1ecfd65ce874413f9bc0596cfb26b41a0816c791
+  tag: ''
+tmo:
+  branch: 1.0.82
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/trade-middle-office.git
+  commit: 79edde493cdf511bcce149d9a8d51695a0e4586c
+  tag: ''
+lowcode-render:
+  branch: 1.0.82
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/low-code-renderable.git
+  commit: 2b41a29a8672f75e1a7b50aa12fcb12732867fda
+  tag: ''
+lowcode:
+  branch: "1.0.82"
+  repository_url: "https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/low-code-application.git"
+  commit: "1b23632b8b1cd732d913210ed443cdf464a16185"
+  tag: ""
+wflow:
+  branch: "develop"
+  repository_url: "https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/workflow-app.git"
+  commit: "43e9c1e128b27ccfe8ea45d6985a5b3086b266a8"
+  tag: ""
+momd:
+  branch: "1.0.82"
+  repository_url: "https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/momd.git"
+  commit: "08cb47d26bd1189f49c2e4cb366a60e9ca67e4ca"
+  tag: ""

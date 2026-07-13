@@ -1,0 +1,49 @@
+companies:
+  - chsec
+  - ttl
+  - vmf
+  - ccbi
+  - eddid
+  - apex
+  - kuncy
+  - boci
+  - ttlva
+  - csci
+  - acb
+  - cmbc
+  - bociso
+  - mas
+  - gjs
+version:
+  ver_number: 7.5.1.38
+  git_version: git_version-v7.5.1.38.yml
+  git_repository:
+    branch: 7.5.1.38
+    repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/itrade-client.git
+    commit: ea3971d3799c7e9f05531b79007d5b18a3e76013
+    tag: ''
+build:
+  source_provide_method: clone
+  source: /ttl/web-sv-build/itrade-client/source
+  output: /ttl/web-sv-build/itrade-client/build
+link_node_modules: >-
+  /ttl/web-sv-build/fundamental-dependencies/itrade-client-node_modules/node_modules
+node_version: '>=18.1.0'
+mo_client_app_config:
+  fetch_host: https://ttl-sv.tx-tech.com
+whitelabel_companies:
+  tickrswl:
+    - eddid
+    - vmf
+    - apex
+    - kuncy
+    - acb
+replace_with_ttl:
+  scope:
+    - logo
+    - html_title
+  environments:
+    - poc
+  companines:
+    - ccbi
+    - gjs

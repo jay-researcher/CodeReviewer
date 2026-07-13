@@ -1,0 +1,71 @@
+ttl_access_control:
+  branch: develop
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_acl.git
+  commit: b0f8e7385537f65c30d37e3fdbb4a816e7c87871
+  tag: ""
+ttl_admin_console:
+  branch: develop
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/ttl_admin_console.git
+  commit: 717f02f264cdb37fb6235ab43c798a51ff3426fd
+  tag: ""
+base:
+  branch: '11.2.82'
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/wvadmin.git
+  commit: 083d842eef87730072a193b063394776f4d9b5c2
+  tag: ""
+amo:
+  branch: '11.2.82'
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/amo.git
+  commit: 0e6281158e33bfc4b7e8a54e48b6df9b5005d7fc
+  tag: ""
+lca:
+  branch: develop
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/lca.git
+  commit: 4375febd9eeba24e1f388bbdf0447df09f0004a9
+  tag: ""
+momd:
+  branch: '11.2.82'
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/momd.git
+  commit: 9bd9b0754adef6451ddbfb19f164e0db62cbc102
+  tag: ""
+tmo:
+  branch: '11.2.82'
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/tmo.git
+  commit: 1da65aa2f5adaa8b29833529acfd233adc78151e
+  commit: 33e398da0d7d1d6c254e316623363c16e50b5c67
+  tag: ""
+ttl_contrib_base:
+  branch: '11.2.82'
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_base.git
+  commit: 1aa0e1cbae7e002999f7954e77a9245c644e52cf
+  tag: ""
+ttl_contrib_common:
+  branch: develop
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_common.git
+  commit: a338349dd657b87825a923238ebe20c64233642f
+  tag: ""
+ttl_message_api:
+  branch: develop
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_message.git
+  commit: 90745f07f05eb4183cee74d449e6726e6dffe70e
+  tag: ""
+ttl_cms_api:
+  branch: '11.2.82'
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_cms.git
+  commit: e347f9f818364b65ffc6b8c02ca55b4a6734d14b
+  tag: ""
+ttl_file_api:
+  branch: develop
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_file.git
+  commit: 0533d7b8f8121f1c81c515e9032f587a7f763bb5
+  tag: ""
+ttl_user_api:
+  branch: e-channel-sprint-20260618
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_user.git
+  commit: caf86f7a65e3828b9ad8fbf45a1cabe34db09756
+  tag: ""
+ttl_search_api:
+  branch: develop
+  repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_search.git
+  commit: 934dd615a766d3a0ba56abd7b947c5194763230b
+  tag: ""

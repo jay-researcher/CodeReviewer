@@ -1,0 +1,106 @@
+dps9-repository:
+  ttl_contrib_common:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_common.git
+  ttl_cms_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_cms.git
+  ttl_admin_console:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_console.git
+  ttl_message_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_message.git
+  ttl_access_control:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_acl.git
+  ttl_file_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_file.git
+  ttl_user_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_user.git
+  ttl_search_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_search.git
+  wvmo_core:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_wvmo.git
+  paper_trading:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_papertrading.git
+  base:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/microsrvs/base.git
+  amo:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/microsrvs/amo.git
+  tmo:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/microsrvs/tmo.git
+  lca:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/microsrvs/lca.git
+  ttl_contrib_base:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_base.git
+  ttl_contrib_services:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_services.git
+dps11-repository:
+  ttl_contrib_common:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_common.git
+  ttl_cms_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_cms.git
+  ttl_admin_console:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/ttl_admin_console.git
+  ttl_message_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_message.git ""
+  ttl_access_control:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_acl.git
+  ttl_file_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_file.git
+  ttl_user_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_user.git
+  ttl_search_api:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_search.git
+  wvmo_core:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_wvmo.git
+  paper_trading:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_papertrading.git
+  base:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/wvadmin.git
+  amo:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/amo.git
+  tmo:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/tmo.git
+  lca:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/lca.git
+  ttl_contrib_base:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_base.git
+  ttl_contrib_services:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_services.git
+  momd:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/momd.git
+
+build-repository:
+  itrade-client:
+    repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/itrade-client.git
+  services-terminal:
+    repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/services-terminal.git
+  wvadmin:
+    repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/wvadmin.git
+  dps:
+    repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/dps.git
+itrade-client:
+  itrade-client:
+    repository_url: https://gitlab.tx-tech.com/itrade-sv/client/web.git
+  services-terminal:
+    repository_url: https://gitlab.tx-tech.com/itrade-sv/terminal/web.git
+wvadmin-repository:
+  momd:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/momd.git
+  low_code_designable:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/low-code-designable.git
+  low_code_renderable:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/low-code-renderable.git
+  coms:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/coms.git
+  workflow_app:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/workflow-app.git
+  low_code_application:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/low-code-application.git
+  trade_middle_office:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/trade-middle-office.git
+  account_middle_office:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/account-middle-office.git
+  base:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/base.git
+  common:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/common.git
+  form_designable:
+    repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/form-app-designable.git

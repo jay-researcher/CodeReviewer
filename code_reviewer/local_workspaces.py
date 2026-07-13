@@ -1,0 +1,571 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+from .gitlab_client import parse_repository_url
+from .config import app_config_bool, app_config_int, app_config_list, git_tools_config_path
+
+
+@dataclass(slots=True)
+class WorkspaceEntry:
+    project_path: str
+    local_path: Path
+    group: str = ""
+    module: str = ""
+    repository_url: str = ""
+    responsible: str = ""
+    project_name: str = ""
+    llm_model: str = ""
+    dev_branch: list[str] = field(default_factory=list)
+    branches: list[str] = field(default_factory=list)
+    source: str = ""
+
+
+SKIP_DIRS = {
+    ".git",
+    ".idea",
+    ".vscode",
+    ".workspace",
+    "__pycache__",
+    "node_modules",
+    "vendor",
+    "var",
+    "cache",
+    "coverage",
+    "dist",
+    "build",
+    "reports",
+    "outputs",
+    "db",
+}
+
+
+def resolve_workspace_for_project_path(project_path: str, branch: str = "") -> WorkspaceEntry | None:
+    if not app_config_bool("local_context.auto", "LOCAL_CONTEXT_AUTO", True):
+        return None
+    normalized = _normalize_project_path(project_path)
+    if not normalized:
+        return None
+    entries = [
+        entry
+        for entry in load_workspace_entries()
+        if _normalize_project_path(entry.project_path) == normalized
+    ]
+    branch_key = _normalize_branch(branch)
+    if branch_key:
+        exact = [entry for entry in entries if branch_key in {_normalize_branch(item) for item in entry.branches}]
+        if exact:
+            entries = exact
+    for entry in entries:
+        if entry.local_path.is_dir():
+            return entry
+    return None
+
+
+def resolve_context_repo_for_project_path(project_path: str, branch: str = "") -> Path | None:
+    entry = resolve_workspace_for_project_path(project_path, branch=branch)
+    return entry.local_path if entry else None
+
+
+def workspace_entries_for_issue_review(groups: str = "", projects: str = "") -> list[WorkspaceEntry]:
+    entries = load_workspace_entries(groups=groups, projects=projects)
+    return [entry for entry in entries if entry.local_path.is_dir() and (entry.local_path / ".git").exists()]
+
+
+def git_tools_project_entries(groups: str = "") -> list[WorkspaceEntry]:
+    return _git_tools_entries(groups=groups)
+
+
+def normalize_project_path(value: str) -> str:
+    return _normalize_project_path(value)
+
+
+def load_workspace_entries(groups: str = "", projects: str = "") -> list[WorkspaceEntry]:
+    git_projects = _git_tools_entries(groups=groups)
+    explicit = _explicit_workspace_entries()
+    roots = _discover_root_workspace_entries(git_projects)
+    configured = [entry for entry in git_projects if str(entry.local_path) not in {"", "."}]
+    entries = [*configured, *explicit, *roots]
+
+    if not entries:
+        return []
+
+    git_by_path = {_normalize_project_path(item.project_path): item for item in git_projects}
+    git_by_group_module = {
+        (item.group, item.module): item
+        for item in git_projects
+        if item.group and item.module
+    }
+    allowed_projects = {_normalize_project_path(item) for item in _split_values(projects)}
+    result: list[WorkspaceEntry] = []
+    seen: set[str] = set()
+    for entry in entries:
+        normalized = _normalize_project_path(entry.project_path)
+        if normalized not in git_by_path and (entry.group, entry.module) in git_by_group_module:
+            git_entry = git_by_group_module[(entry.group, entry.module)]
+            entry.project_path = git_entry.project_path
+            if not entry.repository_url:
+                entry.repository_url = git_entry.repository_url
+            if not entry.responsible:
+                entry.responsible = git_entry.responsible
+            if not entry.project_name:
+                entry.project_name = git_entry.project_name
+            if not entry.llm_model:
+                entry.llm_model = git_entry.llm_model
+            if not entry.dev_branch:
+                entry.dev_branch = git_entry.dev_branch
+            if not entry.branches:
+                entry.branches = git_entry.branches
+            normalized = _normalize_project_path(entry.project_path)
+        if not normalized:
+            continue
+        if allowed_projects and normalized not in allowed_projects:
+            continue
+        if git_by_path and normalized not in git_by_path:
+            continue
+        if normalized in git_by_path:
+            git_entry = git_by_path[normalized]
+            if not entry.group:
+                entry.group = git_entry.group
+            if not entry.module:
+                entry.module = git_entry.module
+            if not entry.repository_url:
+                entry.repository_url = git_entry.repository_url
+            if not entry.responsible:
+                entry.responsible = git_entry.responsible
+            if not entry.project_name:
+                entry.project_name = git_entry.project_name
+            if not entry.llm_model:
+                entry.llm_model = git_entry.llm_model
+            if not entry.dev_branch:
+                entry.dev_branch = git_entry.dev_branch
+            if not entry.branches:
+                entry.branches = git_entry.branches
+        key = f"{normalized}|{entry.local_path.resolve() if entry.local_path.exists() else entry.local_path}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(entry)
+    return result
+
+
+def _explicit_workspace_entries() -> list[WorkspaceEntry]:
+    path = Path(os.getenv("LOCAL_WORKSPACE_CONFIG", "data/local_workspaces.yml")).expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[1] / path
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    payload: Any = None
+    if path.suffix.lower() == ".json":
+        try:
+            payload = json.loads(text)
+        except Exception:
+            payload = None
+    elif yaml is not None:
+        try:
+            payload = yaml.safe_load(text)
+        except Exception:
+            payload = None
+    if isinstance(payload, dict):
+        parsed = _workspace_entries_from_payload(payload, path.parent)
+        if parsed:
+            return parsed
+    return _workspace_entries_from_text(text, path.parent)
+
+
+def _workspace_entries_from_payload(payload: dict[str, Any], base: Path) -> list[WorkspaceEntry]:
+    entries: list[WorkspaceEntry] = []
+
+    projects = payload.get("projects")
+    if isinstance(projects, dict):
+        for key, value in projects.items():
+            if isinstance(value, str):
+                entries.append(_workspace_entry(str(key), value, base, source="workspace-config"))
+            elif isinstance(value, dict):
+                project_path = str(value.get("project_path") or value.get("repository_url") or key)
+                entries.append(
+                    _workspace_entry(
+                        project_path,
+                        str(value.get("path") or value.get("local_path") or ""),
+                        base,
+                        group=str(value.get("group") or ""),
+                        module=str(value.get("module") or ""),
+                        repository_url=str(value.get("repository_url") or ""),
+                        responsible=str(value.get("responsible") or ""),
+                        project_name=str(value.get("project_name") or ""),
+                        llm_model=str(value.get("llm_model") or ""),
+                        dev_branch=_string_list(value.get("dev_branch")),
+                        branches=_string_list(value.get("branch") or value.get("branches")),
+                        source="workspace-config",
+                    )
+                )
+    elif isinstance(projects, list):
+        for value in projects:
+            if not isinstance(value, dict):
+                continue
+            project_path = str(value.get("project_path") or value.get("repository_url") or "")
+            entries.append(
+                _workspace_entry(
+                    project_path,
+                    str(value.get("path") or value.get("local_path") or ""),
+                    base,
+                    group=str(value.get("group") or ""),
+                module=str(value.get("module") or ""),
+                repository_url=str(value.get("repository_url") or ""),
+                responsible=str(value.get("responsible") or ""),
+                project_name=str(value.get("project_name") or ""),
+                llm_model=str(value.get("llm_model") or ""),
+                dev_branch=_string_list(value.get("dev_branch")),
+                branches=_string_list(value.get("branch") or value.get("branches")),
+                source="workspace-config",
+            )
+        )
+
+    groups = payload.get("groups")
+    if isinstance(groups, dict):
+        for group, modules in groups.items():
+            if not isinstance(modules, dict):
+                continue
+            for module, value in modules.items():
+                if isinstance(value, str):
+                    entries.append(_workspace_entry(str(module), value, base, group=str(group), module=str(module), source="workspace-config"))
+                elif isinstance(value, dict):
+                    entries.append(
+                        _workspace_entry(
+                            str(value.get("project_path") or value.get("repository_url") or module),
+                            str(value.get("path") or value.get("local_path") or ""),
+                            base,
+                            group=str(group),
+                            module=str(module),
+                            repository_url=str(value.get("repository_url") or ""),
+                            responsible=str(value.get("responsible") or ""),
+                            project_name=str(value.get("project_name") or ""),
+                            llm_model=str(value.get("llm_model") or ""),
+                            dev_branch=_string_list(value.get("dev_branch")),
+                            branches=_string_list(value.get("branch") or value.get("branches")),
+                            source="workspace-config",
+                        )
+                    )
+
+    return [entry for entry in entries if entry.project_path and str(entry.local_path)]
+
+
+def _workspace_entries_from_text(text: str, base: Path) -> list[WorkspaceEntry]:
+    entries: list[WorkspaceEntry] = []
+    current_group = ""
+    for raw_line in text.splitlines():
+        if re.match(r"^\s{2}[A-Za-z0-9_.-]+:\s*$", raw_line):
+            current_group = raw_line.strip().rstrip(":")
+            continue
+        line = raw_line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().strip("'\"")
+        value = value.strip().strip("'\"")
+        if not value:
+            continue
+        if "/" in key:
+            entries.append(_workspace_entry(key, value, base, source="workspace-config-text"))
+        elif current_group and raw_line.startswith("    "):
+            entries.append(_workspace_entry(key, value, base, group=current_group, module=key, source="workspace-config-text"))
+    return entries
+
+
+def _workspace_entry(
+    project_or_url: str,
+    local_path: str,
+    base: Path,
+    group: str = "",
+    module: str = "",
+    repository_url: str = "",
+    responsible: str = "",
+    project_name: str = "",
+    llm_model: str = "",
+    dev_branch: list[str] | None = None,
+    branches: list[str] | None = None,
+    source: str = "",
+) -> WorkspaceEntry:
+    project_path = _project_path_from_value(project_or_url)
+    path = Path(local_path).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    return WorkspaceEntry(
+        project_path=project_path,
+        local_path=path,
+        group=group,
+        module=module,
+        repository_url=repository_url or project_or_url,
+        responsible=responsible,
+        project_name=project_name,
+        llm_model=llm_model,
+        dev_branch=dev_branch or [],
+        branches=branches or [],
+        source=source,
+    )
+
+
+def _git_tools_entries(groups: str = "") -> list[WorkspaceEntry]:
+    config_path = git_tools_config_path()
+    if not config_path.exists():
+        return []
+    selected_groups = set(_split_values(groups)) if groups else set(app_config_list("git_tools.groups", "GIT_TOOLS_GROUPS", []))
+    text = config_path.read_text(encoding="utf-8", errors="ignore")
+    if yaml is not None:
+        try:
+            payload = yaml.safe_load(text)
+            if isinstance(payload, dict):
+                return _git_tools_entries_from_payload(payload, selected_groups)
+        except Exception:
+            pass
+    return _git_tools_entries_from_text(text, selected_groups)
+
+
+def _git_tools_entries_from_payload(payload: dict[str, Any], groups: set[str]) -> list[WorkspaceEntry]:
+    entries: list[WorkspaceEntry] = []
+    for group, modules in payload.items():
+        if groups and group not in groups:
+            continue
+        if not isinstance(modules, dict):
+            continue
+        for module, value in modules.items():
+            if not isinstance(value, dict):
+                continue
+            url = _clean_repository_url(str(value.get("repository_url") or ""))
+            responsible = str(value.get("responsible") or "")
+            project_name = str(value.get("project_name") or "")
+            llm_model = str(value.get("llm_model") or "")
+            dev_branch = _string_list(value.get("dev_branch"))
+            branches = _string_list(value.get("branch") or value.get("branches"))
+            project_path = _project_path_from_value(url)
+            if project_path:
+                base = dict(
+                        project_path=project_path,
+                        group=str(group),
+                        module=str(module),
+                        repository_url=url,
+                        responsible=responsible,
+                        project_name=project_name,
+                        llm_model=llm_model,
+                        dev_branch=dev_branch,
+                        branches=branches,
+                        source="git-tools",
+                )
+                copies = value.get("working_copies")
+                added_copy = False
+                if isinstance(copies, list):
+                    for copy in copies:
+                        if not isinstance(copy, dict):
+                            continue
+                        copy_branches = _string_list(copy.get("branch") or copy.get("branches")) or branches
+                        copy_path = _local_path(copy.get("local_working_copy"), config_base=git_tools_config_path().parent)
+                        entries.append(WorkspaceEntry(local_path=copy_path, branches=copy_branches, **base))
+                        added_copy = True
+                local_path = _local_path(value.get("local_working_copy"), config_base=git_tools_config_path().parent)
+                if not added_copy:
+                    entries.append(WorkspaceEntry(local_path=local_path, **base))
+    return entries
+
+
+def _git_tools_entries_from_text(text: str, groups: set[str]) -> list[WorkspaceEntry]:
+    entries: list[WorkspaceEntry] = []
+    group = ""
+    module = ""
+    fields: dict[str, Any] = {}
+    list_field = ""
+
+    def flush() -> None:
+        if groups and group not in groups:
+            return
+        url = _clean_repository_url(fields.get("repository_url", ""))
+        project_path = _project_path_from_value(url)
+        if project_path:
+            entries.append(
+                WorkspaceEntry(
+                    project_path=project_path,
+                    local_path=_local_path(fields.get("local_working_copy", ""), config_base=git_tools_config_path().parent),
+                    group=group,
+                    module=module,
+                    repository_url=url,
+                    responsible=fields.get("responsible", ""),
+                    project_name=fields.get("project_name", ""),
+                    llm_model=fields.get("llm_model", ""),
+                    dev_branch=_string_list(fields.get("dev_branch", "")),
+                    branches=_string_list(fields.get("branch", "")),
+                    source="git-tools",
+                )
+            )
+
+    for raw_line in text.splitlines():
+        group_match = re.match(r"^([^\s:#][^:#]*):\s*$", raw_line)
+        if group_match:
+            flush()
+            group = group_match.group(1).strip()
+            module = ""
+            fields = {}
+            list_field = ""
+            continue
+        module_match = re.match(r"^\s{2}([A-Za-z0-9_.-]+):\s*$", raw_line)
+        if module_match:
+            flush()
+            module = module_match.group(1).strip()
+            fields = {}
+            list_field = ""
+            continue
+        if groups and group not in groups:
+            continue
+        list_match = re.match(r"^\s{6}-\s*([^\r\n]+)", raw_line)
+        if list_match and list_field:
+            values = fields.setdefault(list_field, [])
+            if isinstance(values, list):
+                values.append(list_match.group(1).strip().strip("'\""))
+            continue
+        empty_match = re.match(r"^\s{4}([A-Za-z0-9_.-]+):\s*$", raw_line)
+        if empty_match:
+            list_field = empty_match.group(1).strip()
+            fields[list_field] = []
+            continue
+        match = re.match(r"^\s{4}([A-Za-z0-9_.-]+):\s*([^\r\n]+)", raw_line)
+        if not match:
+            continue
+        key = match.group(1).strip()
+        value = match.group(2).strip().strip("'\"")
+        if not value:
+            fields[key] = []
+            list_field = key
+            continue
+        fields[key] = value
+        list_field = ""
+    flush()
+    return entries
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip().strip("'\"")
+    if not text:
+        return []
+    text = text.strip("[]")
+    return [item.strip().strip("'\"") for item in re.split(r"[,;]+", text) if item.strip().strip("'\"")]
+
+
+def _discover_root_workspace_entries(git_projects: list[WorkspaceEntry]) -> list[WorkspaceEntry]:
+    roots = [Path(item).expanduser() for item in app_config_list("local_context.workspace_roots", "LOCAL_WORKSPACE_ROOTS", [])]
+    if not roots:
+        return []
+    allowed = {_normalize_project_path(item.project_path) for item in git_projects}
+    max_depth = app_config_int("local_context.workspace_scan_max_depth", "LOCAL_WORKSPACE_SCAN_MAX_DEPTH", 5)
+    entries: list[WorkspaceEntry] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for repo in _iter_git_repositories(root, max_depth=max_depth):
+            remote = _git_remote_origin(repo)
+            project_path = _project_path_from_value(remote)
+            normalized = _normalize_project_path(project_path)
+            if not normalized:
+                continue
+            if allowed and normalized not in allowed:
+                continue
+            entries.append(WorkspaceEntry(project_path=project_path, local_path=repo, repository_url=remote, source="workspace-root"))
+    return entries
+
+
+def _iter_git_repositories(root: Path, max_depth: int) -> list[Path]:
+    repos: list[Path] = []
+    root = root.resolve()
+    for current, dirnames, _filenames in os.walk(root):
+        path = Path(current)
+        depth = len(path.relative_to(root).parts)
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS and not name.startswith(".")]
+        try:
+            names = os.listdir(path)
+        except OSError:
+            dirnames[:] = []
+            continue
+        if ".git" in names:
+            repos.append(path)
+            dirnames[:] = []
+            continue
+        if depth >= max_depth:
+            dirnames[:] = []
+    return repos
+
+
+def _git_remote_origin(repo: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=15,
+        )
+    except Exception:
+        return ""
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _project_path_from_value(value: str) -> str:
+    text = _clean_repository_url(value)
+    if not text:
+        return ""
+    try:
+        _base, project_path = parse_repository_url(text, fallback_base_url=os.getenv("GITLAB_URL", "https://gitlab.tx-tech.com"))
+        return _normalize_project_path(project_path)
+    except Exception:
+        return _normalize_project_path(text)
+
+
+def _clean_repository_url(value: str) -> str:
+    text = (value or "").strip().strip("'\"")
+    match = re.search(r"(?:https?://[^\s\"']+?\.git|git@[^\"'\s]+?\.git)", text)
+    return match.group(0) if match else text
+
+
+def _normalize_project_path(value: str) -> str:
+    text = (value or "").strip().strip("'\"")
+    if not text:
+        return ""
+    if text.endswith(".git"):
+        text = text[:-4]
+    text = text.replace("\\", "/").strip("/")
+    for prefix in ("https://gitlab.tx-tech.com/", "http://gitlab.tx-tech.com/"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):]
+    if text.startswith("git@gitlab.tx-tech.com:"):
+        text = text.split(":", 1)[1]
+    return text.lower()
+
+
+def _normalize_branch(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+def _local_path(value: Any, config_base: Path) -> Path:
+    text = str(value or "").strip().strip("'\"")
+    if not text:
+        return Path()
+    path = Path(text).expanduser()
+    return path if path.is_absolute() else config_base / path
+
+
+def _split_values(value: str) -> list[str]:
+    return [item.strip() for item in re.split(r"[,;\n]+", value or "") if item.strip()]
