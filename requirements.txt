@@ -14,7 +14,7 @@ pyyaml==6.0.1
 python-gitlab==4.0.0
 
 # Jira API (optional)
-jira==3.12.0
+jira==3.10.5
 
 # Code analysis
 pylint==3.0.0
