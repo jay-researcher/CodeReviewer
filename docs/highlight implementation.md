@@ -77,3 +77,9 @@ Failed
 - 远端 commit marker 用于跨进程/重启复用索引；本地单索引锁和资源上限继续生效。
 - 默认严格校验 SSH host key；认证信息可从受保护的 DevOps host config 读取，密码不写入 `.env`。
 - 新增 `tools/check_codebase_memory.py` 执行无副作用连接及项目列表检查。
+### CLIProxyAPI Codex 账号池接入，版本升级至 6.23.0。
+
+- RHEL9 CodeReviewer 通过官方 Codex CLI 和 CLIProxyAPI Responses endpoint 使用共享 GPT 额度池。
+- 自定义 Codex provider 支持通过 `codex_http_api_key_env` 指定 API key 环境变量，无需在服务器执行交互式 OAuth 登录。
+- 未配置 API key provider 时继续使用原有 OpenAI 登录方式，保持现有 Windows/ChatGPT 调用兼容。
+- 缺少指定 API key 时立即给出配置错误，避免 Codex CLI 静默等待直至超时。

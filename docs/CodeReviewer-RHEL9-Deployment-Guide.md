@@ -108,6 +108,13 @@ WEB_BUILD_TOOLS_DIR=/opt/web-build-tools
 CODE_REVIEW_REQUIREMENT_FILE=/var/lib/codereviewer/code-review/code_review_requirement.md
 CODEBASE_MEMORY_COMMAND=/opt/codereviewer/bin/codebase-memory-mcp
 
+# Optional: CLIProxyAPI/OpenAI-compatible Responses endpoint
+CODEX_CLI_PATH=/usr/local/bin/codex
+OPENAI_API_KEY=REPLACE_WITH_CLIPROXY_API_KEY
+LLM_CODEX_HTTP_API_KEY_ENV=OPENAI_API_KEY
+CODE_REVIEW_OVERRIDE_LLM_CODEX_FORCE_HTTP=1
+CODE_REVIEW_OVERRIDE_LLM_CODEX_HTTP_BASE_URL=http://CLI_PROXY_HOST:8318/v1
+
 # Runtime limits and process behavior
 LLM_CODEX_TIMEOUT_SECONDS=300
 LLM_TIMEOUT_SECONDS=180

@@ -153,6 +153,7 @@ class LocalContextTests(unittest.TestCase):
 
     def test_codex_cli_stdin_uses_utf8_for_bom_and_chinese_prompt(self) -> None:
         with (
+            patch.dict(os.environ, {"LLM_CODEX_HTTP_API_KEY_ENV": "OPENAI_API_KEY", "OPENAI_API_KEY": "test-key"}),
             patch("code_reviewer.llm_provider._resolve_codex_cli", return_value="codex"),
             patch("code_reviewer.llm_provider.subprocess.run") as run_mock,
         ):
@@ -173,6 +174,8 @@ class LocalContextTests(unittest.TestCase):
         command = kwargs["args"] if "args" in kwargs else run_mock.call_args.args[0]
         self.assertIn("--ignore-user-config", command)
         self.assertIn("model_provider=\"codereviewer_http\"", command)
+        self.assertIn('model_providers.codereviewer_http.env_key="OPENAI_API_KEY"', command)
+        self.assertIn("model_providers.codereviewer_http.requires_openai_auth=false", command)
         self.assertIn("model_providers.codereviewer_http.supports_websockets=false", command)
 
     def test_web_port_instance_lock_rejects_a_second_server(self) -> None:

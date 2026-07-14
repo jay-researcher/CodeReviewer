@@ -9,7 +9,7 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `6.22.1` |
+| CodeReviewer 版本 | `6.23.0` |
 | 部署提交 | `4af19602e8a44e391f783e4925df669e808ca258` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
@@ -17,7 +17,7 @@
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `GET /api/version` 返回 `{"ok": true, "version": "6.22.1"}` |
+| 健康检查 | `GET /api/version` 返回 `{"ok": true, "version": "6.23.0"}` |
 | 编译检查 | 通过 |
 | RHEL9 测试 | 76 passed |
 
@@ -49,7 +49,7 @@ dnf install -y python3.11 python3.11-pip git
 
 该事务同时按 RHEL 仓库依赖升级了 OpenSSL 和 SQLite 相关包。虚拟环境使用 `/opt/codereviewer/venv`，并通过 `requirements.txt` 安装依赖。
 
-部署中发现 `jira==3.12.0` 不存在，已修正为 `jira==3.10.5`，并将 CodeReviewer 从 6.22.0 升级到 6.22.1。
+部署中发现 `jira==3.12.0` 不存在，已修正为 `jira==3.10.5`。接入 CLIProxyAPI API-key provider 后，CodeReviewer 版本升级到 6.23.0。
 
 生产 `config.yml` 做了以下主机侧转换：
 
@@ -112,9 +112,8 @@ runuser -u codereviewer -- env \
 
 ## 尚需补齐的生产能力
 
-Web 服务、基础配置、GitLab/Jira token 和本地 MCP 已部署，但以下外部组件在主机上尚不存在：
+Web 服务、基础配置、GitLab/Jira token、本地 MCP、Jira/PRD 同步和 Codex CLI 均已部署，但以下外部组件尚不存在：
 
-- Codex CLI；DPS Review 配置要求 Codex，未安装前只能使用已配置且可用的其他 LLM 路径，强制 Codex 的任务会失败；
 - `/opt/web-build-tools`，依赖该目录的 Web Build Tools 上下文不可用；
 - Nginx 和 HTTPS 终止；当前为内网 HTTP 直连；
 
@@ -140,6 +139,47 @@ systemctl status codereviewer-jira-prd.timer
 systemctl start codereviewer-jira-prd.service
 journalctl -u codereviewer-jira-prd.service -n 100 --no-pager
 ```
+
+## CLIProxyAPI / Codex 接入
+
+CLIProxyAPI 7.2.71 运行在 Windows 主机 `192.168.3.170:8318`，绑定到该局域网地址而不是 `0.0.0.0`。3.78 已安装 Node.js 22 和官方 `@openai/codex`，Codex CLI 位于 `/usr/local/bin/codex`。
+
+生产 EnvironmentFile 使用以下配置；实际 API key 只保存在 `/etc/codereviewer/codereviewer.env`，不要写入源码或文档：
+
+```bash
+CODEX_CLI_PATH=/usr/local/bin/codex
+OPENAI_API_KEY=<CLIProxyAPI api-key>
+LLM_CODEX_HTTP_API_KEY_ENV=OPENAI_API_KEY
+CODE_REVIEW_OVERRIDE_LLM_CODEX_FORCE_HTTP=1
+CODE_REVIEW_OVERRIDE_LLM_CODEX_HTTP_BASE_URL=http://192.168.3.170:8318/v1
+```
+
+CodeReviewer 6.23.0 在配置 `codex_http_api_key_env` 后，为 Codex 自定义 provider 注入 `env_key=OPENAI_API_KEY` 并关闭交互式 OpenAI 登录要求。未配置该项时，原有 ChatGPT/Codex 登录模式保持不变。
+
+验证结果：
+
+```text
+3.78 -> CLIProxyAPI /v1/models: HTTP 200，10 models
+3.78 -> CLIProxyAPI /v1/responses: HTTP 200
+Codex CLI: /usr/local/bin/codex
+Codex check passed.
+{"findings":[],"notes":["codex-check-ok"]}
+```
+
+验证命令：
+
+```bash
+systemd-run --wait --pipe --collect --quiet \
+  --uid=codereviewer --gid=codereviewer \
+  --property=WorkingDirectory=/opt/codereviewer/current \
+  --property=EnvironmentFile=/etc/codereviewer/codereviewer.env \
+  /opt/codereviewer/venv/bin/python review.py \
+  --codex-check --codex-check-timeout 180
+```
+
+Windows 当前已有名为 `cli-proxy-api` 的 Public 入站允许规则。创建仅允许 `192.168.3.78` 的收窄规则需要管理员权限；应在管理员 PowerShell 中移除/禁用宽泛规则，并只允许来源 `192.168.3.78` 访问 TCP 8318。即使 API key 校验已启用，也不建议对整个局域网开放。
+
+CLIProxyAPI 当前依赖 Windows 主机和登录会话持续运行。Windows 重启、休眠、IP 变化或代理进程退出都会使 DPS Review 失败；长期生产建议把 CLIProxyAPI 配置为受控的开机启动服务，或迁移到固定的服务器节点。
 
 ## 后续 GitHub 更新流程
 

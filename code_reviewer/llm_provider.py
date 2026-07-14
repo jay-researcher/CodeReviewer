@@ -427,25 +427,31 @@ def _call_codex_cli(
             "LLM_CODEX_HTTP_BASE_URL",
             "https://chatgpt.com/backend-api/codex",
         ).rstrip("/")
+        api_key_env = app_config_str(
+            "llm.codex_http_api_key_env",
+            "LLM_CODEX_HTTP_API_KEY_ENV",
+            "",
+        ).strip()
+        if api_key_env and not process_env.get(api_key_env):
+            raise RuntimeError(f"Codex HTTP provider requires environment variable {api_key_env}.")
         stream_retries = app_config_int("llm.codex_stream_max_retries", "LLM_CODEX_STREAM_MAX_RETRIES", 2)
-        command.extend(
+        provider_config = [
+            ("model_provider", f'"{provider_id}"'),
+            (f"model_providers.{provider_id}.name", '"CodeReviewer HTTP"'),
+            (f"model_providers.{provider_id}.base_url", f'"{base_url}"'),
+            (f"model_providers.{provider_id}.wire_api", '"responses"'),
+        ]
+        if api_key_env:
+            provider_config.append((f"model_providers.{provider_id}.env_key", f'"{api_key_env}"'))
+        provider_config.extend(
             [
-                "-c",
-                f'model_provider="{provider_id}"',
-                "-c",
-                f'model_providers.{provider_id}.name="CodeReviewer HTTP"',
-                "-c",
-                f'model_providers.{provider_id}.base_url="{base_url}"',
-                "-c",
-                f'model_providers.{provider_id}.wire_api="responses"',
-                "-c",
-                f"model_providers.{provider_id}.requires_openai_auth=true",
-                "-c",
-                f"model_providers.{provider_id}.supports_websockets=false",
-                "-c",
-                f"model_providers.{provider_id}.stream_max_retries={max(0, stream_retries)}",
+                (f"model_providers.{provider_id}.requires_openai_auth", "false" if api_key_env else "true"),
+                (f"model_providers.{provider_id}.supports_websockets", "false"),
+                (f"model_providers.{provider_id}.stream_max_retries", str(max(0, stream_retries))),
             ]
         )
+        for key, value in provider_config:
+            command.extend(["-c", f"{key}={value}"])
     if model and model != "local-rules":
         command.extend(["--model", model])
     command.append("-")
