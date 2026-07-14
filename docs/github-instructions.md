@@ -13,6 +13,7 @@
 | `9697001` | CodeReviewer 6.22.0 首次源码、配置、测试和文档提交 |
 | `7196ac6` | 将不存在的 `jira==3.12.0` 修正为 RHEL9 可安装的 `jira==3.10.5`，版本升级为 6.22.1 |
 | `4af1960` | 使测试可同时在 Windows 和 RHEL9 执行 |
+| `708287d` | 记录 GitHub 发布流程和 192.168.3.78 实际部署结果 |
 
 提交前已确认以下内容不会上传：
 
@@ -23,17 +24,16 @@
 - Windows 版 `codebase-memory-mcp.exe`；
 - 大体积 Codebase Memory 索引数据。
 
-当前 GitHub 仓库仍为空，源码尚未推送成功。实际验证结果如下：
+2026-07-14 已补充 Fine-grained personal access token 的 `Contents: Read and write` 权限，并成功将本地 `main` 首次推送到 GitHub。首次推送结果：
 
 ```text
-Git HTTPS push: HTTP 403, Permission denied
-GitHub Git Data API: 403, Resource not accessible by personal access token
-GitHub SSH: Permission denied (publickey)
+To https://github.com/jay-researcher/CodeReviewer.git
+* [new branch] main -> main
 ```
 
-API token 可以读取仓库，并能识别账号对仓库具有管理员权限；但是 token 本身没有仓库内容写权限。这是 token 权限问题，不是本地 Git 分支或提交问题。
+此前的 HTTP 403 原因是 token 对 Code/Contents 只有只读权限；`Workflows: Read and write` 和 `Repository hooks: Read and write` 不能代替 `Contents: Read and write`。调整权限后无需把 token 写入 remote URL，临时 credential helper 即可完成推送。
 
-## 修正 GitHub token 权限
+## GitHub token 权限要求
 
 如果使用 Fine-grained personal access token：
 
