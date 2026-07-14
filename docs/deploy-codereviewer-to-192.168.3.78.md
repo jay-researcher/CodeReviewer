@@ -56,7 +56,7 @@ dnf install -y python3.11 python3.11-pip git
 - `D:/TTL/vibe-coding/git-tools/git-repos` 改为 `/var/lib/codereviewer/git-repos`；
 - Review 模板改为 `/opt/codereviewer/current/docs/ECHNL-5539.md`；
 - workspace roots 改为 Linux 路径；
-- 因 `/opt/jira-prd/fetch_jira.py` 尚不存在，暂时设置 `jira_prd.auto_fetch: false`；
+- 已安装 `/opt/jira-prd/fetch_jira.py`，并设置 `jira_prd.auto_fetch: true`、按需抓取深度为 2；
 - 检查确认生产 `config.yml` 中剩余 `D:/TTL` 路径数量为 0。
 
 生产环境从本机 `.env` 安全传输，然后做了以下覆盖：
@@ -115,11 +115,31 @@ runuser -u codereviewer -- env \
 Web 服务、基础配置、GitLab/Jira token 和本地 MCP 已部署，但以下外部组件在主机上尚不存在：
 
 - Codex CLI；DPS Review 配置要求 Codex，未安装前只能使用已配置且可用的其他 LLM 路径，强制 Codex 的任务会失败；
-- `/opt/jira-prd/fetch_jira.py`，所以 Jira/PRD 自动抓取已关闭；
 - `/opt/web-build-tools`，依赖该目录的 Web Build Tools 上下文不可用；
 - Nginx 和 HTTPS 终止；当前为内网 HTTP 直连；
 
 当前 `firewalld` 未运行，8765 端口可从局域网访问。应用层已经限制 `192.168.3.0/24` 和 loopback，但生产环境仍建议启用主机防火墙，并使用 Nginx HTTPS 反向代理后把 `WEB_HOST` 改回 `127.0.0.1`。
+
+## Jira/PRD 知识库同步
+
+Jira/PRD 抓取器已安装并验证：
+
+```text
+/opt/jira-prd/fetch_jira.py
+/opt/jira-prd/.env                      0640 root:codereviewer
+/opt/jira-prd/data                      -> /var/lib/codereviewer/jira-prd/data
+/var/lib/codereviewer/jira-prd/data     运行数据
+```
+
+`codereviewer-jira-prd.timer` 已启用，每周一至周五按 Asia/Shanghai 时区在 08:00、12:00、16:00、20:00 自动同步。CodeReviewer 对缺失 issue 仍可通过 `jira_prd.auto_fetch: true` 即时抓取。
+
+首次同步已成功生成 16 个 Epic 的索引，并验证 CodeReviewer 能从该目录构建上下文。为避免超大 Epic 占用大量内存，`fetch_jira.py` 在读取到 `--max-children + 1` 条子任务时立即停止并跳过该 Epic，而不是先加载全部子任务。
+
+```bash
+systemctl status codereviewer-jira-prd.timer
+systemctl start codereviewer-jira-prd.service
+journalctl -u codereviewer-jira-prd.service -n 100 --no-pager
+```
 
 ## 后续 GitHub 更新流程
 
