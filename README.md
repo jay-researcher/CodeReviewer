@@ -4,6 +4,7 @@ Python MVP for GitLab MR code review based on [the original requirements](docs/r
 
 ## Documentation
 
+- [CodeReviewer 7.x User Manual](7.x-docs/CodeReviewer%20User%20Mannual.md) — living manual; update it for every user-facing 7.x change
 - [Setup guide](docs/SETUP.md)
 - [Code review flow](docs/code-review-flow.md)
 - [Jira integration guide](docs/JIRA_INTEGRATION_GUIDE.md)
