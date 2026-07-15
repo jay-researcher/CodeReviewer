@@ -52,6 +52,36 @@ class WebRunFormTests(unittest.TestCase):
         self.assertIn('class="issue-review-card${selected}"', page)
         self.assertNotIn('class="issue-review-table"', page)
 
+    def test_jira_followup_has_wide_summary_and_compact_description_preview(self) -> None:
+        page = render_index("admin")
+
+        self.assertIn('maxlength="255" size="50"', page)
+        self.assertIn('class="followup-adf-preview"', page)
+        self.assertIn('type="button">Edit issue</button>', page)
+        self.assertIn('function adfTextPreview(document, maxLength = 180)', page)
+        self.assertNotIn('Edit Issue Description (ADF)', page)
+
+    def test_issue_metrics_jump_to_the_first_matching_problem(self) -> None:
+        page = render_index("admin")
+
+        self.assertIn('data-jump-severity="critical"', page)
+        self.assertIn('data-jump-severity="high"', page)
+        self.assertIn('data-jump-blocker="true"', page)
+        self.assertIn("target.scrollIntoView({behavior: 'smooth', block: 'center'});", page)
+        self.assertIn("target.classList.add('finding-flash');", page)
+
+    def test_adf_description_uses_drag_and_drop_blocks_instead_of_json_editor(self) -> None:
+        page = render_index("admin")
+
+        self.assertIn('id="draftAdfSource" class="adf-source" spellcheck="false" hidden', page)
+        self.assertIn('id="draftBlockEditor" class="adf-block-editor"', page)
+        self.assertIn('class="adf-block" draggable="true"', page)
+        self.assertIn('title="Drag to reorder"', page)
+        self.assertIn('function renderAdfBlockEditor()', page)
+        self.assertIn('function showAdfEditMode()', page)
+        self.assertIn("textContent = 'Apply description';", page)
+        self.assertIn('id="closeDraftEditorBtn" class="secondary small-action" type="button">Cancel</button>', page)
+
 
 if __name__ == "__main__":
     unittest.main()

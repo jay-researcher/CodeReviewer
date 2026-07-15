@@ -4764,28 +4764,39 @@ def render_index(user: str = "") -> str:
     .issue-hero h2 { margin: 0 0 5px; font-size: 21px; }
     .metric-grid { display: grid; grid-template-columns: repeat(4,minmax(120px,1fr)); gap: 10px; margin: 14px 0; }
     .metric-card { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    button.metric-card { width: 100%; color: var(--text); text-align: left; cursor: pointer; }
+    button.metric-card:hover, button.metric-card:focus-visible { border-color: var(--accent); box-shadow: 0 4px 14px rgba(15, 23, 42, .08); outline: 0; }
+    button.metric-card:disabled { cursor: default; opacity: 1; }
     .metric-card strong { display: block; margin-top: 4px; font-size: 20px; }
     .workflow-tabs { display: flex; gap: 6px; margin: 16px 0 10px; border-bottom: 1px solid var(--line); }
     .workflow-tab { border: 0; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); }
     .workflow-tab.active { color: var(--accent-strong); border-bottom: 2px solid var(--accent); }
-    .workflow-section { margin: 0 0 22px; }
-    .workflow-section-title { margin: 0 0 12px; padding: 0 6px; font-size: 18px; }
+    .workflow-section { margin: 0 0 22px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .workflow-section-title { margin: 0 0 14px; padding: 0; font-size: 18px; line-height: 1.35; }
     .finding-card, .timeline-card, .draft-card, .discussion-card {
       margin-bottom: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
     }
     .finding-head, .draft-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
     .finding-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
     .finding-actions textarea { min-height: 74px; }
-    .finding-handling-form { display: grid; grid-template-columns: minmax(0, .72fr) minmax(0, 1.28fr); gap: 14px; margin-top: 12px; }
+    .finding-handling-form { display: grid; grid-template-columns: minmax(260px, .64fr) minmax(0, 1.36fr); gap: 18px; margin-top: 14px; }
+    .finding-handling-form:not(.followup-active) { grid-template-columns: minmax(280px, 420px) minmax(160px, 1fr); }
     .finding-handling-primary, .finding-handling-secondary { display: grid; gap: 9px; align-content: start; min-width: 0; }
+    .finding-handling-secondary { padding-left: 18px; border-left: 1px solid var(--line); }
     .finding-handling-primary label, .finding-handling-secondary label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
     .finding-handling-primary textarea { min-height: 132px; }
     .finding-submit-row { display: flex; justify-content: flex-end; gap: 8px; }
     .finding-submit-row button { min-width: 132px; }
-    .followup-fields { display: grid; gap: 8px; }
+    .followup-fields { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--bg) 35%, var(--panel)); }
     .followup-fields[hidden] { display: none; }
-    .followup-fields-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
-    .followup-adf-state { min-height: 88px; padding: 12px; border: 1px dashed var(--line); border-radius: 7px; background: color-mix(in srgb, var(--bg) 45%, var(--panel)); }
+    .followup-fields-head { display: grid; gap: 6px; }
+    .followup-fields-head input { width: 100%; min-width: min(50ch, 100%); }
+    .followup-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+    .followup-card-head strong { display: block; margin-bottom: 3px; }
+    .followup-card-head button { flex: 0 0 auto; min-height: 34px; padding: 6px 12px; }
+    .followup-adf-state { min-width: 0; line-height: 1.45; }
+    .followup-adf-preview { display: -webkit-box; overflow: hidden; margin-top: 3px; color: var(--muted); -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+    .finding-card.finding-flash { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
     .handling-guidance { margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
     .handling-guidance h4 { margin: 0 0 7px; font-size: 14px; }
     .handling-guidance p { margin: 0 0 9px; color: var(--muted); line-height: 1.5; }
@@ -4794,12 +4805,25 @@ def render_index(user: str = "") -> str:
     .adf-toolbar { display: flex; gap: 5px; flex-wrap: wrap; padding: 8px; border-bottom: 1px solid var(--line); }
     .adf-toolbar button { min-height: 30px; padding: 4px 8px; font-size: 12px; }
     .adf-source { min-height: 260px; border: 0; border-radius: 0; font-family: Consolas,monospace; }
+    .adf-block-editor { display: grid; gap: 10px; min-height: 300px; padding: 14px; background: color-mix(in srgb, var(--bg) 35%, var(--panel)); }
+    .adf-block-editor[hidden] { display: none; }
+    .adf-block-empty { display: grid; place-items: center; min-height: 240px; padding: 24px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); text-align: center; }
+    .adf-block { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .adf-block.dragging { opacity: .48; border-color: var(--accent); }
+    .adf-block.drop-target { box-shadow: 0 -3px 0 var(--accent); }
+    .adf-block-grip { min-height: 32px; padding: 4px; border: 0; background: transparent; color: var(--muted); cursor: grab; font-size: 20px; line-height: 1; }
+    .adf-block-grip:active { cursor: grabbing; }
+    .adf-block-body { display: grid; gap: 6px; min-width: 0; }
+    .adf-block-type { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .adf-block-input { min-height: 42px; resize: vertical; font-family: inherit; font-size: 14px; line-height: 1.5; }
+    .adf-block-complex { padding: 10px; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); line-height: 1.45; }
+    .adf-block-delete { min-height: 32px; padding: 4px 8px; border-color: var(--line); background: transparent; color: var(--danger); }
     .adf-preview { min-height: 260px; padding: 16px; overflow: auto; }
     .adf-preview table { width: 100%; border-collapse: collapse; }
     .adf-preview th, .adf-preview td { border: 1px solid var(--line); padding: 8px; }
     .adf-expand { margin: 10px 0; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; }
     .adf-media { display: block; max-width: 100%; height: auto; border-radius: 6px; }
-    .draft-editor-grid { display: grid; grid-template-columns: minmax(360px,1fr) minmax(360px,1fr); gap: 14px; }
+    .draft-editor-grid { display: grid; grid-template-columns: minmax(0,1fr); gap: 14px; }
     @media (max-width: 900px) {
       .workflow-modal { padding: 8px; }
       .workflow-dialog { height: calc(100vh - 16px); }
@@ -4808,6 +4832,8 @@ def render_index(user: str = "") -> str:
       .metric-grid { grid-template-columns: repeat(2,1fr); }
       .draft-editor-grid { grid-template-columns: 1fr; }
       .finding-handling-form { grid-template-columns: 1fr; }
+      .finding-handling-form:not(.followup-active) { grid-template-columns: 1fr; }
+      .finding-handling-secondary { padding-left: 0; padding-top: 14px; border-left: 0; border-top: 1px solid var(--line); }
       .followup-fields-head { grid-template-columns: 1fr; }
       .finding-submit-row { justify-content: stretch; }
       .finding-submit-row button { width: 100%; }
@@ -4959,7 +4985,7 @@ __ADMIN_TRACE_SECTION__
     <div class="workflow-dialog" role="dialog" aria-modal="true" aria-labelledby="draftEditorTitle">
       <div class="workflow-head">
         <div><h2 id="draftEditorTitle">Pending Jira</h2><p id="draftEditorMeta" class="meta">ADF-native Issue Description</p></div>
-        <div class="actions"><button id="saveDraftBtn" type="button">Save Draft</button><button id="closeDraftEditorBtn" class="icon-action" type="button" aria-label="Close">&#x2715;</button></div>
+        <div class="actions"><button id="saveDraftBtn" type="button">Save draft</button><button id="closeDraftEditorBtn" class="secondary small-action" type="button">Cancel</button></div>
       </div>
       <div class="workflow-detail-pane">
         <div id="pendingDraftList"></div>
@@ -4979,9 +5005,10 @@ __ADMIN_TRACE_SECTION__
               <button id="adfPreviewModeBtn" class="secondary" type="button">Preview</button>
             </div>
             <div class="draft-editor-grid">
-              <textarea id="draftAdfSource" class="adf-source" spellcheck="false"></textarea>
+              <textarea id="draftAdfSource" class="adf-source" spellcheck="false" hidden></textarea>
+              <div id="draftBlockEditor" class="adf-block-editor" aria-label="Issue Description block editor"></div>
               <div id="atlaskitAdfEditor" class="adf-preview" hidden></div>
-              <div id="draftAdfPreview" class="adf-preview meta">Choose Preview to render the ADF document.</div>
+              <div id="draftAdfPreview" class="adf-preview meta" hidden>Choose Preview to render the ADF document.</div>
             </div>
           </div>
           <div id="draftStatus" class="status"></div>
@@ -7161,12 +7188,15 @@ function jiraKeyFromReportPath(reportPath) {
       const drafts = data.drafts || [];
       const canPass = Boolean((data.permissions || {}).manual_pass);
       const canReview = Boolean((data.permissions || {}).run_issue_review);
+      const pendingBlockerIds = new Set((readiness.pending_blockers || []).map(item => String(
+        item && typeof item === 'object' ? (item.finding_id || item.id || '') : item
+      )));
       $('issueReviewDetail').innerHTML = `
         <div class="issue-hero"><div><h2>${escapeHtml(issue.jira_key)} · ${escapeHtml(issue.summary || 'Issue Review')}</h2><div class="meta">Responsible: ${escapeHtml(issue.responsible || '-')} · Latest Run ${escapeHtml(latest.run_number || '-')} · Updated ${escapeHtml(formatDateTime(issue.updated_at))}</div></div><span class="status-chip" data-status="${escapeHtml(issue.status)}">${escapeHtml(statusLabel(issue.status))}</span></div>
         <div class="metric-grid">
-          <div class="metric-card"><span class="meta">Critical</span><strong>${severity.Critical || 0}</strong></div>
-          <div class="metric-card"><span class="meta">High</span><strong>${severity.High || 0}</strong></div>
-          <div class="metric-card"><span class="meta">Remaining blockers</span><strong>${(readiness.pending_blockers || []).length}</strong></div>
+          <button class="metric-card" type="button" data-jump-severity="critical" ${(severity.Critical || 0) ? '' : 'disabled'}><span class="meta">Critical</span><strong>${severity.Critical || 0}</strong></button>
+          <button class="metric-card" type="button" data-jump-severity="high" ${(severity.High || 0) ? '' : 'disabled'}><span class="meta">High</span><strong>${severity.High || 0}</strong></button>
+          <button class="metric-card" type="button" data-jump-blocker="true" ${(readiness.pending_blockers || []).length ? '' : 'disabled'}><span class="meta">Remaining blockers</span><strong>${(readiness.pending_blockers || []).length}</strong></button>
           <div class="metric-card"><span class="meta">Manager exceptions</span><strong>${readiness.manager_exceptions || 0}</strong></div>
         </div>
         <div class="actions">
@@ -7175,19 +7205,35 @@ function jiraKeyFromReportPath(reportPath) {
           <span class="meta">${escapeHtml(readiness.message || '')}</span>
         </div>
         <div class="workflow-tabs"><button class="workflow-tab active" type="button">Problems</button><button class="workflow-tab" type="button">Discuss (${discussions.length})</button><button class="workflow-tab" type="button">History (${runs.length})</button><button class="workflow-tab" type="button">Pending Jira (${drafts.length})</button></div>
-        <section class="workflow-section"><h3 class="workflow-section-title">Problem list · Run ${escapeHtml(latest.run_number || '-')}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role)).join('') : '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>'}</section>
+        <section class="workflow-section"><h3 class="workflow-section-title">Problem list · Run ${escapeHtml(latest.run_number || '-')}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role, pendingBlockerIds)).join('') : '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>'}</section>
         <section class="workflow-section"><h3 class="workflow-section-title">Discuss</h3><div>${discussions.length ? discussions.map(item => `<div class="discussion-card"><strong>${escapeHtml(item.author)}</strong><span class="meta"> · ${escapeHtml(formatDateTime(item.created_at))}</span><p>${escapeHtml(item.message)}</p></div>`).join('') : '<div class="meta">No discussion yet.</div>'}</div><div class="finding-actions"><textarea id="issueDiscussionInput" placeholder="Discuss this Review Run or ask for clarification."></textarea><button id="sendIssueDiscussionBtn" class="secondary" type="button">Send</button></div></section>
         <section class="workflow-section"><h3 class="workflow-section-title">Review Run History</h3>${runs.map(run => `<div class="timeline-card"><strong>Run ${escapeHtml(run.run_number)}</strong> · ${escapeHtml(formatDateTime(run.created_at))}<div class="meta">${escapeHtml(run.conclusion || 'Completed')} · ${escapeHtml(run.report_path || '')}</div><div>${(run.findings || []).filter(item => item.lineage_state === 'new').length} New · ${(run.findings || []).filter(item => item.lineage_state === 'persisting').length} Persisting</div></div>`).join('')}</section>
         <section class="workflow-section"><h3 class="workflow-section-title">Pending Jira</h3>${drafts.length ? drafts.map(renderDraftCard).join('') : '<div class="meta">No Jira follow-up drafts.</div>'}</section>`;
       $('issueReviewDetail').querySelectorAll('[data-handle-finding]').forEach(button => button.addEventListener('click', () => submitWorkflowHandling(button.dataset.handleFinding || '')));
       $('issueReviewDetail').querySelectorAll('[data-finding-disposition]').forEach(select => {
-        const sync = () => { const fields = $(`followup-${select.dataset.findingDisposition}`); if (fields) fields.hidden = select.value !== 'follow-up'; };
+        const sync = () => {
+          const fields = $(`followup-${select.dataset.findingDisposition}`);
+          const form = select.closest('.finding-handling-form');
+          const active = select.value === 'follow-up';
+          if (fields) fields.hidden = !active;
+          if (form) form.classList.toggle('followup-active', active);
+        };
         select.addEventListener('change', sync); sync();
       });
       $('issueReviewDetail').querySelectorAll('[data-compose-adf]').forEach(button => button.addEventListener('click', () => openHandlingAdfComposer(button.dataset.composeAdf || '')));
       $('issueReviewDetail').querySelectorAll('[data-approve-handling]').forEach(button => button.addEventListener('click', () => approveWorkflowHandling(button.dataset.approveHandling || '', true)));
       $('issueReviewDetail').querySelectorAll('[data-override-handling]').forEach(button => button.addEventListener('click', () => managerOverrideHandling(button.dataset.overrideHandling || '')));
       $('issueReviewDetail').querySelectorAll('[data-edit-draft]').forEach(button => button.addEventListener('click', () => openDraftById(button.dataset.editDraft || '', drafts)));
+      $('issueReviewDetail').querySelectorAll('[data-jump-severity], [data-jump-blocker]').forEach(button => button.addEventListener('click', () => {
+        const selector = button.dataset.jumpBlocker
+          ? '.finding-card[data-finding-blocker="true"]'
+          : `.finding-card[data-finding-severity="${button.dataset.jumpSeverity || ''}"]`;
+        const target = $('issueReviewDetail').querySelector(selector);
+        if (!target) return;
+        target.scrollIntoView({behavior: 'smooth', block: 'center'});
+        target.classList.add('finding-flash');
+        window.setTimeout(() => target.classList.remove('finding-flash'), 1600);
+      }));
       if ($('issueRescanBtn')) $('issueRescanBtn').addEventListener('click', () => {
         closeIssueReviews();
         $('jira').value = issue.jira_key;
@@ -7197,13 +7243,14 @@ function jiraKeyFromReportPath(reportPath) {
       if ($('sendIssueDiscussionBtn')) $('sendIssueDiscussionBtn').addEventListener('click', () => sendWorkflowDiscussion(issue.jira_key, latest.id || ''));
     }
 
-    function renderWorkflowFinding(finding, role) {
+    function renderWorkflowFinding(finding, role, pendingBlockerIds = new Set()) {
       const handling = finding.handling || null;
       const severityClass = String(finding.severity || '').toLowerCase();
       const needsApproval = handling && handling.approval_status === 'pending';
       const isManager = role === 'manager';
-      return `<article class="finding-card"><div class="finding-head"><div><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta">${escapeHtml(finding.file_path || 'No file')} · ${escapeHtml(statusLabel(finding.lineage_state))}</div></div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : ''}</div>
-        ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-handling-form"><div class="finding-handling-primary"><label>处理结果<select id="disposition-${finding.id}" data-finding-disposition="${finding.id}"><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select></label><label>处理说明<textarea id="note-${finding.id}" placeholder="说明修改内容、判断依据及测试结果（必填）"></textarea></label></div><div class="finding-handling-secondary"><div id="followup-${finding.id}" class="followup-fields" hidden><div class="followup-fields-head"><label>Issue Summary<input id="jira-summary-${finding.id}" placeholder="Required for Jira follow-up"></label><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit Issue Description (ADF)</button></div><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('Describe the follow-up requirement.')))}</textarea><div class="followup-adf-state"><strong>Jira Issue Description</strong><div id="jira-adf-status-${finding.id}" class="meta">ADF description not reviewed.</div></div></div><div class="finding-submit-row"><button data-handle-finding="${finding.id}" type="button">Submit handling</button></div></div></div>`}
+      const isPendingBlocker = pendingBlockerIds.has(String(finding.id || ''));
+      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta">${escapeHtml(finding.file_path || 'No file')} · ${escapeHtml(statusLabel(finding.lineage_state))}</div></div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : ''}</div>
+        ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-handling-form"><div class="finding-handling-primary"><label>处理结果<select id="disposition-${finding.id}" data-finding-disposition="${finding.id}"><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select></label><label>处理说明<textarea id="note-${finding.id}" placeholder="说明修改内容、判断依据及测试结果（必填）"></textarea></label></div><div class="finding-handling-secondary"><div id="followup-${finding.id}" class="followup-fields" hidden><div class="followup-fields-head"><label>Issue Summary<input id="jira-summary-${finding.id}" maxlength="255" size="50" placeholder="概括待跟进问题，建议 20–50 个字符"></label></div><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('Describe the follow-up requirement.')))}</textarea><div class="followup-card-head"><div class="followup-adf-state"><strong>Issue Description</strong><div id="jira-adf-preview-${finding.id}" class="followup-adf-preview">Describe the follow-up requirement.</div><div id="jira-adf-status-${finding.id}" class="meta">ADF description not reviewed.</div></div><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit issue</button></div></div><div class="finding-submit-row"><button data-handle-finding="${finding.id}" type="button">Submit handling</button></div></div></div>`}
       </article>`;
     }
 
@@ -7213,6 +7260,18 @@ function jiraKeyFromReportPath(reportPath) {
 
     function textToAdf(value) {
       return {version: 1, type: 'doc', content: String(value || '').split(/\\r?\\n/).map(line => ({type: 'paragraph', content: line ? [{type: 'text', text: line}] : []}))};
+    }
+
+    function adfTextPreview(document, maxLength = 180) {
+      const values = [];
+      const visit = node => {
+        if (!node || typeof node !== 'object') return;
+        if (node.type === 'text' && node.text) values.push(String(node.text));
+        if (Array.isArray(node.content)) node.content.forEach(visit);
+      };
+      visit(document);
+      const text = values.join(' ').replace(/\\s+/g, ' ').trim() || 'No Issue Description content yet.';
+      return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
     }
 
     async function submitWorkflowHandling(findingId) {
@@ -7271,9 +7330,10 @@ function jiraKeyFromReportPath(reportPath) {
       $('pendingDraftList').innerHTML = '';
       $('draftEditorForm').hidden = false;
       $('draftSummary').value = draft.summary || '';
+      $('saveDraftBtn').textContent = 'Save draft';
       $('draftAdfSource').value = JSON.stringify(draft.description_adf || textToAdf(''), null, 2);
       $('draftEditorMeta').textContent = `${draft.jira_key} · Pending Create · version ${draft.version}`;
-      renderCurrentAdf();
+      showAdfEditMode();
     }
 
     function openHandlingAdfComposer(findingId) {
@@ -7291,9 +7351,10 @@ function jiraKeyFromReportPath(reportPath) {
       $('pendingDraftList').innerHTML = '';
       $('draftEditorForm').hidden = false;
       $('draftSummary').value = currentJiraDraft.summary;
+      $('saveDraftBtn').textContent = 'Apply description';
       $('draftAdfSource').value = JSON.stringify(currentJiraDraft.description_adf, null, 2);
       $('draftEditorMeta').textContent = `${selectedIssueReview} · New Jira follow-up · ADF composer`;
-      renderCurrentAdf();
+      showAdfEditMode();
     }
 
     function adfNodeTemplate(type) {
@@ -7309,20 +7370,134 @@ function jiraKeyFromReportPath(reportPath) {
 
     function insertAdfNode(type) {
       try {
-        const document = JSON.parse($('draftAdfSource').value);
+        const document = readAdfDocument();
         document.content = Array.isArray(document.content) ? document.content : [];
         document.content.push(adfNodeTemplate(type));
         $('draftAdfSource').value = JSON.stringify(document, null, 2);
-        renderCurrentAdf();
+        showAdfEditMode();
       } catch (error) {
         $('draftStatus').className = 'status error';
         $('draftStatus').textContent = `ADF JSON error: ${error.message}`;
       }
     }
 
+    let draggedAdfBlockIndex = null;
+
+    function readAdfDocument() {
+      const source = $('draftAdfSource');
+      const raw = String(source.value || '').trim();
+      try {
+        const document = JSON.parse(raw || '{"version":1,"type":"doc","content":[]}');
+        if (!document || document.type !== 'doc') throw new Error('ADF root must be a doc');
+        document.content = Array.isArray(document.content) ? document.content : [];
+        return document;
+      } catch (_error) {
+        const recovered = textToAdf(raw);
+        source.value = JSON.stringify(recovered, null, 2);
+        $('draftStatus').className = 'status';
+        $('draftStatus').textContent = 'Plain text was converted into an editable paragraph block.';
+        return recovered;
+      }
+    }
+
+    function writeAdfDocument(document) {
+      $('draftAdfSource').value = JSON.stringify(document, null, 2);
+    }
+
+    function adfBlockText(node) {
+      if (node && (node.type === 'bulletList' || node.type === 'orderedList')) {
+        return (node.content || []).map(item => adfTextPreview(item, 500)).join('\\n');
+      }
+      return adfTextPreview(node, 1000);
+    }
+
+    function updateAdfBlockText(index, value) {
+      const document = readAdfDocument();
+      const node = document.content[index];
+      if (!node) return;
+      const paragraph = text => ({type: 'paragraph', content: text ? [{type: 'text', text}] : []});
+      if (node.type === 'bulletList' || node.type === 'orderedList') {
+        const lines = String(value || '').split(/\\r?\\n/).map(line => line.trim()).filter(Boolean);
+        node.content = (lines.length ? lines : ['']).map(line => ({type: 'listItem', content: [paragraph(line)]}));
+      } else {
+        node.content = value ? [{type: 'text', text: String(value)}] : [];
+      }
+      writeAdfDocument(document);
+      $('draftStatus').className = 'status';
+      $('draftStatus').textContent = 'Unsaved changes.';
+    }
+
+    function renderAdfBlockEditor() {
+      const editor = $('draftBlockEditor');
+      const document = readAdfDocument();
+      const labels = {paragraph:'Paragraph',heading:'Heading',bulletList:'Bullet list',orderedList:'Ordered list',table:'Table',expand:'Expand',mediaSingle:'Screenshot',panel:'Panel',codeBlock:'Code block',blockquote:'Quote'};
+      if (!document.content.length) {
+        editor.innerHTML = '<div class="adf-block-empty">Choose a component from the toolbar to start the Issue Description.</div>';
+        return;
+      }
+      editor.innerHTML = document.content.map((node, index) => {
+        const editable = ['paragraph', 'heading', 'bulletList', 'orderedList', 'codeBlock', 'blockquote'].includes(node.type);
+        const content = editable
+          ? `<textarea class="adf-block-input" data-adf-block-input="${index}" rows="${node.type.includes('List') ? 4 : 2}" placeholder="Enter ${escapeHtml(labels[node.type] || node.type)} content">${escapeHtml(adfBlockText(node))}</textarea>`
+          : `<div class="adf-block-complex">${escapeHtml(adfTextPreview(node, 220))}</div>`;
+        return `<article class="adf-block" draggable="true" data-adf-block-index="${index}">
+          <button class="adf-block-grip" type="button" tabindex="-1" aria-label="Drag to reorder" title="Drag to reorder">&#x2637;</button>
+          <div class="adf-block-body"><span class="adf-block-type">${escapeHtml(labels[node.type] || node.type)}</span>${content}</div>
+          <button class="adf-block-delete" type="button" data-adf-block-delete="${index}" aria-label="Delete ${escapeHtml(labels[node.type] || node.type)}">Delete</button>
+        </article>`;
+      }).join('');
+      editor.querySelectorAll('[data-adf-block-input]').forEach(input => input.addEventListener('input', () => updateAdfBlockText(Number(input.dataset.adfBlockInput), input.value)));
+      editor.querySelectorAll('[data-adf-block-delete]').forEach(button => button.addEventListener('click', () => {
+        const next = readAdfDocument();
+        next.content.splice(Number(button.dataset.adfBlockDelete), 1);
+        writeAdfDocument(next);
+        renderAdfBlockEditor();
+      }));
+      editor.querySelectorAll('.adf-block').forEach(block => {
+        block.addEventListener('dragstart', event => {
+          draggedAdfBlockIndex = Number(block.dataset.adfBlockIndex);
+          block.classList.add('dragging');
+          if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+        });
+        block.addEventListener('dragend', () => {
+          draggedAdfBlockIndex = null;
+          editor.querySelectorAll('.adf-block').forEach(item => item.classList.remove('dragging', 'drop-target'));
+        });
+        block.addEventListener('dragover', event => { event.preventDefault(); block.classList.add('drop-target'); });
+        block.addEventListener('dragleave', () => block.classList.remove('drop-target'));
+        block.addEventListener('drop', event => {
+          event.preventDefault();
+          const targetIndex = Number(block.dataset.adfBlockIndex);
+          if (draggedAdfBlockIndex === null || draggedAdfBlockIndex === targetIndex) return;
+          const next = readAdfDocument();
+          const [moved] = next.content.splice(draggedAdfBlockIndex, 1);
+          const insertAt = Math.min(targetIndex, next.content.length);
+          next.content.splice(insertAt, 0, moved);
+          writeAdfDocument(next);
+          renderAdfBlockEditor();
+        });
+      });
+    }
+
+    function showAdfEditMode() {
+      $('atlaskitAdfEditor').hidden = true;
+      $('draftAdfSource').hidden = true;
+      $('draftAdfPreview').hidden = true;
+      $('draftBlockEditor').hidden = false;
+      renderAdfBlockEditor();
+    }
+
+    async function showAdfPreviewMode() {
+      $('atlaskitAdfEditor').hidden = true;
+      $('draftAdfSource').hidden = true;
+      $('draftBlockEditor').hidden = true;
+      $('draftAdfPreview').hidden = false;
+      await renderCurrentAdf();
+    }
+
     async function renderCurrentAdf() {
       try {
-        const document = JSON.parse($('draftAdfSource').value);
+        const document = readAdfDocument();
         const mediaUrls = {};
         for (const attachment of (currentJiraDraft && currentJiraDraft.attachments || [])) mediaUrls[attachment.id] = attachment.url;
         const data = await fetchJson('/api/adf/render', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({document, media_urls:mediaUrls})});
@@ -7353,11 +7528,12 @@ function jiraKeyFromReportPath(reportPath) {
 
     async function saveCurrentDraft() {
       if (!currentJiraDraft) return;
-      const document = JSON.parse($('draftAdfSource').value);
+      const document = readAdfDocument();
       if (currentJiraDraft.temporary) {
         const findingId = currentJiraDraft.findingId;
         $(`jira-summary-${findingId}`).value = $('draftSummary').value;
         $(`jira-adf-${findingId}`).value = JSON.stringify(document);
+        $(`jira-adf-preview-${findingId}`).textContent = adfTextPreview(document);
         $(`jira-adf-status-${findingId}`).textContent = 'ADF description ready.';
         $('draftEditorModal').hidden = true;
         currentJiraDraft = null;
@@ -7388,12 +7564,12 @@ function jiraKeyFromReportPath(reportPath) {
       const data = await fetchJson('/api/jira-drafts/attachment', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({draft_id:currentJiraDraft.id,file_name:file.name,media_type:file.type,content_base64:contentBase64})});
       currentJiraDraft.attachments = currentJiraDraft.attachments || [];
       currentJiraDraft.attachments.push(data.attachment);
-      const document = JSON.parse($('draftAdfSource').value);
+      const document = readAdfDocument();
       const mediaNode = {type:'mediaSingle',attrs:{layout:'center'},content:[{type:'media',attrs:{id:data.attachment.id,type:'file',alt:file.name,width:dimensions.width,height:dimensions.height}}]};
       const expand = (document.content || []).find(node => node.type === 'expand');
       if (expand) expand.content.push(mediaNode); else document.content.push(mediaNode);
       $('draftAdfSource').value = JSON.stringify(document,null,2);
-      await renderCurrentAdf();
+      showAdfEditMode();
     }
 
     $('runBtn').addEventListener('click', runReview);
@@ -7409,21 +7585,8 @@ function jiraKeyFromReportPath(reportPath) {
     $('saveDraftBtn').addEventListener('click', () => saveCurrentDraft().catch(error => {
       $('draftStatus').className = 'status error'; $('draftStatus').textContent = error.message;
     }));
-    $('adfPreviewModeBtn').addEventListener('click', () => {
-      if (!mountAtlaskitAdf('preview')) {
-        $('draftAdfPreview').hidden = false;
-        $('draftAdfSource').hidden = true;
-        renderCurrentAdf();
-      }
-    });
-    $('adfEditModeBtn').addEventListener('click', () => {
-      if (!mountAtlaskitAdf('edit')) {
-        $('atlaskitAdfEditor').hidden = true;
-        $('draftAdfPreview').hidden = true;
-        $('draftAdfSource').hidden = false;
-        $('draftAdfSource').focus();
-      }
-    });
+    $('adfPreviewModeBtn').addEventListener('click', () => showAdfPreviewMode());
+    $('adfEditModeBtn').addEventListener('click', showAdfEditMode);
     document.querySelectorAll('[data-adf-insert]').forEach(button => button.addEventListener('click', () => insertAdfNode(button.dataset.adfInsert || 'paragraph')));
     $('draftImageInput').addEventListener('change', event => uploadDraftImage((event.target.files || [])[0]).catch(error => {
       $('draftStatus').className = 'status error'; $('draftStatus').textContent = error.message;

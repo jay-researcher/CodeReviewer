@@ -564,6 +564,10 @@ ADF 节点、层级或属性不符合规则。重点检查：
 - 密码升级为 PBKDF2-SHA256 哈希存储。
 - GIT_VERSION MR 使用独立的发布门禁 LLM 上下文预算，优先保留锁定仓库、Release Gate 和关键 diff，减少重复构建配置导致的超时。
 - 优化 Review Communication 与 Issue Reviews：增加处理说明指引，Finding Handling 使用响应式左右布局，问题标题增加安全留白，Issue History 改为卡片式列表。
+- 进一步统一 Issue Review 内容安全间距；Jira Follow-up 使用独立卡片，提供宽版 Issue Summary、Issue Description 摘要回显和紧凑的 `Edit issue` 弹窗入口。
+- Critical、High 和 Remaining blockers 指标支持点击定位到 Problem List 中第一个匹配的 Finding。
+- ADF Issue Description 默认使用可视化 Block 编辑器，可从工具栏添加组件、拖放排序、编辑或删除；ADF JSON 仅作为隐藏存储格式，不再要求用户直接编辑。
+- Jira Follow-up 弹窗使用语义明确的 `Apply description` / `Save draft` 与 `Cancel` 操作。
 
 ---
 
