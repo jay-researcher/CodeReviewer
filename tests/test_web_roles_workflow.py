@@ -10,6 +10,7 @@ from code_reviewer.web_app import (
     build_review_coverage,
     _manual_pass_readiness,
     _record_finding_handling,
+    _web_user_responsibles,
     _web_user_permissions,
     _web_user_role,
 )
@@ -51,7 +52,22 @@ class WebRolesWorkflowTests(unittest.TestCase):
             self.assertFalse(permissions["run_issue_review"])
             self.assertFalse(permissions["manual_pass"])
 
-    def test_high_finding_requires_fixed_or_not_issue_before_pass(self) -> None:
+    def test_trial_developer_responsible_mapping(self) -> None:
+        profiles = {
+            "gerhard.guo": {"role": "developer", "responsible": ["wen.yi"]},
+            "bryan.tan": {"role": "developer", "responsible": ["wen.yi"]},
+            "vincentgr.wang": {"role": "developer", "responsible": ["kevin.tan"]},
+            "kelvinh.wu": {"role": "developer", "responsible": ["kevin.tan"]},
+        }
+        with patch("code_reviewer.web_app._load_web_users", return_value={}), patch(
+            "code_reviewer.web_app._configured_web_user_profiles", return_value=profiles,
+        ):
+            self.assertEqual(_web_user_responsibles("gerhard.guo"), ["wen.yi"])
+            self.assertEqual(_web_user_responsibles("bryan.tan"), ["wen.yi"])
+            self.assertEqual(_web_user_responsibles("vincentgr.wang"), ["kevin.tan"])
+            self.assertEqual(_web_user_responsibles("kelvinh.wu"), ["kevin.tan"])
+
+    def test_high_finding_requires_clean_rescan_or_leader_not_issue_before_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             report = base / "wen.yi" / "ECHNL-1001_has-issue-high.md"
@@ -63,6 +79,11 @@ class WebRolesWorkflowTests(unittest.TestCase):
 
                 thread = _record_finding_handling(base, report, "dev.user", "1", "fixed", "Fixed and verified")
                 readiness = _manual_pass_readiness(report, thread)
+                self.assertFalse(readiness["ready"])
+
+                with patch("code_reviewer.web_app._web_user_role", return_value="auditor"):
+                    thread = _record_finding_handling(base, report, "wen.yi", "1", "not-issue", "Verified false positive")
+                    readiness = _manual_pass_readiness(report, thread)
                 self.assertTrue(readiness["ready"])
                 self.assertEqual(readiness["blocking_pending"], 0)
 

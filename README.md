@@ -10,6 +10,7 @@ Python MVP for GitLab MR code review based on [the original requirements](docs/r
 - [Jira issue reprocessing and review](docs/JIRA-ISSUE-REPROCESSING.md)
 - [Operations runbook](docs/CodeReviewer-Runbook.md)
 - [RHEL 9 deployment guide](docs/CodeReviewer-RHEL9-Deployment-Guide.md)
+- [Issue Review workflow and local acceptance](docs/CodeReviewer-7.0-Issue-Workflow.md)
 
 ## Run Web App
 
@@ -40,13 +41,15 @@ Open:
 http://127.0.0.1:8765
 ```
 
-The Web UI requires login. Usernames are responsible owner names such as `wen.yi` or `kevin.tan`; passwords are generated locally in:
+The Web UI requires login. Passwords are stored as PBKDF2-SHA256 hashes in:
 
 ```text
 data\web_users.json
 ```
 
-Passwords are 8-character random strong passwords with uppercase, lowercase, digit, and special character. The login page also includes a robot-prevention arithmetic challenge. Treat `data\web_users.json` as sensitive local data.
+New accounts receive a 12-character random initial password. One-time local credentials are written to `data\initial_credentials_20260714.txt`; move or delete that file after secure handoff. The login page also includes a robot-prevention arithmetic challenge. `WEB_USERS_FILE` can move user storage outside the application directory.
+
+Version 7.0 adds role-scoped `Issue Reviews` and `Pending Jira` workspaces. Critical/High findings follow `Handling → Re-scan → Leader Pass`; fixed blockers require a clean later Review Run, Developer `not-issue` decisions require Auditor/Manager approval, and only Manager can record a fully audited Jira follow-up exception. The workflow severity gate is configurable under `app.review_workflow`.
 
 Report History supports online Markdown preview. Click a report name or `Preview` to render it inside the Web UI; use `Raw` or `Download` from the preview panel when the original Markdown file is needed. The preview renders report diff anchors and collapsible `details` blocks, and supports a maximize/restore wide-view modal for reading larger diffs without changing font size. In the maximized modal, use `Previous` / `Next` or left/right arrow keys to switch reports without closing the modal.
 

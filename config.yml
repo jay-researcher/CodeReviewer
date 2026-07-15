@@ -18,11 +18,25 @@ app:
         role: manager
       root:
         role: manager
-      # Add Developer accounts here. Passwords remain generated in data/web_users.json.
-      # developer.name:
-      #   role: developer
-      #   responsible:
-      #     - wen.yi
+      gerhard.guo:
+        role: developer
+        responsible: [wen.yi]
+      bryan.tan:
+        role: developer
+        responsible: [wen.yi]
+      vincentgr.wang:
+        role: developer
+        responsible: [kevin.tan]
+      kelvinh.wu:
+        role: developer
+        responsible: [kevin.tan]
+  review_workflow:
+    blocking_severities: [Critical, High]
+    require_rescan_for_fixed: true
+    follow_up_unblocks_blocking: false
+    manager_override_enabled: true
+    manual_pass_roles: [auditor, manager]
+    not_issue_approval_roles: [auditor, manager]
   review:
     framework: auto
     template_path: D:/TTL/vibe-coding/CodeReviewer/docs/ECHNL-5539.md

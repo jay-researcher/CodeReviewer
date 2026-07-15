@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from . import __version__
 from .config import (
     DATA_DIR,
     ROOT_DIR,
@@ -51,17 +52,21 @@ from .review_service import (
     run_review_from_payload,
 )
 from .storage import load_review_history
+from .adf import ADFValidationError, empty_adf, render_adf_html, validate_adf
+from .workflow_store import blocking_severities, report_fingerprint, workflow_store
 
 
-WEB_USERS_FILE = DATA_DIR / "web_users.json"
-WEB_IP_WHITELIST_FILE = DATA_DIR / "web_ip_whitelist.txt"
-WEB_THREADS_DIR = DATA_DIR / "web_threads"
+WEB_USERS_FILE = Path(os.getenv("WEB_USERS_FILE", str(DATA_DIR / "web_users.json"))).expanduser()
+WEB_IP_WHITELIST_FILE = Path(os.getenv("WEB_IP_WHITELIST_FILE", str(DATA_DIR / "web_ip_whitelist.txt"))).expanduser()
+WEB_THREADS_DIR = Path(os.getenv("WEB_THREADS_DIR", str(DATA_DIR / "web_threads"))).expanduser()
+WEB_STATIC_DIR = ROOT_DIR / "code_reviewer" / "static"
 WEB_SESSION_COOKIE = "code_reviewer_session"
 WEB_SESSIONS: dict[str, dict[str, object]] = {}
 ROBOT_CHALLENGES: dict[str, dict[str, object]] = {}
 WEB_REVIEW_JOBS: dict[str, dict[str, object]] = {}
 WEB_REVIEW_JOBS_LOCK = threading.Lock()
 PASSWORD_SYMBOLS = "!@#$%&*?"
+PASSWORD_HASH_ITERATIONS = 310_000
 SESSION_TTL_SECONDS = 8 * 60 * 60
 CHALLENGE_TTL_SECONDS = 10 * 60
 JOB_TTL_SECONDS = 2 * 60 * 60
@@ -109,6 +114,19 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
                     "version": app_version(),
                 }
             )
+            return
+        if parsed.path == "/assets/adf-editor.js":
+            asset = WEB_STATIC_DIR / "adf-editor.js"
+            if not asset.is_file():
+                self._send_json({"ok": False, "error": "ADF editor asset is not built."}, status=HTTPStatus.NOT_FOUND)
+                return
+            content = asset.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.end_headers()
+            self.wfile.write(content)
             return
         if parsed.path == "/api/projects":
             self._send_json({"projects": list_gitlab_projects_for_user(user)})
@@ -181,6 +199,59 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
                 self._send_json({"history": history})
             except Exception as exc:
                 self._send_json({"history": [], "warning": f"Review history unavailable: {exc}"})
+            return
+        if parsed.path == "/api/issue-reviews":
+            try:
+                _sync_workflow_history()
+                self._send_json({"ok": True, "issues": _workflow_issues_for_user(user)})
+            except Exception as exc:
+                self._send_json({"ok": False, "issues": [], "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path.startswith("/api/issue-reviews/"):
+            jira_key = unquote(parsed.path.removeprefix("/api/issue-reviews/")).strip().upper()
+            try:
+                _sync_workflow_history()
+                _require_issue_access(user, jira_key)
+                detail = workflow_store().issue_detail(jira_key)
+                if not detail:
+                    self._send_json({"ok": False, "error": "Issue review was not found."}, status=HTTPStatus.NOT_FOUND)
+                else:
+                    self._send_json({"ok": True, **detail, "permissions": _web_user_permissions(user), "role": _web_user_role(user)})
+            except PermissionError as exc:
+                self._send_json({"ok": False, "error": str(exc) or "Forbidden"}, status=HTTPStatus.FORBIDDEN)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path == "/api/jira-drafts":
+            try:
+                _sync_workflow_history()
+                drafts = workflow_store().list_drafts()
+                visible = [item for item in drafts if _issue_access_allowed(user, str(item.get("jira_key") or ""))]
+                self._send_json({"ok": True, "drafts": visible})
+            except Exception as exc:
+                self._send_json({"ok": False, "drafts": [], "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path.startswith("/api/draft-attachments/"):
+            attachment_id = unquote(parsed.path.removeprefix("/api/draft-attachments/")).strip()
+            try:
+                attachment = workflow_store().attachment(attachment_id)
+                if not attachment:
+                    self._send_json({"ok": False, "error": "Attachment was not found."}, status=HTTPStatus.NOT_FOUND)
+                    return
+                _require_issue_access(user, str(attachment.get("jira_key") or ""))
+                target = Path(str(attachment.get("storage_path") or ""))
+                if not target.is_file():
+                    self._send_json({"ok": False, "error": "Attachment file was not found."}, status=HTTPStatus.NOT_FOUND)
+                    return
+                content = target.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", str(attachment.get("media_type") or "application/octet-stream"))
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                self.wfile.write(content)
+            except PermissionError as exc:
+                self._send_json({"ok": False, "error": str(exc) or "Forbidden"}, status=HTTPStatus.FORBIDDEN)
             return
         if parsed.path == "/api/review-coverage":
             query = parse_qs(parsed.query)
@@ -300,7 +371,220 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/report-thread/teams-send":
             self._handle_thread_teams_send()
             return
+        if parsed.path == "/api/workflow/handling":
+            self._handle_workflow_handling()
+            return
+        if parsed.path == "/api/workflow/handling/approve":
+            self._handle_workflow_approval()
+            return
+        if parsed.path == "/api/workflow/handling/manager-override":
+            self._handle_workflow_manager_override()
+            return
+        if parsed.path == "/api/workflow/pass":
+            self._handle_workflow_pass()
+            return
+        if parsed.path == "/api/workflow/discussion":
+            self._handle_workflow_discussion()
+            return
+        if parsed.path == "/api/jira-drafts/update":
+            self._handle_jira_draft_update()
+            return
+        if parsed.path == "/api/jira-drafts/attachment":
+            self._handle_jira_draft_attachment()
+            return
+        if parsed.path == "/api/adf/render":
+            self._handle_adf_render()
+            return
+        if parsed.path == "/api/change-password":
+            self._handle_change_password()
+            return
         self._send_json({"ok": False, "error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def _read_json_body(self) -> dict[str, object]:
+        length = int(self.headers.get("Content-Length", "0"))
+        max_length = int(app_config_get("review_workflow.request_max_bytes", 16 * 1024 * 1024) or 16 * 1024 * 1024)
+        if length < 0 or length > max_length:
+            raise ValueError(f"Request body exceeds {max_length} bytes.")
+        payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("JSON request body must be an object.")
+        return payload
+
+    def _handle_workflow_handling(self) -> None:
+        try:
+            payload = self._read_json_body()
+            user = self._current_user()
+            if not _web_user_permissions(user)["submit_handling"]:
+                raise PermissionError("Your role cannot submit handling results.")
+            finding_id = _text(payload.get("finding_id")).strip()
+            scope = workflow_store().finding_scope(finding_id)
+            if not scope:
+                self._send_json({"ok": False, "error": "Finding was not found."}, status=HTTPStatus.NOT_FOUND)
+                return
+            _require_issue_access(user, str(scope.get("jira_key") or ""))
+            result = workflow_store().record_handling(
+                finding_id=finding_id,
+                disposition=_text(payload.get("disposition")),
+                note=_text(payload.get("note")),
+                actor=user,
+                actor_role=_web_user_role(user),
+                jira_summary=_text(payload.get("jira_summary")),
+                jira_description_adf=payload.get("jira_description_adf"),
+            )
+            self._send_json({"ok": True, **result})
+        except PermissionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def _handle_workflow_approval(self) -> None:
+        try:
+            payload = self._read_json_body()
+            user = self._current_user()
+            handling_id = _text(payload.get("handling_id")).strip()
+            scope = workflow_store().handling_scope(handling_id)
+            if not scope:
+                self._send_json({"ok": False, "error": "Handling result was not found."}, status=HTTPStatus.NOT_FOUND)
+                return
+            _require_issue_access(user, str(scope.get("jira_key") or ""))
+            workflow_store().approve_handling(
+                handling_id, user, _web_user_role(user),
+                approved=bool(payload.get("approved", True)), reason=_text(payload.get("reason")),
+            )
+            self._send_json({"ok": True})
+        except PermissionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def _handle_workflow_manager_override(self) -> None:
+        try:
+            payload = self._read_json_body()
+            user = self._current_user()
+            if _web_user_role(user) != "manager":
+                raise PermissionError("Only Manager can record a blocking exception.")
+            if not bool(app_config_get("review_workflow.manager_override_enabled", True)):
+                raise PermissionError("Manager exception is disabled by workflow policy.")
+            handling_id = _text(payload.get("handling_id")).strip()
+            scope = workflow_store().handling_scope(handling_id)
+            if not scope:
+                self._send_json({"ok": False, "error": "Handling result was not found."}, status=HTTPStatus.NOT_FOUND)
+                return
+            workflow_store().manager_override(handling_id, user, _text(payload.get("reason")))
+            self._send_json({"ok": True})
+        except PermissionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def _handle_workflow_pass(self) -> None:
+        try:
+            payload = self._read_json_body()
+            user = self._current_user()
+            jira_key = _text(payload.get("jira_key")).strip().upper()
+            _require_issue_access(user, jira_key)
+            result = workflow_store().manual_pass(jira_key, user, _web_user_role(user), _text(payload.get("note")))
+            self._send_json({"ok": True, **result})
+        except PermissionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+
+    def _handle_workflow_discussion(self) -> None:
+        try:
+            payload = self._read_json_body()
+            user = self._current_user()
+            jira_key = _text(payload.get("jira_key")).strip().upper()
+            _require_issue_access(user, jira_key)
+            discussion_id = workflow_store().add_discussion(
+                jira_key, user, _text(payload.get("message")),
+                run_id=_text(payload.get("run_id")), finding_id=_text(payload.get("finding_id")), kind=_text(payload.get("kind")) or "comment",
+            )
+            self._send_json({"ok": True, "discussion_id": discussion_id})
+        except PermissionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def _handle_jira_draft_update(self) -> None:
+        try:
+            payload = self._read_json_body()
+            user = self._current_user()
+            draft_id = _text(payload.get("draft_id")).strip()
+            scope = workflow_store().draft_scope(draft_id)
+            if not scope:
+                self._send_json({"ok": False, "error": "Jira draft was not found."}, status=HTTPStatus.NOT_FOUND)
+                return
+            _require_issue_access(user, str(scope.get("jira_key") or ""))
+            result = workflow_store().update_draft(
+                draft_id, _text(payload.get("summary")), payload.get("description_adf"), user, int(payload.get("version") or 0),
+            )
+            self._send_json({"ok": True, "draft": result})
+        except PermissionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+        except RuntimeError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def _handle_jira_draft_attachment(self) -> None:
+        try:
+            payload = self._read_json_body()
+            user = self._current_user()
+            draft_id = _text(payload.get("draft_id")).strip()
+            scope = workflow_store().draft_scope(draft_id)
+            if not scope:
+                self._send_json({"ok": False, "error": "Jira draft was not found."}, status=HTTPStatus.NOT_FOUND)
+                return
+            _require_issue_access(user, str(scope.get("jira_key") or ""))
+            result = workflow_store().save_draft_attachment(
+                draft_id,
+                file_name=_text(payload.get("file_name")),
+                media_type=_text(payload.get("media_type")),
+                content_base64=_text(payload.get("content_base64")),
+                actor=user,
+            )
+            self._send_json({"ok": True, "attachment": result})
+        except PermissionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def _handle_adf_render(self) -> None:
+        try:
+            payload = self._read_json_body()
+            document = validate_adf(payload.get("document"))
+            media_urls = payload.get("media_urls") if isinstance(payload.get("media_urls"), dict) else {}
+            self._send_json({"ok": True, "html": render_adf_html(document, media_urls)})
+        except ADFValidationError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def _handle_change_password(self) -> None:
+        try:
+            payload = self._read_json_body()
+            user = self._current_user()
+            current = _text(payload.get("current_password")).strip()
+            new_password = _text(payload.get("new_password")).strip()
+            if len(new_password) < 12 or not _strong_password(new_password):
+                raise ValueError("New password must contain at least 12 characters with upper/lower case, number, and symbol.")
+            users = _load_web_users()
+            canonical, record = _find_web_user(users, user)
+            if not record:
+                raise ValueError("User was not found.")
+            encoded = str(record.get("password_hash") or "")
+            legacy = str(record.get("password") or "")
+            if not (verify_web_password(current, encoded) if encoded else hmac.compare_digest(current, legacy)):
+                raise ValueError("Current password is incorrect.")
+            record["password_hash"] = hash_web_password(new_password)
+            record.pop("password", None)
+            record["must_change_password"] = False
+            record["password_changed_at"] = datetime.now().isoformat(timespec="seconds")
+            WEB_USERS_FILE.write_text(json.dumps({"users": users}, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._send_json({"ok": True, "username": canonical})
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"{self.address_string()} - {format % args}")
@@ -1814,13 +2098,14 @@ def _record_finding_handling(
 
 
 def _handling_summary(findings: list[dict[str, str]], handling: dict[str, object]) -> dict[str, int]:
-    blocking = [item for item in findings if item.get("severity") in {"Critical", "High"}]
+    blocking = [item for item in findings if str(item.get("severity") or "").title() in blocking_severities()]
     completed = [item for item in findings if item.get("index") in handling]
     blocking_completed = [
         item
         for item in blocking
         if isinstance(handling.get(item.get("index", "")), dict)
-        and str(handling[item["index"]].get("disposition") or "") in {"fixed", "not-issue"}
+        and str(handling[item["index"]].get("disposition") or "") == "not-issue"
+        and _web_user_role(str(handling[item["index"]].get("user") or "")) in {"auditor", "manager"}
     ]
     return {
         "total": len(findings),
@@ -1842,19 +2127,20 @@ def _manual_pass_readiness(
     summary = _handling_summary(findings, handling)
     pending = []
     for item in findings:
-        if item.get("severity") not in {"Critical", "High"}:
+        if str(item.get("severity") or "").title() not in blocking_severities():
             continue
         result = handling.get(item.get("index", ""))
         disposition = str(result.get("disposition") or "") if isinstance(result, dict) else ""
-        if disposition not in {"fixed", "not-issue"}:
+        actor_role = _web_user_role(str(result.get("user") or "")) if isinstance(result, dict) else ""
+        if disposition != "not-issue" or actor_role not in {"auditor", "manager"}:
             pending.append(item)
     ready = not pending
     return {
         "ready": ready,
         "message": (
-            "All Critical/High findings have acceptable handling results."
+            "All Critical/High findings are absent after re-scan or approved as Not an issue."
             if ready
-            else f"{len(pending)} Critical/High finding(s) still require Fixed or Not an issue handling before Review Pass."
+            else f"{len(pending)} Critical/High finding(s) still require a clean re-scan or Auditor/Manager Not an issue approval."
         ),
         "pending_blockers": pending,
         **summary,
@@ -2225,6 +2511,72 @@ def _web_user_permissions(user: str) -> dict[str, bool]:
     }
 
 
+def _issue_access_allowed(user: str, jira_key: str) -> bool:
+    if _web_user_permissions(user)["view_all"]:
+        return True
+    detail = workflow_store().issue_detail((jira_key or "").strip().upper())
+    if not detail:
+        return False
+    issue = detail.get("issue") if isinstance(detail.get("issue"), dict) else {}
+    owners = {item.lower() for item in _split_people(str(issue.get("responsible") or ""))}
+    allowed = {item.lower() for item in _web_user_responsibles(user)}
+    return bool(owners & allowed)
+
+
+def _require_issue_access(user: str, jira_key: str) -> None:
+    if not _issue_access_allowed(user, jira_key):
+        raise PermissionError("You do not have access to this Issue Review.")
+
+
+def _workflow_issues_for_user(user: str) -> list[dict[str, object]]:
+    permissions = _web_user_permissions(user)
+    return workflow_store().list_issues(
+        responsibles=_web_user_responsibles(user),
+        view_all=permissions["view_all"],
+    )
+
+
+def _sync_workflow_history(limit: int = 10000) -> None:
+    entries = sorted(load_review_history(limit=limit), key=lambda item: str(item.get("reviewed_at") or ""))
+    store = workflow_store()
+    registered = store.registered_run_fingerprints()
+    for entry in entries:
+        report_path = Path(str(entry.get("report_path") or ""))
+        if not report_path.is_file():
+            continue
+        jira_key = str(entry.get("jira_key") or "").strip().upper()
+        if not jira_key:
+            match = re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", report_path.name.upper())
+            jira_key = match.group(0) if match else ""
+        if not jira_key:
+            continue
+        fingerprint = report_fingerprint(str(report_path))
+        if (jira_key, fingerprint) in registered:
+            continue
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        summary = str(metadata.get("jira_summary") or "")
+        responsible = str(metadata.get("responsible") or metadata.get("web_report_owner") or report_path.parent.name)
+        findings = _extract_report_findings(report_path.read_text(encoding="utf-8", errors="ignore"))
+        store.register_run(
+            jira_key=jira_key,
+            report_path=str(report_path),
+            findings=findings,
+            summary=summary,
+            responsible=responsible,
+            conclusion=str(entry.get("conclusion") or ""),
+            created_at=str(entry.get("reviewed_at") or ""),
+        )
+        registered.add((jira_key, fingerprint))
+    if WEB_THREADS_DIR.is_dir():
+        for thread_path in WEB_THREADS_DIR.glob("*.json"):
+            try:
+                thread = json.loads(thread_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(thread, dict):
+                store.import_legacy_thread(str(thread.get("report") or ""), thread)
+
+
 def _canonical_people_text(value: str) -> str:
     return "+".join(sorted(dict.fromkeys(_split_people(value)), key=str.lower))
 
@@ -2347,6 +2699,7 @@ def _download_name(value: str) -> str:
 
 def ensure_web_users() -> dict[str, dict[str, str]]:
     ensure_directories()
+    WEB_USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
     users = _load_web_users()
     changed = False
     expected = _responsible_usernames()
@@ -2360,15 +2713,24 @@ def ensure_web_users() -> dict[str, dict[str, str]]:
         configured_role = str((_configured_web_user_profiles().get(username) or {}).get("role") or "").strip().lower()
         assigned_role = configured_role if configured_role in WEB_ROLES else _default_web_user_role(username)
         if username not in users:
+            initial_password = generate_strong_password(12)
             users[username] = {
                 "username": username,
-                "password": generate_strong_password(),
+                "password_hash": hash_web_password(initial_password),
                 "role": assigned_role,
+                "must_change_password": True,
                 "created_at": datetime.now().isoformat(timespec="seconds"),
             }
+            _append_initial_credential(username, initial_password)
             changed = True
         elif str(users[username].get("role") or "").strip().lower() != assigned_role:
             users[username]["role"] = assigned_role
+            changed = True
+    for record in users.values():
+        legacy_password = str(record.get("password") or "")
+        if legacy_password and not record.get("password_hash"):
+            record["password_hash"] = hash_web_password(legacy_password)
+            record.pop("password", None)
             changed = True
     if changed or not WEB_USERS_FILE.exists():
         WEB_USERS_FILE.write_text(json.dumps({"users": users}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2405,7 +2767,7 @@ def _responsible_usernames() -> set[str]:
     return names
 
 
-def generate_strong_password(length: int = 8) -> str:
+def generate_strong_password(length: int = 12) -> str:
     if length < 8:
         raise ValueError("Password length must be at least 8.")
     groups = [
@@ -2424,12 +2786,38 @@ def generate_strong_password(length: int = 8) -> str:
 
 def _strong_password(password: str) -> bool:
     return (
-        len(password) == 8
+        len(password) >= 8
         and any(char.isupper() for char in password)
         and any(char.islower() for char in password)
         and any(char.isdigit() for char in password)
         and any(char in PASSWORD_SYMBOLS for char in password)
     )
+
+
+def hash_web_password(password: str, *, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_HASH_ITERATIONS)
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def verify_web_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations, salt_hex, expected = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(iterations))
+        return hmac.compare_digest(digest.hex(), expected)
+    except (TypeError, ValueError):
+        return False
+
+
+def _append_initial_credential(username: str, password: str) -> None:
+    path = WEB_USERS_FILE.parent / "initial_credentials_20260714.txt"
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    if any(line.startswith(f"{username}=") for line in existing.splitlines()):
+        return
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{username}={password}\n")
 
 
 def new_robot_challenge() -> dict[str, str]:
@@ -2458,7 +2846,10 @@ def authenticate_web_user(username: str, password: str, challenge_id: str, robot
     canonical_username, user = _find_web_user(users, username)
     if not user:
         return False, "Invalid username or password.", ""
-    if not hmac.compare_digest(str(user.get("password") or ""), password.strip()):
+    encoded = str(user.get("password_hash") or "")
+    legacy = str(user.get("password") or "")
+    password_matches = verify_web_password(password.strip(), encoded) if encoded else hmac.compare_digest(legacy, password.strip())
+    if not password_matches:
         return False, "Invalid username or password.", ""
     ROBOT_CHALLENGES.pop(challenge_id, None)
     return True, "", canonical_username
@@ -2516,13 +2907,7 @@ def _int_query(query: dict[str, list[str]], name: str, default: int) -> int:
 
 
 def app_version() -> str:
-    requirement = Path(os.getenv("CODE_REVIEW_REQUIREMENT_FILE", r"D:\TTL\code-review\code_review_requirement.md"))
-    try:
-        text = requirement.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return "unknown"
-    match = re.search(r"^Version:\s*([^\s]+)", text, re.M)
-    return match.group(1).strip() if match else "unknown"
+    return os.getenv("CODE_REVIEW_APP_VERSION", __version__).strip() or __version__
 
 
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -2715,7 +3100,7 @@ def render_login() -> str:
     </label>
     <label>Password
       <span class="password-field">
-        <input id="password" type="password" autocomplete="current-password" placeholder="8-character password">
+        <input id="password" type="password" autocomplete="current-password" placeholder="Password">
         <button id="togglePassword" class="inline-button password-toggle" type="button" aria-label="Show password" aria-pressed="false">Show</button>
       </span>
     </label>
@@ -2828,6 +3213,7 @@ def render_index(user: str = "") -> str:
             <input id="jiraFilter" placeholder="12345">
           </label>""" if is_admin else ""
     input_grid_class = "grid" if is_admin else "grid jira-only"
+    adf_asset = '<script src="/assets/adf-editor.js"></script>' if (WEB_STATIC_DIR / "adf-editor.js").is_file() else ""
     run_hint = (
         "Input a Jira filter ID, Sprint, or one Jira issue for consolidated MR review."
         if is_admin
@@ -4323,6 +4709,73 @@ def render_index(user: str = "") -> str:
       pre { min-height: 320px; }
       .grid { grid-template-columns: 1fr; }
     }
+    .workflow-launch { min-height: 34px; padding: 6px 10px; }
+    .workflow-modal {
+      position: fixed; inset: 0; z-index: 1200; padding: 20px;
+      background: color-mix(in srgb, #07111f 68%, transparent);
+    }
+    .workflow-dialog {
+      width: min(1680px, 100%); height: calc(100vh - 40px); margin: 0 auto;
+      display: grid; grid-template-rows: auto 1fr; overflow: hidden;
+      border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+      box-shadow: 0 24px 80px rgba(0,0,0,.28);
+    }
+    .workflow-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 16px 20px; border-bottom: 1px solid var(--line);
+    }
+    .workflow-head h2, .workflow-head p { margin: 0; }
+    .workflow-body { min-height: 0; display: grid; grid-template-columns: minmax(340px, 38%) 1fr; }
+    .workflow-list-pane { min-height: 0; overflow: auto; padding: 16px; border-right: 1px solid var(--line); }
+    .workflow-detail-pane { min-height: 0; overflow: auto; padding: 20px; background: color-mix(in srgb, var(--bg) 55%, var(--panel)); }
+    .workflow-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
+    .workflow-toolbar input { flex: 1; }
+    .issue-review-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .issue-review-table th { position: sticky; top: 0; z-index: 2; background: var(--panel); color: var(--muted); text-align: left; }
+    .issue-review-table th, .issue-review-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .issue-review-row { cursor: pointer; }
+    .issue-review-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+    .status-chip, .severity-chip, .handling-chip {
+      display: inline-flex; align-items: center; min-height: 24px; padding: 2px 8px;
+      border-radius: 999px; border: 1px solid var(--line); font-size: 12px; white-space: nowrap;
+    }
+    .status-chip[data-status="passed"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+    .status-chip[data-status="handling"], .status-chip[data-status="rescan-required"] { color: #b54708; }
+    .severity-chip.critical { color: #b42318; font-weight: 700; }
+    .severity-chip.high { color: #c2410c; font-weight: 700; }
+    .issue-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    .issue-hero h2 { margin: 0 0 5px; font-size: 21px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(4,minmax(120px,1fr)); gap: 10px; margin: 14px 0; }
+    .metric-card { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .metric-card strong { display: block; margin-top: 4px; font-size: 20px; }
+    .workflow-tabs { display: flex; gap: 6px; margin: 16px 0 10px; border-bottom: 1px solid var(--line); }
+    .workflow-tab { border: 0; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); }
+    .workflow-tab.active { color: var(--accent-strong); border-bottom: 2px solid var(--accent); }
+    .finding-card, .timeline-card, .draft-card, .discussion-card {
+      margin-bottom: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    }
+    .finding-head, .draft-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .finding-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
+    .finding-actions textarea { min-height: 74px; }
+    .followup-fields { display: grid; gap: 8px; margin-top: 9px; }
+    .adf-editor-shell { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+    .adf-toolbar { display: flex; gap: 5px; flex-wrap: wrap; padding: 8px; border-bottom: 1px solid var(--line); }
+    .adf-toolbar button { min-height: 30px; padding: 4px 8px; font-size: 12px; }
+    .adf-source { min-height: 260px; border: 0; border-radius: 0; font-family: Consolas,monospace; }
+    .adf-preview { min-height: 260px; padding: 16px; overflow: auto; }
+    .adf-preview table { width: 100%; border-collapse: collapse; }
+    .adf-preview th, .adf-preview td { border: 1px solid var(--line); padding: 8px; }
+    .adf-expand { margin: 10px 0; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; }
+    .adf-media { display: block; max-width: 100%; height: auto; border-radius: 6px; }
+    .draft-editor-grid { display: grid; grid-template-columns: minmax(360px,1fr) minmax(360px,1fr); gap: 14px; }
+    @media (max-width: 900px) {
+      .workflow-modal { padding: 8px; }
+      .workflow-dialog { height: calc(100vh - 16px); }
+      .workflow-body { grid-template-columns: 1fr; }
+      .workflow-list-pane { max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
+      .metric-grid { grid-template-columns: repeat(2,1fr); }
+      .draft-editor-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -4330,6 +4783,8 @@ def render_index(user: str = "") -> str:
     <div class="topbar">
       <h1>CodeReviewer</h1>
       <div class="meta topbar-meta">
+        <button id="issueReviewsBtn" class="secondary workflow-launch" type="button">Issue Reviews</button>
+        <button id="pendingJiraBtn" class="secondary workflow-launch" type="button">Pending Jira</button>
         <span>Version <strong id="appVersion">__APP_VERSION__</strong></span>
         <span><strong id="currentRole">__CURRENT_ROLE__</strong> · Signed in as <strong id="currentUser">__CURRENT_USER__</strong> · <a href="/logout">Logout</a></span>
       </div>
@@ -4447,6 +4902,57 @@ __SPRINT_FIELD__
 __ADMIN_TRACE_SECTION__
     </div>
   </main>
+
+  <div id="issueReviewModal" class="workflow-modal" hidden>
+    <div class="workflow-dialog" role="dialog" aria-modal="true" aria-labelledby="issueReviewTitle">
+      <div class="workflow-head">
+        <div><h2 id="issueReviewTitle">Issues Review History</h2><p class="meta">ECHNL Issue lifecycle, handling, re-scan and Pass readiness.</p></div>
+        <div class="actions"><button id="refreshIssueReviewsBtn" class="secondary small-action" type="button">Refresh</button><button id="closeIssueReviewsBtn" class="icon-action" type="button" aria-label="Close">&#x2715;</button></div>
+      </div>
+      <div class="workflow-body">
+        <section class="workflow-list-pane">
+          <div class="workflow-toolbar"><input id="issueReviewSearch" placeholder="Search ECHNL, summary, responsible"><span id="issueReviewCount" class="count-pill">0</span></div>
+          <div id="issueReviewList" class="meta">Loading Issue Reviews...</div>
+        </section>
+        <section id="issueReviewDetail" class="workflow-detail-pane"><div class="markdown-preview empty">Select an ECHNL Issue to inspect its Review history.</div></section>
+      </div>
+    </div>
+  </div>
+
+  <div id="draftEditorModal" class="workflow-modal" hidden>
+    <div class="workflow-dialog" role="dialog" aria-modal="true" aria-labelledby="draftEditorTitle">
+      <div class="workflow-head">
+        <div><h2 id="draftEditorTitle">Pending Jira</h2><p id="draftEditorMeta" class="meta">ADF-native Issue Description</p></div>
+        <div class="actions"><button id="saveDraftBtn" type="button">Save Draft</button><button id="closeDraftEditorBtn" class="icon-action" type="button" aria-label="Close">&#x2715;</button></div>
+      </div>
+      <div class="workflow-detail-pane">
+        <div id="pendingDraftList"></div>
+        <div id="draftEditorForm" hidden>
+          <label>Issue Summary<input id="draftSummary" maxlength="255"></label>
+          <div class="adf-editor-shell">
+            <div class="adf-toolbar">
+              <button class="secondary" type="button" data-adf-insert="paragraph">Paragraph</button>
+              <button class="secondary" type="button" data-adf-insert="heading">Heading</button>
+              <button class="secondary" type="button" data-adf-insert="bulletList">Bullet list</button>
+              <button class="secondary" type="button" data-adf-insert="orderedList">Ordered list</button>
+              <button class="secondary" type="button" data-adf-insert="table">Table</button>
+              <button class="secondary" type="button" data-adf-insert="expand">Expand</button>
+              <button class="secondary" type="button" data-adf-insert="nestedExpand">Nested Expand</button>
+              <label class="secondary small-action" style="display:inline-flex;margin:0;cursor:pointer">Screenshot<input id="draftImageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden></label>
+              <button id="adfEditModeBtn" class="secondary" type="button">Edit</button>
+              <button id="adfPreviewModeBtn" class="secondary" type="button">Preview</button>
+            </div>
+            <div class="draft-editor-grid">
+              <textarea id="draftAdfSource" class="adf-source" spellcheck="false"></textarea>
+              <div id="atlaskitAdfEditor" class="adf-preview" hidden></div>
+              <div id="draftAdfPreview" class="adf-preview meta">Choose Preview to render the ADF document.</div>
+            </div>
+          </div>
+          <div id="draftStatus" class="status"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div id="previewModal" class="preview-modal-backdrop" hidden>
     <div class="preview-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
@@ -4651,6 +5157,7 @@ __ADMIN_TRACE_SECTION__
     </div>
   </div>
 
+  __ADF_ASSET__
   <script>
     const $ = (id) => document.getElementById(id);
     let currentOutputDir = '';
@@ -4798,7 +5305,12 @@ __ADMIN_TRACE_SECTION__
       if ($('currentRole')) $('currentRole').textContent = currentUserRole.charAt(0).toUpperCase() + currentUserRole.slice(1);
       if ($('appVersion') && data.version) $('appVersion').textContent = data.version;
       currentUserIsAdmin = Boolean(data.is_admin);
-      if ($('runBtn') && !currentPermissions.run_issue_review) $('runBtn').disabled = true;
+      if ($('runBtn')) $('runBtn').hidden = !currentPermissions.run_issue_review;
+      if ($('runPanel') && !currentPermissions.run_issue_review) {
+        $('runPanel').hidden = true;
+        const previewPanel = document.querySelector('.preview-panel');
+        if (previewPanel) previewPanel.style.gridColumn = '2 / 4';
+      }
       if ($('coverageBtn')) $('coverageBtn').hidden = !currentPermissions.scan_coverage;
       for (const button of document.querySelectorAll('[data-thread-tab="chat"]')) button.hidden = !currentPermissions.ai_chat;
       for (const button of document.querySelectorAll('[data-thread-tab="teams"]')) button.hidden = !currentPermissions.teams_delivery;
@@ -6518,7 +7030,350 @@ function jiraKeyFromReportPath(reportPath) {
       }[char]));
     }
 
+    let issueReviews = [];
+    let selectedIssueReview = null;
+    let currentJiraDraft = null;
+
+    function openIssueReviews() {
+      $('issueReviewModal').hidden = false;
+      loadIssueReviews();
+    }
+
+    function closeIssueReviews() {
+      $('issueReviewModal').hidden = true;
+    }
+
+    async function loadIssueReviews() {
+      $('issueReviewList').textContent = 'Loading Issue Reviews...';
+      try {
+        const data = await fetchJson('/api/issue-reviews');
+        issueReviews = data.issues || [];
+        renderIssueReviews();
+        if (selectedIssueReview) await loadIssueReviewDetail(selectedIssueReview);
+      } catch (error) {
+        $('issueReviewList').textContent = error.message;
+      }
+    }
+
+    function renderIssueReviews() {
+      const query = ($('issueReviewSearch').value || '').trim().toLowerCase();
+      const rows = issueReviews.filter(item => [item.jira_key, item.summary, item.responsible, item.status].join(' ').toLowerCase().includes(query));
+      $('issueReviewCount').textContent = String(rows.length);
+      if (!rows.length) {
+        $('issueReviewList').innerHTML = '<div class="markdown-preview empty">No Issue Review records match this scope.</div>';
+        return;
+      }
+      $('issueReviewList').innerHTML = `<table class="issue-review-table"><thead><tr><th>Issue</th><th>Status</th><th>Handling</th><th>Updated</th></tr></thead><tbody>${rows.map(item => {
+        const counts = item.handling_counts || {};
+        return `<tr class="issue-review-row" data-jira="${escapeHtml(item.jira_key)}">
+          <td><strong>${escapeHtml(item.jira_key)}</strong><div>${escapeHtml(item.summary || 'No summary')}</div><div class="meta">${escapeHtml(item.responsible || '-')}</div></td>
+          <td><span class="status-chip" data-status="${escapeHtml(item.status)}">${escapeHtml(statusLabel(item.status))}</span><div class="meta">Run ${escapeHtml(item.run_number || '-')} · ${escapeHtml(item.finding_count || 0)} findings</div></td>
+          <td><span class="handling-chip">Fixed ${counts.fixed || 0}</span> <span class="handling-chip">Jira ${counts['follow-up'] || 0}</span> <span class="handling-chip">Not issue ${counts['not-issue'] || 0}</span><div class="meta">Pending ${counts.pending || 0}</div></td>
+          <td>${escapeHtml(formatDateTime(item.updated_at))}</td>
+        </tr>`;
+      }).join('')}</tbody></table>`;
+      document.querySelectorAll('.issue-review-row').forEach(row => row.addEventListener('click', () => loadIssueReviewDetail(row.dataset.jira || '')));
+    }
+
+    function statusLabel(value) {
+      return String(value || 'not-reviewed').split('-').map(part => part ? part[0].toUpperCase() + part.slice(1) : '').join(' ');
+    }
+
+    function formatDateTime(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+    }
+
+    async function loadIssueReviewDetail(jiraKey) {
+      selectedIssueReview = jiraKey;
+      $('issueReviewDetail').innerHTML = '<div class="markdown-preview empty">Loading Issue Review...</div>';
+      try {
+        const data = await fetchJson(`/api/issue-reviews/${encodeURIComponent(jiraKey)}`);
+        renderIssueReviewDetail(data);
+      } catch (error) {
+        $('issueReviewDetail').innerHTML = `<div class="status error">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function renderIssueReviewDetail(data) {
+      const issue = data.issue || {};
+      const runs = data.runs || [];
+      const latest = runs[0] || { findings: [] };
+      const findings = latest.findings || [];
+      const readiness = data.pass_readiness || {};
+      const severity = latest.severity_counts || {};
+      const discussions = data.discussions || [];
+      const drafts = data.drafts || [];
+      const canPass = Boolean((data.permissions || {}).manual_pass);
+      const canReview = Boolean((data.permissions || {}).run_issue_review);
+      $('issueReviewDetail').innerHTML = `
+        <div class="issue-hero"><div><h2>${escapeHtml(issue.jira_key)} · ${escapeHtml(issue.summary || 'Issue Review')}</h2><div class="meta">Responsible: ${escapeHtml(issue.responsible || '-')} · Latest Run ${escapeHtml(latest.run_number || '-')} · Updated ${escapeHtml(formatDateTime(issue.updated_at))}</div></div><span class="status-chip" data-status="${escapeHtml(issue.status)}">${escapeHtml(statusLabel(issue.status))}</span></div>
+        <div class="metric-grid">
+          <div class="metric-card"><span class="meta">Critical</span><strong>${severity.Critical || 0}</strong></div>
+          <div class="metric-card"><span class="meta">High</span><strong>${severity.High || 0}</strong></div>
+          <div class="metric-card"><span class="meta">Remaining blockers</span><strong>${(readiness.pending_blockers || []).length}</strong></div>
+          <div class="metric-card"><span class="meta">Manager exceptions</span><strong>${readiness.manager_exceptions || 0}</strong></div>
+        </div>
+        <div class="actions">
+          ${canReview ? '<button id="issueRescanBtn" class="secondary" type="button">Re-scan Issue</button>' : ''}
+          ${canPass ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : 'disabled'}>Manual Pass</button>` : ''}
+          <span class="meta">${escapeHtml(readiness.message || '')}</span>
+        </div>
+        <div class="workflow-tabs"><button class="workflow-tab active" type="button">Problems</button><button class="workflow-tab" type="button">Discuss (${discussions.length})</button><button class="workflow-tab" type="button">History (${runs.length})</button><button class="workflow-tab" type="button">Pending Jira (${drafts.length})</button></div>
+        <section><h3>Problem list · Run ${escapeHtml(latest.run_number || '-')}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role)).join('') : '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>'}</section>
+        <section><h3>Discuss</h3><div>${discussions.length ? discussions.map(item => `<div class="discussion-card"><strong>${escapeHtml(item.author)}</strong><span class="meta"> · ${escapeHtml(formatDateTime(item.created_at))}</span><p>${escapeHtml(item.message)}</p></div>`).join('') : '<div class="meta">No discussion yet.</div>'}</div><div class="finding-actions"><textarea id="issueDiscussionInput" placeholder="Discuss this Review Run or ask for clarification."></textarea><button id="sendIssueDiscussionBtn" class="secondary" type="button">Send</button></div></section>
+        <section><h3>Review Run History</h3>${runs.map(run => `<div class="timeline-card"><strong>Run ${escapeHtml(run.run_number)}</strong> · ${escapeHtml(formatDateTime(run.created_at))}<div class="meta">${escapeHtml(run.conclusion || 'Completed')} · ${escapeHtml(run.report_path || '')}</div><div>${(run.findings || []).filter(item => item.lineage_state === 'new').length} New · ${(run.findings || []).filter(item => item.lineage_state === 'persisting').length} Persisting</div></div>`).join('')}</section>
+        <section><h3>Pending Jira</h3>${drafts.length ? drafts.map(renderDraftCard).join('') : '<div class="meta">No Jira follow-up drafts.</div>'}</section>`;
+      $('issueReviewDetail').querySelectorAll('[data-handle-finding]').forEach(button => button.addEventListener('click', () => submitWorkflowHandling(button.dataset.handleFinding || '')));
+      $('issueReviewDetail').querySelectorAll('[data-finding-disposition]').forEach(select => {
+        const sync = () => { const fields = $(`followup-${select.dataset.findingDisposition}`); if (fields) fields.hidden = select.value !== 'follow-up'; };
+        select.addEventListener('change', sync); sync();
+      });
+      $('issueReviewDetail').querySelectorAll('[data-compose-adf]').forEach(button => button.addEventListener('click', () => openHandlingAdfComposer(button.dataset.composeAdf || '')));
+      $('issueReviewDetail').querySelectorAll('[data-approve-handling]').forEach(button => button.addEventListener('click', () => approveWorkflowHandling(button.dataset.approveHandling || '', true)));
+      $('issueReviewDetail').querySelectorAll('[data-override-handling]').forEach(button => button.addEventListener('click', () => managerOverrideHandling(button.dataset.overrideHandling || '')));
+      $('issueReviewDetail').querySelectorAll('[data-edit-draft]').forEach(button => button.addEventListener('click', () => openDraftById(button.dataset.editDraft || '', drafts)));
+      if ($('issueRescanBtn')) $('issueRescanBtn').addEventListener('click', () => {
+        closeIssueReviews();
+        $('jira').value = issue.jira_key;
+        runReview();
+      });
+      if ($('issuePassBtn')) $('issuePassBtn').addEventListener('click', () => manualWorkflowPass(issue.jira_key));
+      if ($('sendIssueDiscussionBtn')) $('sendIssueDiscussionBtn').addEventListener('click', () => sendWorkflowDiscussion(issue.jira_key, latest.id || ''));
+    }
+
+    function renderWorkflowFinding(finding, role) {
+      const handling = finding.handling || null;
+      const severityClass = String(finding.severity || '').toLowerCase();
+      const needsApproval = handling && handling.approval_status === 'pending';
+      const isManager = role === 'manager';
+      return `<article class="finding-card"><div class="finding-head"><div><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta">${escapeHtml(finding.file_path || 'No file')} · ${escapeHtml(statusLabel(finding.lineage_state))}</div></div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : ''}</div>
+        ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-actions"><select id="disposition-${finding.id}" data-finding-disposition="${finding.id}"><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select><textarea id="note-${finding.id}" placeholder="Required handling explanation"></textarea><div id="followup-${finding.id}" class="followup-fields" hidden><input id="jira-summary-${finding.id}" placeholder="Issue Summary (required for follow-up)"><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('Describe the follow-up requirement.')))}</textarea><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit Issue Description (ADF)</button><span id="jira-adf-status-${finding.id}" class="meta">ADF description not reviewed.</span></div><button data-handle-finding="${finding.id}" type="button">Submit handling</button></div>`}
+      </article>`;
+    }
+
+    function renderDraftCard(draft) {
+      return `<article class="draft-card"><div class="draft-head"><div><strong>${escapeHtml(draft.summary)}</strong><div class="meta">${escapeHtml(draft.jira_key)} · ${escapeHtml(statusLabel(draft.status))} · v${escapeHtml(draft.version)}</div></div><button class="secondary small-action" data-edit-draft="${draft.id}" type="button">View / Edit</button></div></article>`;
+    }
+
+    function textToAdf(value) {
+      return {version: 1, type: 'doc', content: String(value || '').split(/\\r?\\n/).map(line => ({type: 'paragraph', content: line ? [{type: 'text', text: line}] : []}))};
+    }
+
+    async function submitWorkflowHandling(findingId) {
+      const disposition = $(`disposition-${findingId}`).value;
+      const payload = {finding_id: findingId, disposition, note: $(`note-${findingId}`).value};
+      if (disposition === 'follow-up') {
+        payload.jira_summary = $(`jira-summary-${findingId}`).value;
+        payload.jira_description_adf = JSON.parse($(`jira-adf-${findingId}`).value);
+      }
+      await fetchJson('/api/workflow/handling', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      await loadIssueReviewDetail(selectedIssueReview);
+    }
+
+    async function approveWorkflowHandling(handlingId, approved) {
+      const reason = window.prompt(approved ? 'Approval note' : 'Rejection reason', 'Verified by Leader') || '';
+      await fetchJson('/api/workflow/handling/approve', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({handling_id:handlingId, approved, reason})});
+      await loadIssueReviewDetail(selectedIssueReview);
+    }
+
+    async function managerOverrideHandling(handlingId) {
+      const reason = window.prompt('Manager exception reason (required)') || '';
+      if (!reason.trim()) return;
+      await fetchJson('/api/workflow/handling/manager-override', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({handling_id:handlingId, reason})});
+      await loadIssueReviewDetail(selectedIssueReview);
+    }
+
+    async function manualWorkflowPass(jiraKey) {
+      const note = window.prompt('Manual Pass note', 'All configured blocking findings have been reviewed.') || '';
+      await fetchJson('/api/workflow/pass', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({jira_key:jiraKey, note})});
+      await loadIssueReviewDetail(jiraKey);
+      await loadIssueReviews();
+    }
+
+    async function sendWorkflowDiscussion(jiraKey, runId) {
+      const message = $('issueDiscussionInput').value.trim();
+      if (!message) return;
+      await fetchJson('/api/workflow/discussion', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({jira_key:jiraKey, run_id:runId, message})});
+      await loadIssueReviewDetail(jiraKey);
+    }
+
+    async function openPendingJira() {
+      $('draftEditorModal').hidden = false;
+      $('draftEditorForm').hidden = true;
+      $('pendingDraftList').innerHTML = '<div class="meta">Loading Pending Jira drafts...</div>';
+      const data = await fetchJson('/api/jira-drafts');
+      const drafts = data.drafts || [];
+      $('pendingDraftList').innerHTML = drafts.length ? `<h3>待创建 · Pending Create</h3>${drafts.map(renderDraftCard).join('')}` : '<div class="markdown-preview empty">No pending Jira drafts.</div>';
+      $('pendingDraftList').querySelectorAll('[data-edit-draft]').forEach(button => button.addEventListener('click', () => openDraftById(button.dataset.editDraft || '', drafts)));
+    }
+
+    function openDraftById(draftId, drafts) {
+      const draft = drafts.find(item => item.id === draftId);
+      if (!draft) return;
+      currentJiraDraft = draft;
+      $('draftEditorModal').hidden = false;
+      $('pendingDraftList').innerHTML = '';
+      $('draftEditorForm').hidden = false;
+      $('draftSummary').value = draft.summary || '';
+      $('draftAdfSource').value = JSON.stringify(draft.description_adf || textToAdf(''), null, 2);
+      $('draftEditorMeta').textContent = `${draft.jira_key} · Pending Create · version ${draft.version}`;
+      renderCurrentAdf();
+    }
+
+    function openHandlingAdfComposer(findingId) {
+      const source = $(`jira-adf-${findingId}`);
+      currentJiraDraft = {
+        temporary: true,
+        findingId,
+        jira_key: selectedIssueReview,
+        summary: $(`jira-summary-${findingId}`).value || '',
+        description_adf: JSON.parse(source.value),
+        attachments: [],
+        version: 0
+      };
+      $('draftEditorModal').hidden = false;
+      $('pendingDraftList').innerHTML = '';
+      $('draftEditorForm').hidden = false;
+      $('draftSummary').value = currentJiraDraft.summary;
+      $('draftAdfSource').value = JSON.stringify(currentJiraDraft.description_adf, null, 2);
+      $('draftEditorMeta').textContent = `${selectedIssueReview} · New Jira follow-up · ADF composer`;
+      renderCurrentAdf();
+    }
+
+    function adfNodeTemplate(type) {
+      const paragraph = text => ({type:'paragraph', content:text ? [{type:'text', text}] : []});
+      if (type === 'paragraph') return paragraph('New paragraph');
+      if (type === 'heading') return {type:'heading', attrs:{level:2}, content:[{type:'text',text:'Heading'}]};
+      if (type === 'bulletList' || type === 'orderedList') return {type, content:[{type:'listItem',content:[paragraph('List item')]}]};
+      if (type === 'table') return {type:'table',content:[{type:'tableRow',content:[{type:'tableHeader',content:[paragraph('Screenshot')]},{type:'tableHeader',content:[paragraph('Description')]},{type:'tableHeader',content:[paragraph('Additional remarks')]}]},{type:'tableRow',content:[{type:'tableCell',content:[paragraph('Add screenshot')]},{type:'tableCell',content:[paragraph('Describe the issue')]},{type:'tableCell',content:[paragraph('Add remarks')]}]}]};
+      if (type === 'expand') return {type:'expand',attrs:{title:'Evidence and details'},content:[paragraph('Expand details'),adfNodeTemplate('table'),adfNodeTemplate('orderedList'),adfNodeTemplate('bulletList')]};
+      if (type === 'nestedExpand') return {type:'table',content:[{type:'tableRow',content:[{type:'tableCell',content:[{type:'nestedExpand',attrs:{title:'Nested details'},content:[paragraph('Nested Expand content')]}]}]}]};
+      return paragraph('');
+    }
+
+    function insertAdfNode(type) {
+      try {
+        const document = JSON.parse($('draftAdfSource').value);
+        document.content = Array.isArray(document.content) ? document.content : [];
+        document.content.push(adfNodeTemplate(type));
+        $('draftAdfSource').value = JSON.stringify(document, null, 2);
+        renderCurrentAdf();
+      } catch (error) {
+        $('draftStatus').className = 'status error';
+        $('draftStatus').textContent = `ADF JSON error: ${error.message}`;
+      }
+    }
+
+    async function renderCurrentAdf() {
+      try {
+        const document = JSON.parse($('draftAdfSource').value);
+        const mediaUrls = {};
+        for (const attachment of (currentJiraDraft && currentJiraDraft.attachments || [])) mediaUrls[attachment.id] = attachment.url;
+        const data = await fetchJson('/api/adf/render', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({document, media_urls:mediaUrls})});
+        $('draftAdfPreview').className = 'adf-preview';
+        $('draftAdfPreview').innerHTML = data.html;
+        $('draftStatus').textContent = 'ADF schema valid.';
+      } catch (error) {
+        $('draftAdfPreview').textContent = error.message;
+        $('draftStatus').className = 'status error';
+        $('draftStatus').textContent = error.message;
+      }
+    }
+
+    function mountAtlaskitAdf(mode) {
+      const host = $('atlaskitAdfEditor');
+      if (!window.CodeReviewerADF || !host) return false;
+      const document = JSON.parse($('draftAdfSource').value);
+      host.hidden = false;
+      $('draftAdfSource').hidden = true;
+      $('draftAdfPreview').hidden = true;
+      window.CodeReviewerADF.mount(host, {
+        value: document,
+        mode,
+        onChange: value => { $('draftAdfSource').value = JSON.stringify(value, null, 2); }
+      });
+      return true;
+    }
+
+    async function saveCurrentDraft() {
+      if (!currentJiraDraft) return;
+      const document = JSON.parse($('draftAdfSource').value);
+      if (currentJiraDraft.temporary) {
+        const findingId = currentJiraDraft.findingId;
+        $(`jira-summary-${findingId}`).value = $('draftSummary').value;
+        $(`jira-adf-${findingId}`).value = JSON.stringify(document);
+        $(`jira-adf-status-${findingId}`).textContent = 'ADF description ready.';
+        $('draftEditorModal').hidden = true;
+        currentJiraDraft = null;
+        return;
+      }
+      const data = await fetchJson('/api/jira-drafts/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({draft_id:currentJiraDraft.id, summary:$('draftSummary').value, description_adf:document, version:currentJiraDraft.version})});
+      currentJiraDraft = data.draft;
+      $('draftEditorMeta').textContent = `${currentJiraDraft.jira_key} · Pending Create · version ${currentJiraDraft.version}`;
+      $('draftStatus').className = 'status ok';
+      $('draftStatus').textContent = 'Draft saved.';
+    }
+
+    async function uploadDraftImage(file) {
+      if (!currentJiraDraft || !file) return;
+      if (currentJiraDraft.temporary) throw new Error('Save the Jira follow-up first, then attach screenshots from Pending Jira.');
+      const contentBase64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || '').split(',',2)[1] || '');
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const dimensions = await new Promise(resolve => {
+        const image = new Image();
+        image.onload = () => resolve({width:image.naturalWidth || 1,height:image.naturalHeight || 1});
+        image.onerror = () => resolve({width:1,height:1});
+        image.src = URL.createObjectURL(file);
+      });
+      const data = await fetchJson('/api/jira-drafts/attachment', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({draft_id:currentJiraDraft.id,file_name:file.name,media_type:file.type,content_base64:contentBase64})});
+      currentJiraDraft.attachments = currentJiraDraft.attachments || [];
+      currentJiraDraft.attachments.push(data.attachment);
+      const document = JSON.parse($('draftAdfSource').value);
+      const mediaNode = {type:'mediaSingle',attrs:{layout:'center'},content:[{type:'media',attrs:{id:data.attachment.id,type:'file',alt:file.name,width:dimensions.width,height:dimensions.height}}]};
+      const expand = (document.content || []).find(node => node.type === 'expand');
+      if (expand) expand.content.push(mediaNode); else document.content.push(mediaNode);
+      $('draftAdfSource').value = JSON.stringify(document,null,2);
+      await renderCurrentAdf();
+    }
+
     $('runBtn').addEventListener('click', runReview);
+    $('issueReviewsBtn').addEventListener('click', openIssueReviews);
+    $('pendingJiraBtn').addEventListener('click', () => openPendingJira().catch(error => {
+      $('pendingDraftList').innerHTML = `<div class="status error">${escapeHtml(error.message)}</div>`;
+    }));
+    $('closeIssueReviewsBtn').addEventListener('click', closeIssueReviews);
+    $('refreshIssueReviewsBtn').addEventListener('click', loadIssueReviews);
+    $('issueReviewSearch').addEventListener('input', renderIssueReviews);
+    $('issueReviewModal').addEventListener('click', event => { if (event.target === $('issueReviewModal')) closeIssueReviews(); });
+    $('closeDraftEditorBtn').addEventListener('click', () => { $('draftEditorModal').hidden = true; currentJiraDraft = null; });
+    $('saveDraftBtn').addEventListener('click', () => saveCurrentDraft().catch(error => {
+      $('draftStatus').className = 'status error'; $('draftStatus').textContent = error.message;
+    }));
+    $('adfPreviewModeBtn').addEventListener('click', () => {
+      if (!mountAtlaskitAdf('preview')) {
+        $('draftAdfPreview').hidden = false;
+        $('draftAdfSource').hidden = true;
+        renderCurrentAdf();
+      }
+    });
+    $('adfEditModeBtn').addEventListener('click', () => {
+      if (!mountAtlaskitAdf('edit')) {
+        $('atlaskitAdfEditor').hidden = true;
+        $('draftAdfPreview').hidden = true;
+        $('draftAdfSource').hidden = false;
+        $('draftAdfSource').focus();
+      }
+    });
+    document.querySelectorAll('[data-adf-insert]').forEach(button => button.addEventListener('click', () => insertAdfNode(button.dataset.adfInsert || 'paragraph')));
+    $('draftImageInput').addEventListener('change', event => uploadDraftImage((event.target.files || [])[0]).catch(error => {
+      $('draftStatus').className = 'status error'; $('draftStatus').textContent = error.message;
+    }));
     $('runFormToggle').addEventListener('click', toggleRunForm);
     $('previewOpenBtn').addEventListener('click', openPreviewModal);
     $('refreshBtn').addEventListener('click', loadReports);
@@ -6615,4 +7470,4 @@ function jiraKeyFromReportPath(reportPath) {
     });
   </script>
 </body>
-</html>""".replace("__ADMIN_TRACE_SECTION__", admin_trace).replace("__CURRENT_USER__", html.escape(user or "-")).replace("__CURRENT_ROLE__", html.escape(_web_user_role(user).title())).replace("__APP_VERSION__", html.escape(app_version())).replace("__INITIAL_PROJECTS__", initial_projects).replace("__SPRINT_FIELD__", admin_fields).replace("__INPUT_GRID_CLASS__", input_grid_class).replace("__RUN_HINT__", html.escape(run_hint))
+</html>""".replace("__ADF_ASSET__", adf_asset).replace("__ADMIN_TRACE_SECTION__", admin_trace).replace("__CURRENT_USER__", html.escape(user or "-")).replace("__CURRENT_ROLE__", html.escape(_web_user_role(user).title())).replace("__APP_VERSION__", html.escape(app_version())).replace("__INITIAL_PROJECTS__", initial_projects).replace("__SPRINT_FIELD__", admin_fields).replace("__INPUT_GRID_CLASS__", input_grid_class).replace("__RUN_HINT__", html.escape(run_hint))
