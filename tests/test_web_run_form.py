@@ -41,6 +41,17 @@ class WebRunFormTests(unittest.TestCase):
         self.assertIn('id="reportsPane" class="history-pane" role="tabpanel"', page)
         self.assertIn('id="responsiblesPane" class="history-pane" role="tabpanel" hidden', page)
 
+    def test_review_workflow_uses_guidance_responsive_forms_and_issue_cards(self) -> None:
+        page = render_index("admin")
+
+        self.assertIn('id="handlingGuidanceTitle">处理说明</h4>', page)
+        self.assertIn('class="finding-handling-form"', page)
+        self.assertIn('.followup-fields[hidden] { display: none; }', page)
+        self.assertIn('class="workflow-section-title">Problem list', page)
+        self.assertIn('class="issue-review-cards"', page)
+        self.assertIn('class="issue-review-card${selected}"', page)
+        self.assertNotIn('class="issue-review-table"', page)
+
 
 if __name__ == "__main__":
     unittest.main()

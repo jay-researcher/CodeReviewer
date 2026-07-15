@@ -4730,11 +4730,28 @@ def render_index(user: str = "") -> str:
     .workflow-detail-pane { min-height: 0; overflow: auto; padding: 20px; background: color-mix(in srgb, var(--bg) 55%, var(--panel)); }
     .workflow-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
     .workflow-toolbar input { flex: 1; }
-    .issue-review-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    .issue-review-table th { position: sticky; top: 0; z-index: 2; background: var(--panel); color: var(--muted); text-align: left; }
-    .issue-review-table th, .issue-review-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-    .issue-review-row { cursor: pointer; }
-    .issue-review-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+    .issue-review-cards { display: grid; gap: 10px; }
+    .issue-review-card {
+      display: grid; gap: 10px; padding: 13px 14px; cursor: pointer;
+      border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
+      transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
+    }
+    .issue-review-card:hover, .issue-review-card:focus-visible {
+      outline: 0; border-color: color-mix(in srgb, var(--accent) 62%, var(--line));
+      box-shadow: 0 5px 16px rgba(15, 23, 42, .08); transform: translateY(-1px);
+    }
+    .issue-review-card.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--panel)); }
+    .issue-review-card-head, .issue-review-card-foot {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    }
+    .issue-review-key { color: var(--accent-strong); font-size: 14px; }
+    .issue-review-summary {
+      display: -webkit-box; overflow: hidden; color: var(--text); line-height: 1.45;
+      -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    }
+    .issue-review-progress { display: flex; gap: 6px; flex-wrap: wrap; }
+    .issue-review-progress .handling-chip { min-height: 22px; padding: 1px 7px; }
+    .issue-review-updated { white-space: nowrap; }
     .status-chip, .severity-chip, .handling-chip {
       display: inline-flex; align-items: center; min-height: 24px; padding: 2px 8px;
       border-radius: 999px; border: 1px solid var(--line); font-size: 12px; white-space: nowrap;
@@ -4751,13 +4768,28 @@ def render_index(user: str = "") -> str:
     .workflow-tabs { display: flex; gap: 6px; margin: 16px 0 10px; border-bottom: 1px solid var(--line); }
     .workflow-tab { border: 0; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); }
     .workflow-tab.active { color: var(--accent-strong); border-bottom: 2px solid var(--accent); }
+    .workflow-section { margin: 0 0 22px; }
+    .workflow-section-title { margin: 0 0 12px; padding: 0 6px; font-size: 18px; }
     .finding-card, .timeline-card, .draft-card, .discussion-card {
       margin-bottom: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
     }
     .finding-head, .draft-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
     .finding-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
     .finding-actions textarea { min-height: 74px; }
-    .followup-fields { display: grid; gap: 8px; margin-top: 9px; }
+    .finding-handling-form { display: grid; grid-template-columns: minmax(0, .72fr) minmax(0, 1.28fr); gap: 14px; margin-top: 12px; }
+    .finding-handling-primary, .finding-handling-secondary { display: grid; gap: 9px; align-content: start; min-width: 0; }
+    .finding-handling-primary label, .finding-handling-secondary label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+    .finding-handling-primary textarea { min-height: 132px; }
+    .finding-submit-row { display: flex; justify-content: flex-end; gap: 8px; }
+    .finding-submit-row button { min-width: 132px; }
+    .followup-fields { display: grid; gap: 8px; }
+    .followup-fields[hidden] { display: none; }
+    .followup-fields-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .followup-adf-state { min-height: 88px; padding: 12px; border: 1px dashed var(--line); border-radius: 7px; background: color-mix(in srgb, var(--bg) 45%, var(--panel)); }
+    .handling-guidance { margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+    .handling-guidance h4 { margin: 0 0 7px; font-size: 14px; }
+    .handling-guidance p { margin: 0 0 9px; color: var(--muted); line-height: 1.5; }
+    .handling-guidance ul { margin: 0; padding-left: 19px; color: var(--muted); line-height: 1.55; }
     .adf-editor-shell { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
     .adf-toolbar { display: flex; gap: 5px; flex-wrap: wrap; padding: 8px; border-bottom: 1px solid var(--line); }
     .adf-toolbar button { min-height: 30px; padding: 4px 8px; font-size: 12px; }
@@ -4775,6 +4807,10 @@ def render_index(user: str = "") -> str:
       .workflow-list-pane { max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
       .metric-grid { grid-template-columns: repeat(2,1fr); }
       .draft-editor-grid { grid-template-columns: 1fr; }
+      .finding-handling-form { grid-template-columns: 1fr; }
+      .followup-fields-head { grid-template-columns: 1fr; }
+      .finding-submit-row { justify-content: stretch; }
+      .finding-submit-row button { width: 100%; }
     }
   </style>
 </head>
@@ -5047,6 +5083,15 @@ __ADMIN_TRACE_SECTION__
             <div class="actions">
               <button class="secondary small-action" id="generateFollowupsBtn" type="button">Generate Follow-ups</button>
             </div>
+            <aside class="handling-guidance" aria-labelledby="handlingGuidanceTitle">
+              <h4 id="handlingGuidanceTitle">处理说明</h4>
+              <p>请结合 Report Review 的问题证据，逐项说明处理决定和验证结果；避免只填写“已处理”。</p>
+              <ul>
+                <li><strong>已整改：</strong>说明修改内容、影响文件和测试结果，Critical/High 需等待 Re-scan 验证。</li>
+                <li><strong>另报 Jira：</strong>说明为什么不阻碍当前交付，并补充待跟进范围和验收目标。</li>
+                <li><strong>不是问题：</strong>提供可核验依据，Developer 提交后需 Auditor/Manager 确认。</li>
+              </ul>
+            </aside>
           </div>
         </section>
         <section class="thread-column thread-followup-column">
@@ -7063,16 +7108,22 @@ function jiraKeyFromReportPath(reportPath) {
         $('issueReviewList').innerHTML = '<div class="markdown-preview empty">No Issue Review records match this scope.</div>';
         return;
       }
-      $('issueReviewList').innerHTML = `<table class="issue-review-table"><thead><tr><th>Issue</th><th>Status</th><th>Handling</th><th>Updated</th></tr></thead><tbody>${rows.map(item => {
+      $('issueReviewList').innerHTML = `<div class="issue-review-cards">${rows.map(item => {
         const counts = item.handling_counts || {};
-        return `<tr class="issue-review-row" data-jira="${escapeHtml(item.jira_key)}">
-          <td><strong>${escapeHtml(item.jira_key)}</strong><div>${escapeHtml(item.summary || 'No summary')}</div><div class="meta">${escapeHtml(item.responsible || '-')}</div></td>
-          <td><span class="status-chip" data-status="${escapeHtml(item.status)}">${escapeHtml(statusLabel(item.status))}</span><div class="meta">Run ${escapeHtml(item.run_number || '-')} · ${escapeHtml(item.finding_count || 0)} findings</div></td>
-          <td><span class="handling-chip">Fixed ${counts.fixed || 0}</span> <span class="handling-chip">Jira ${counts['follow-up'] || 0}</span> <span class="handling-chip">Not issue ${counts['not-issue'] || 0}</span><div class="meta">Pending ${counts.pending || 0}</div></td>
-          <td>${escapeHtml(formatDateTime(item.updated_at))}</td>
-        </tr>`;
-      }).join('')}</tbody></table>`;
-      document.querySelectorAll('.issue-review-row').forEach(row => row.addEventListener('click', () => loadIssueReviewDetail(row.dataset.jira || '')));
+        const selected = selectedIssueReview === item.jira_key ? ' selected' : '';
+        return `<article class="issue-review-card${selected}" data-jira="${escapeHtml(item.jira_key)}" role="button" tabindex="0" aria-label="Open ${escapeHtml(item.jira_key)} Issue Review">
+          <div class="issue-review-card-head"><strong class="issue-review-key">${escapeHtml(item.jira_key)}</strong><span class="status-chip" data-status="${escapeHtml(item.status)}">${escapeHtml(statusLabel(item.status))}</span></div>
+          <div class="issue-review-summary">${escapeHtml(item.summary || 'No summary')}</div>
+          <div class="meta">${escapeHtml(item.responsible || '-')} · Run ${escapeHtml(item.run_number || '-')} · ${escapeHtml(item.finding_count || 0)} findings</div>
+          <div class="issue-review-progress"><span class="handling-chip">Fixed ${counts.fixed || 0}</span><span class="handling-chip">Jira ${counts['follow-up'] || 0}</span><span class="handling-chip">Not issue ${counts['not-issue'] || 0}</span><span class="handling-chip">Pending ${counts.pending || 0}</span></div>
+          <div class="issue-review-card-foot"><span class="meta">Last updated</span><time class="meta issue-review-updated">${escapeHtml(formatDateTime(item.updated_at))}</time></div>
+        </article>`;
+      }).join('')}</div>`;
+      document.querySelectorAll('.issue-review-card').forEach(card => {
+        const open = () => loadIssueReviewDetail(card.dataset.jira || '');
+        card.addEventListener('click', open);
+        card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
+      });
     }
 
     function statusLabel(value) {
@@ -7087,6 +7138,9 @@ function jiraKeyFromReportPath(reportPath) {
 
     async function loadIssueReviewDetail(jiraKey) {
       selectedIssueReview = jiraKey;
+      document.querySelectorAll('.issue-review-card').forEach(card => {
+        card.classList.toggle('selected', card.dataset.jira === jiraKey);
+      });
       $('issueReviewDetail').innerHTML = '<div class="markdown-preview empty">Loading Issue Review...</div>';
       try {
         const data = await fetchJson(`/api/issue-reviews/${encodeURIComponent(jiraKey)}`);
@@ -7121,10 +7175,10 @@ function jiraKeyFromReportPath(reportPath) {
           <span class="meta">${escapeHtml(readiness.message || '')}</span>
         </div>
         <div class="workflow-tabs"><button class="workflow-tab active" type="button">Problems</button><button class="workflow-tab" type="button">Discuss (${discussions.length})</button><button class="workflow-tab" type="button">History (${runs.length})</button><button class="workflow-tab" type="button">Pending Jira (${drafts.length})</button></div>
-        <section><h3>Problem list · Run ${escapeHtml(latest.run_number || '-')}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role)).join('') : '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>'}</section>
-        <section><h3>Discuss</h3><div>${discussions.length ? discussions.map(item => `<div class="discussion-card"><strong>${escapeHtml(item.author)}</strong><span class="meta"> · ${escapeHtml(formatDateTime(item.created_at))}</span><p>${escapeHtml(item.message)}</p></div>`).join('') : '<div class="meta">No discussion yet.</div>'}</div><div class="finding-actions"><textarea id="issueDiscussionInput" placeholder="Discuss this Review Run or ask for clarification."></textarea><button id="sendIssueDiscussionBtn" class="secondary" type="button">Send</button></div></section>
-        <section><h3>Review Run History</h3>${runs.map(run => `<div class="timeline-card"><strong>Run ${escapeHtml(run.run_number)}</strong> · ${escapeHtml(formatDateTime(run.created_at))}<div class="meta">${escapeHtml(run.conclusion || 'Completed')} · ${escapeHtml(run.report_path || '')}</div><div>${(run.findings || []).filter(item => item.lineage_state === 'new').length} New · ${(run.findings || []).filter(item => item.lineage_state === 'persisting').length} Persisting</div></div>`).join('')}</section>
-        <section><h3>Pending Jira</h3>${drafts.length ? drafts.map(renderDraftCard).join('') : '<div class="meta">No Jira follow-up drafts.</div>'}</section>`;
+        <section class="workflow-section"><h3 class="workflow-section-title">Problem list · Run ${escapeHtml(latest.run_number || '-')}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role)).join('') : '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>'}</section>
+        <section class="workflow-section"><h3 class="workflow-section-title">Discuss</h3><div>${discussions.length ? discussions.map(item => `<div class="discussion-card"><strong>${escapeHtml(item.author)}</strong><span class="meta"> · ${escapeHtml(formatDateTime(item.created_at))}</span><p>${escapeHtml(item.message)}</p></div>`).join('') : '<div class="meta">No discussion yet.</div>'}</div><div class="finding-actions"><textarea id="issueDiscussionInput" placeholder="Discuss this Review Run or ask for clarification."></textarea><button id="sendIssueDiscussionBtn" class="secondary" type="button">Send</button></div></section>
+        <section class="workflow-section"><h3 class="workflow-section-title">Review Run History</h3>${runs.map(run => `<div class="timeline-card"><strong>Run ${escapeHtml(run.run_number)}</strong> · ${escapeHtml(formatDateTime(run.created_at))}<div class="meta">${escapeHtml(run.conclusion || 'Completed')} · ${escapeHtml(run.report_path || '')}</div><div>${(run.findings || []).filter(item => item.lineage_state === 'new').length} New · ${(run.findings || []).filter(item => item.lineage_state === 'persisting').length} Persisting</div></div>`).join('')}</section>
+        <section class="workflow-section"><h3 class="workflow-section-title">Pending Jira</h3>${drafts.length ? drafts.map(renderDraftCard).join('') : '<div class="meta">No Jira follow-up drafts.</div>'}</section>`;
       $('issueReviewDetail').querySelectorAll('[data-handle-finding]').forEach(button => button.addEventListener('click', () => submitWorkflowHandling(button.dataset.handleFinding || '')));
       $('issueReviewDetail').querySelectorAll('[data-finding-disposition]').forEach(select => {
         const sync = () => { const fields = $(`followup-${select.dataset.findingDisposition}`); if (fields) fields.hidden = select.value !== 'follow-up'; };
@@ -7149,7 +7203,7 @@ function jiraKeyFromReportPath(reportPath) {
       const needsApproval = handling && handling.approval_status === 'pending';
       const isManager = role === 'manager';
       return `<article class="finding-card"><div class="finding-head"><div><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta">${escapeHtml(finding.file_path || 'No file')} · ${escapeHtml(statusLabel(finding.lineage_state))}</div></div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : ''}</div>
-        ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-actions"><select id="disposition-${finding.id}" data-finding-disposition="${finding.id}"><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select><textarea id="note-${finding.id}" placeholder="Required handling explanation"></textarea><div id="followup-${finding.id}" class="followup-fields" hidden><input id="jira-summary-${finding.id}" placeholder="Issue Summary (required for follow-up)"><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('Describe the follow-up requirement.')))}</textarea><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit Issue Description (ADF)</button><span id="jira-adf-status-${finding.id}" class="meta">ADF description not reviewed.</span></div><button data-handle-finding="${finding.id}" type="button">Submit handling</button></div>`}
+        ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-handling-form"><div class="finding-handling-primary"><label>处理结果<select id="disposition-${finding.id}" data-finding-disposition="${finding.id}"><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select></label><label>处理说明<textarea id="note-${finding.id}" placeholder="说明修改内容、判断依据及测试结果（必填）"></textarea></label></div><div class="finding-handling-secondary"><div id="followup-${finding.id}" class="followup-fields" hidden><div class="followup-fields-head"><label>Issue Summary<input id="jira-summary-${finding.id}" placeholder="Required for Jira follow-up"></label><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit Issue Description (ADF)</button></div><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('Describe the follow-up requirement.')))}</textarea><div class="followup-adf-state"><strong>Jira Issue Description</strong><div id="jira-adf-status-${finding.id}" class="meta">ADF description not reviewed.</div></div></div><div class="finding-submit-row"><button data-handle-finding="${finding.id}" type="button">Submit handling</button></div></div></div>`}
       </article>`;
     }
 
