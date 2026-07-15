@@ -712,9 +712,17 @@ def _post_json(url: str, payload: dict[str, Any], timeout: int, headers: dict[st
 
 
 def _review_prompt(review_input: ReviewInput) -> str:
+    is_git_version = _is_git_version_review(review_input)
     max_chars = app_config_int("llm.max_diff_chars", "LLM_MAX_DIFF_CHARS", 60000)
+    if is_git_version:
+        max_chars = app_config_int(
+            "llm.git_version_max_diff_chars",
+            "LLM_GIT_VERSION_MAX_DIFF_CHARS",
+            20000,
+        )
     diff, diff_optimization = optimize_prompt_diff(review_input.changed_files, review_input.raw_diff, max_chars)
     review_input.metadata["llm_diff_optimization"] = diff_optimization
+    review_input.metadata["llm_review_profile"] = "git-version-release-gate" if is_git_version else "standard"
     language = _prompt_language(report_language())
     if len(review_input.raw_diff) > max_chars and "[Diff truncated by LLM_MAX_DIFF_CHARS]" not in diff:
         diff += "\n\n[Diff truncated by LLM_MAX_DIFF_CHARS]"
@@ -822,12 +830,27 @@ Diff:
 
 
 def _enforce_prompt_budget(review_input: ReviewInput, prompt: str) -> str:
-    max_chars = app_config_int("llm.prompt_max_chars", "LLM_PROMPT_MAX_CHARS", 160000)
+    is_git_version = _is_git_version_review(review_input)
+    if is_git_version:
+        max_chars = app_config_int(
+            "llm.git_version_prompt_max_chars",
+            "LLM_GIT_VERSION_PROMPT_MAX_CHARS",
+            60000,
+        )
+    else:
+        max_chars = app_config_int("llm.prompt_max_chars", "LLM_PROMPT_MAX_CHARS", 160000)
     if max_chars <= 0:
         review_input.metadata["llm_prompt_chars"] = len(prompt)
         review_input.metadata["llm_context_budget"] = {"enabled": False, "original_chars": len(prompt), "final_chars": len(prompt)}
         return prompt
-    target_chars = app_config_int("llm.prompt_target_chars", "LLM_PROMPT_TARGET_CHARS", 0)
+    if is_git_version:
+        target_chars = app_config_int(
+            "llm.git_version_prompt_target_chars",
+            "LLM_GIT_VERSION_PROMPT_TARGET_CHARS",
+            45000,
+        )
+    else:
+        target_chars = app_config_int("llm.prompt_target_chars", "LLM_PROMPT_TARGET_CHARS", 0)
     trim_target_chars = max_chars
     if 0 < target_chars < max_chars:
         trim_target_chars = target_chars
@@ -850,13 +873,13 @@ def _enforce_prompt_budget(review_input: ReviewInput, prompt: str) -> str:
     trim_plan = [
         ('jira_description', 'Final Jira issue description (original description plus formal template comments, in chronological order):\n', '\n\nLocal Jira/PRD issue context:', 4000),
         ("review_template_context", "Review report template/style guide:\n", "\n\nDiff:", 2500),
-        ("project_context", "Local project context:\n", "\n\nGIT_VERSION MR context:", app_config_int("llm.prompt_min_project_context_chars", "LLM_PROMPT_MIN_PROJECT_CONTEXT_CHARS", 12000)),
-        ("jira_prd_context", "Local Jira/PRD issue context:\n", "\n\nLocal project context:", app_config_int("llm.prompt_min_jira_prd_context_chars", "LLM_PROMPT_MIN_JIRA_PRD_CONTEXT_CHARS", 8000)),
-        ("git_version_context", "GIT_VERSION MR context:\n", "\n\nFramework review context:", app_config_int("llm.prompt_min_git_version_context_chars", "LLM_PROMPT_MIN_GIT_VERSION_CONTEXT_CHARS", 12000)),
+        ("project_context", "Local project context:\n", "\n\nGIT_VERSION MR context:", 4000 if is_git_version else app_config_int("llm.prompt_min_project_context_chars", "LLM_PROMPT_MIN_PROJECT_CONTEXT_CHARS", 12000)),
+        ("jira_prd_context", "Local Jira/PRD issue context:\n", "\n\nLocal project context:", 3000 if is_git_version else app_config_int("llm.prompt_min_jira_prd_context_chars", "LLM_PROMPT_MIN_JIRA_PRD_CONTEXT_CHARS", 8000)),
+        ("git_version_context", "GIT_VERSION MR context:\n", "\n\nFramework review context:", app_config_int("llm.git_version_prompt_min_context_chars", "LLM_GIT_VERSION_PROMPT_MIN_CONTEXT_CHARS", 16000) if is_git_version else app_config_int("llm.prompt_min_git_version_context_chars", "LLM_PROMPT_MIN_GIT_VERSION_CONTEXT_CHARS", 12000)),
         ("framework_context", "Framework review context:\n", "\n\nReview report template/style guide:", 3000),
         ("related_mrs_context", "Related MRs:\n", "\n\nCross-MR implementation contracts:", 4000),
         ("cross_mr_contract_context", "Cross-MR implementation contracts:\n", "\n\nChanged files:", 2500),
-        ("diff", "Diff:\n```diff\n", "\n```", app_config_int("llm.prompt_min_diff_chars", "LLM_PROMPT_MIN_DIFF_CHARS", 30000)),
+        ("diff", "Diff:\n```diff\n", "\n```", app_config_int("llm.git_version_prompt_min_diff_chars", "LLM_GIT_VERSION_PROMPT_MIN_DIFF_CHARS", 8000) if is_git_version else app_config_int("llm.prompt_min_diff_chars", "LLM_PROMPT_MIN_DIFF_CHARS", 30000)),
     ]
     for name, start_marker, end_marker, _min_chars in trim_plan:
         content = _section_content(prompt, start_marker, end_marker)
@@ -897,7 +920,11 @@ def _enforce_prompt_budget(review_input: ReviewInput, prompt: str) -> str:
         }
 
     if len(current) > max_chars:
-        hard_max = app_config_int("llm.prompt_hard_max_chars", "LLM_PROMPT_HARD_MAX_CHARS", max_chars)
+        hard_max = (
+            app_config_int("llm.git_version_prompt_hard_max_chars", "LLM_GIT_VERSION_PROMPT_HARD_MAX_CHARS", max_chars)
+            if is_git_version
+            else app_config_int("llm.prompt_hard_max_chars", "LLM_PROMPT_HARD_MAX_CHARS", max_chars)
+        )
         if hard_max > 0 and len(current) > hard_max:
             current = current[:hard_max] + "\n[Prompt hard-truncated by LLM_PROMPT_HARD_MAX_CHARS]\n"
             diagnostics["hard_truncated"] = True
@@ -907,6 +934,13 @@ def _enforce_prompt_budget(review_input: ReviewInput, prompt: str) -> str:
     review_input.metadata["llm_prompt_chars"] = len(current)
     review_input.metadata["llm_context_budget"] = diagnostics
     return current
+
+
+def _is_git_version_review(review_input: ReviewInput) -> bool:
+    if str(review_input.metadata.get("mr_type") or "").strip().upper() == "GIT_VERSION":
+        return True
+    branch = str(review_input.source_branch or "").upper().replace("-", "_")
+    return "GIT_VERSION" in branch
 
 
 def preview_llm_prompt_budget(review_input: ReviewInput) -> dict[str, Any]:

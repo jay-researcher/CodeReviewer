@@ -130,6 +130,44 @@ class LocalContextTests(unittest.TestCase):
         self.assertLessEqual(budget["final_chars"], 90000)
         self.assertGreater(budget["trimmed_chars"], 0)
 
+    def test_git_version_review_uses_focused_release_gate_budget(self) -> None:
+        changed = ChangedFile(
+            path="release/11.2.83/git_version-v11.2.83.yml",
+            additions=4000,
+            diff="\n".join(f"+module_{index}: {'a' * 40}" for index in range(4000)),
+        )
+        review_input = ReviewInput(
+            project="web-sv-build/dps",
+            source_branch="DPS11_GIT_VERSION-11.2.83",
+            changed_files=[changed],
+            raw_diff=changed.diff,
+            metadata={
+                "mr_type": "GIT_VERSION",
+                "project_context": "P" * 50000,
+                "jira_prd_context": "J" * 30000,
+                "git_version_review_context": "G" * 50000,
+            },
+        )
+
+        budget = preview_llm_prompt_budget(review_input)
+
+        self.assertEqual(review_input.metadata["llm_review_profile"], "git-version-release-gate")
+        self.assertEqual(review_input.metadata["llm_diff_optimization"]["max_chars"], 20000)
+        self.assertEqual(budget["max_chars"], 60000)
+        self.assertEqual(budget["target_chars"], 45000)
+        self.assertLessEqual(budget["final_chars"], 45000)
+
+    def test_git_version_profile_can_be_detected_from_branch_before_metadata(self) -> None:
+        review_input = ReviewInput(
+            source_branch="GIT_VERSION-7.5.1",
+            raw_diff="+version: 7.5.1\n",
+        )
+
+        budget = preview_llm_prompt_budget(review_input)
+
+        self.assertEqual(review_input.metadata["llm_review_profile"], "git-version-release-gate")
+        self.assertEqual(budget["max_chars"], 60000)
+
     def test_web_resource_diff_is_summarized_before_prompt_truncation(self) -> None:
         css_diff = "\n".join([f"+.company-{index} {{ color: #fff; }}" for index in range(800)])
         logic_diff = "@@ -1 +1 @@\n-export const enabled = false\n+export const enabled = true\n"

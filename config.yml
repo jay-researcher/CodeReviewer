@@ -139,6 +139,15 @@ app:
     max_retries: 3
     max_tokens: 3000
     max_diff_chars: 60000
+    # GIT_VERSION reviews already have deterministic YAML/lock validation and
+    # locked-repository summaries. Keep their LLM request focused so the deep
+    # release model does not spend its timeout rereading repetitive build data.
+    git_version_max_diff_chars: 20000
+    git_version_prompt_target_chars: 45000
+    git_version_prompt_max_chars: 60000
+    git_version_prompt_hard_max_chars: 60000
+    git_version_prompt_min_context_chars: 16000
+    git_version_prompt_min_diff_chars: 8000
     optimize_web_resources: true
     resource_diff_max_chars: 4000
     resource_diff_total_chars: 16000

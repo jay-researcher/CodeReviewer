@@ -72,6 +72,8 @@ Rules:
 
 Finding lineage uses a stable fingerprint derived from Issue, project/file, category/rule, and normalized title. Report sequence numbers are retained for display but are not used as durable identity.
 
+GIT_VERSION MRs use a dedicated release-gate LLM context budget. Deterministic YAML, commit-lock, and resource-integrity checks run locally; the LLM context prioritizes locked-repository diffs, release-gate results, and material configuration changes so repetitive build configuration does not exhaust the deep-review model timeout.
+
 ## Pending Jira and ADF
 
 The canonical description is ADF JSON (`version: 1`, `type: doc`). It is validated by the API and can be edited or previewed. Supported nodes include paragraphs, headings, panels, code blocks, tables, ordered/unordered lists, Expand, Nested Expand in table cells, and media.

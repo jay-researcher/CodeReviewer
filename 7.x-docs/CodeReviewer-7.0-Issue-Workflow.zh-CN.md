@@ -75,6 +75,8 @@ app:
 
 Finding 关联关系使用稳定指纹，指纹由 Issue、项目/文件、分类/规则及规范化标题生成。报告中的顺序编号仅用于显示，不作为持久身份标识。
 
+GIT_VERSION MR 使用专用的发布门禁 LLM 上下文预算。确定性的 YAML、commit lock 和资源完整性检查由本地规则完成；LLM 上下文优先保留锁定仓库 diff、Release Gate 结果及关键配置变化，避免重复的构建配置耗尽深度审核模型的处理时间。
+
 ## Pending Jira 与 ADF
 
 Issue Description 的正式格式为 ADF JSON（`version: 1`、`type: doc`）。API 会验证其结构，并支持编辑和预览。支持的节点包括段落、标题、Panel、代码块、表格、有序/无序列表、Expand、表格单元格中的 Nested Expand，以及 Media。
