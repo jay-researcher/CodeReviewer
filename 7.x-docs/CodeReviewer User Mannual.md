@@ -10,6 +10,11 @@
 >
 > 开发分支：`20260714`
 
+配套文档：
+
+- [Issue Review 工作流与本地验收（中文）](CodeReviewer-7.0-Issue-Workflow.zh-CN.md)
+- [Issue Review Workflow and Local Acceptance (English)](CodeReviewer-7.0-Issue-Workflow.md)
+
 ## 1. 文档维护约定
 
 本手册适用于 CodeReviewer 7.x 系列。从 7.0.0 开始，所有影响用户操作、角色权限、审核规则、页面入口、状态、表单、配置默认值或错误处理方式的 7.x 更新，都必须同步更新本文件。

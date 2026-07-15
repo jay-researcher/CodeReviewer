@@ -1,5 +1,7 @@
 # CodeReviewer 7.0 Issue Review Workflow
 
+> Language: English | [中文版](CodeReviewer-7.0-Issue-Workflow.zh-CN.md)
+
 Version: 7.0.0  
 Development branch: `20260714`  
 Acceptance URL: `http://127.0.0.1:8765`  

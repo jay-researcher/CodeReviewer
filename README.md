@@ -11,7 +11,8 @@ Python MVP for GitLab MR code review based on [the original requirements](docs/r
 - [Jira issue reprocessing and review](docs/JIRA-ISSUE-REPROCESSING.md)
 - [Operations runbook](docs/CodeReviewer-Runbook.md)
 - [RHEL 9 deployment guide](docs/CodeReviewer-RHEL9-Deployment-Guide.md)
-- [Issue Review workflow and local acceptance](docs/CodeReviewer-7.0-Issue-Workflow.md)
+- [Issue Review workflow and local acceptance](7.x-docs/CodeReviewer-7.0-Issue-Workflow.md)
+- [Issue Review 工作流与本地验收（中文）](7.x-docs/CodeReviewer-7.0-Issue-Workflow.zh-CN.md)
 
 ## Run Web App
 
