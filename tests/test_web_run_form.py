@@ -91,6 +91,16 @@ class WebRunFormTests(unittest.TestCase):
         self.assertIn('id="sendThreadMessageBtn" type="button">Send reply</button>', page)
         self.assertIn('id="generateFollowupsBtn" type="button">Generate follow-ups</button>', page)
 
+    def test_issue_review_detail_tabs_switch_their_panels(self) -> None:
+        page = render_index("admin")
+
+        for name in ("problems", "discuss", "history", "pending"):
+            self.assertIn(f'data-workflow-tab="{name}"', page)
+            self.assertIn(f'data-workflow-panel="{name}"', page)
+        self.assertIn("const activateWorkflowTab = name => {", page)
+        self.assertIn("panel.hidden = panel.dataset.workflowPanel !== name;", page)
+        self.assertIn("activateWorkflowTab('problems');", page)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4784,7 +4784,9 @@ def render_index(user: str = "") -> str:
     .workflow-tabs { display: flex; gap: 6px; margin: 16px 0 10px; border-bottom: 1px solid var(--line); }
     .workflow-tab { border: 0; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); }
     .workflow-tab.active { color: var(--accent-strong); border-bottom: 2px solid var(--accent); }
+    .workflow-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     .workflow-section { margin: 0 0 22px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .workflow-section[hidden] { display: none; }
     .workflow-section-title { margin: 0 0 14px; padding: 0; font-size: 18px; line-height: 1.35; }
     .finding-card, .timeline-card, .draft-card, .discussion-card {
       margin-bottom: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
@@ -4800,6 +4802,7 @@ def render_index(user: str = "") -> str:
     .finding-handling-primary textarea { min-height: 132px; }
     .finding-submit-row { display: flex; justify-content: flex-end; gap: 8px; }
     .finding-submit-row button { min-width: 132px; }
+    .finding-handling-form:not(.followup-active) .finding-submit-row { align-self: start; }
     .followup-fields { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--bg) 35%, var(--panel)); }
     .followup-fields[hidden] { display: none; }
     .followup-fields-head { display: grid; gap: 6px; }
@@ -7228,11 +7231,22 @@ function jiraKeyFromReportPath(reportPath) {
           ${canPass ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : 'disabled'}>Manual Pass</button>` : ''}
           <span class="meta">${escapeHtml(readiness.message || '')}</span>
         </div>
-        <div class="workflow-tabs"><button class="workflow-tab active" type="button">Problems</button><button class="workflow-tab" type="button">Discuss (${discussions.length})</button><button class="workflow-tab" type="button">History (${runs.length})</button><button class="workflow-tab" type="button">Pending Jira (${drafts.length})</button></div>
-        <section class="workflow-section"><h3 class="workflow-section-title">Problem list · Run ${escapeHtml(latest.run_number || '-')}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role, pendingBlockerIds)).join('') : '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>'}</section>
-        <section class="workflow-section"><h3 class="workflow-section-title">Discuss</h3><div>${discussions.length ? discussions.map(item => `<div class="discussion-card"><strong>${escapeHtml(item.author)}</strong><span class="meta"> · ${escapeHtml(formatDateTime(item.created_at))}</span><p>${escapeHtml(item.message)}</p></div>`).join('') : '<div class="meta">No discussion yet.</div>'}</div><div class="finding-actions"><textarea id="issueDiscussionInput" placeholder="Discuss this Review Run or ask for clarification."></textarea><button id="sendIssueDiscussionBtn" class="secondary" type="button">Send</button></div></section>
-        <section class="workflow-section"><h3 class="workflow-section-title">Review Run History</h3>${runs.map(run => `<div class="timeline-card"><strong>Run ${escapeHtml(run.run_number)}</strong> · ${escapeHtml(formatDateTime(run.created_at))}<div class="meta">${escapeHtml(run.conclusion || 'Completed')} · ${escapeHtml(run.report_path || '')}</div><div>${(run.findings || []).filter(item => item.lineage_state === 'new').length} New · ${(run.findings || []).filter(item => item.lineage_state === 'persisting').length} Persisting</div></div>`).join('')}</section>
-        <section class="workflow-section"><h3 class="workflow-section-title">Pending Jira</h3>${drafts.length ? drafts.map(renderDraftCard).join('') : '<div class="meta">No Jira follow-up drafts.</div>'}</section>`;
+        <div class="workflow-tabs" role="tablist" aria-label="Issue Review details"><button class="workflow-tab active" type="button" role="tab" aria-selected="true" aria-controls="workflowProblemsPanel" data-workflow-tab="problems">Problems</button><button class="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflowDiscussPanel" data-workflow-tab="discuss">Discuss (${discussions.length})</button><button class="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflowHistoryPanel" data-workflow-tab="history">History (${runs.length})</button><button class="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflowPendingPanel" data-workflow-tab="pending">Pending Jira (${drafts.length})</button></div>
+        <section id="workflowProblemsPanel" class="workflow-section" role="tabpanel" data-workflow-panel="problems"><h3 class="workflow-section-title">Problem list · Run ${escapeHtml(latest.run_number || '-')}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role, pendingBlockerIds)).join('') : '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>'}</section>
+        <section id="workflowDiscussPanel" class="workflow-section" role="tabpanel" data-workflow-panel="discuss" hidden><h3 class="workflow-section-title">Discuss</h3><div>${discussions.length ? discussions.map(item => `<div class="discussion-card"><strong>${escapeHtml(item.author)}</strong><span class="meta"> · ${escapeHtml(formatDateTime(item.created_at))}</span><p>${escapeHtml(item.message)}</p></div>`).join('') : '<div class="meta">No discussion yet.</div>'}</div><div class="finding-actions"><textarea id="issueDiscussionInput" placeholder="Discuss this Review Run or ask for clarification."></textarea><button id="sendIssueDiscussionBtn" class="secondary" type="button">Send</button></div></section>
+        <section id="workflowHistoryPanel" class="workflow-section" role="tabpanel" data-workflow-panel="history" hidden><h3 class="workflow-section-title">Review Run History</h3>${runs.map(run => `<div class="timeline-card"><strong>Run ${escapeHtml(run.run_number)}</strong> · ${escapeHtml(formatDateTime(run.created_at))}<div class="meta">${escapeHtml(run.conclusion || 'Completed')} · ${escapeHtml(run.report_path || '')}</div><div>${(run.findings || []).filter(item => item.lineage_state === 'new').length} New · ${(run.findings || []).filter(item => item.lineage_state === 'persisting').length} Persisting</div></div>`).join('')}</section>
+        <section id="workflowPendingPanel" class="workflow-section" role="tabpanel" data-workflow-panel="pending" hidden><h3 class="workflow-section-title">Pending Jira</h3>${drafts.length ? drafts.map(renderDraftCard).join('') : '<div class="meta">No Jira follow-up drafts.</div>'}</section>`;
+      const activateWorkflowTab = name => {
+        $('issueReviewDetail').querySelectorAll('[data-workflow-tab]').forEach(tab => {
+          const active = tab.dataset.workflowTab === name;
+          tab.classList.toggle('active', active);
+          tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        $('issueReviewDetail').querySelectorAll('[data-workflow-panel]').forEach(panel => {
+          panel.hidden = panel.dataset.workflowPanel !== name;
+        });
+      };
+      $('issueReviewDetail').querySelectorAll('[data-workflow-tab]').forEach(tab => tab.addEventListener('click', () => activateWorkflowTab(tab.dataset.workflowTab || 'problems')));
       $('issueReviewDetail').querySelectorAll('[data-handle-finding]').forEach(button => button.addEventListener('click', () => submitWorkflowHandling(button.dataset.handleFinding || '')));
       $('issueReviewDetail').querySelectorAll('[data-finding-disposition]').forEach(select => {
         const sync = () => {
@@ -7249,6 +7263,7 @@ function jiraKeyFromReportPath(reportPath) {
       $('issueReviewDetail').querySelectorAll('[data-override-handling]').forEach(button => button.addEventListener('click', () => managerOverrideHandling(button.dataset.overrideHandling || '')));
       $('issueReviewDetail').querySelectorAll('[data-edit-draft]').forEach(button => button.addEventListener('click', () => openDraftById(button.dataset.editDraft || '', drafts)));
       $('issueReviewDetail').querySelectorAll('[data-jump-severity], [data-jump-blocker]').forEach(button => button.addEventListener('click', () => {
+        activateWorkflowTab('problems');
         const selector = button.dataset.jumpBlocker
           ? '.finding-card[data-finding-blocker="true"]'
           : `.finding-card[data-finding-severity="${button.dataset.jumpSeverity || ''}"]`;
