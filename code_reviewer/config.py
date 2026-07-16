@@ -497,7 +497,10 @@ def llm_config() -> dict[str, str | int]:
     speed = normalize_speed(app_config_str("llm.speed", "LLM_SPEED", "standard"))
     codex_service_tier = app_config_str("llm.codex_service_tier", "LLM_CODEX_SERVICE_TIER", "")
     return {
-        "provider": app_config_str("llm.provider", "LLM_PROVIDER", "auto"),
+        "provider": app_config_str("llm.provider", "LLM_PROVIDER", "codex-cli"),
+        "fallback_to_cc_switch": app_config_bool(
+            "llm.fallback_to_cc_switch", "LLM_FALLBACK_TO_CC_SWITCH", False
+        ),
         "model": app_config_str("llm.model", "LLM_MODEL", "local-rules"),
         "codex_model": app_config_str("llm.codex_model", "LLM_CODEX_MODEL", os.getenv("CODEX_MODEL", "gpt-5.6-sol")),
         "cc_switch_model": app_config_str("llm.cc_switch_model", "LLM_CC_SWITCH_MODEL", ""),

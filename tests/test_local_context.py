@@ -30,7 +30,12 @@ from code_reviewer.review_service import (
     _missing_remote_branch_error,
     review_fingerprint_from_merge_requests,
 )
-from code_reviewer.llm_provider import _call_codex_cli, _looks_like_dps_project, preview_llm_prompt_budget
+from code_reviewer.llm_provider import (
+    _call_codex_cli,
+    _looks_like_dps_project,
+    _run_auto_review,
+    preview_llm_prompt_budget,
+)
 from code_reviewer.local_changes import (
     _ensure_mr_commits,
     _issue_branch_candidates,
@@ -117,6 +122,31 @@ class LocalContextTests(unittest.TestCase):
             os.environ.pop("LLM_CODEX_MODEL", None)
             os.environ.pop("CODEX_MODEL", None)
             self.assertEqual(llm_config()["codex_model"], "gpt-5.6-sol")
+
+    def test_default_provider_uses_cpa_codex_without_cc_switch_fallback(self) -> None:
+        config = llm_config()
+        self.assertEqual(config["provider"], "codex-cli")
+        self.assertFalse(config["fallback_to_cc_switch"])
+        with (
+            patch("code_reviewer.llm_provider._call_codex_cli", side_effect=RuntimeError("CPA unavailable")),
+            patch("code_reviewer.llm_provider._call_cc_switch_api") as cc_switch,
+            patch("code_reviewer.llm_provider._llm_require_success", return_value=False),
+        ):
+            output = _run_auto_review(
+                "review prompt",
+                10,
+                {
+                    "codex_model": "gpt-5.6-sol",
+                    "codex_timeout_seconds": 10,
+                    "fallback_to_cc_switch": False,
+                },
+                "high",
+                "standard",
+                1,
+            )
+
+        cc_switch.assert_not_called()
+        self.assertIn("Automatic CC Switch fallback is disabled", " ".join(output.notes))
 
     def test_near_budget_multi_mr_review_chunks_before_hard_limit(self) -> None:
         inputs = [

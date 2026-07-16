@@ -314,7 +314,7 @@ Current network posture:
 
 - GitLab `gitlab.tx-tech.com` is reachable through the VPN DIRECT rule.
 - Codex can run in the same network session.
-- CC Switch fallback defaults to the `Claude code opus` provider. DeepSeek can still be selected explicitly when needed.
+- Codex CLI is routed through the configured CPA Responses endpoint. Automatic CC Switch fallback is disabled.
 
 Recommended direct flow:
 
@@ -327,7 +327,7 @@ python review.py --codex-check --codex-check-timeout 180
 
 # GitLab and Codex can be used together.
 set LLM_NETWORK_MODE=direct
-set LLM_PROVIDER=auto
+set LLM_PROVIDER=codex-cli
 python review.py --mr-url https://gitlab.example.com/group/project/-/merge_requests/123 --context-repo D:\TTL\vibe-coding\dps11
 ```
 
@@ -367,7 +367,7 @@ Sensitive values must be provided through environment variables, not committed f
 Optional runtime configuration:
 
 - `LLM_PROVIDER`, `LLM_MODEL`, `LLM_NETWORK_MODE`, `LLM_SPEED`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES`
-- `LLM_CODEX_TIMEOUT_SECONDS`, `LLM_REASONING_EFFORT`, `LLM_CC_SWITCH_PROVIDER`, `LLM_USE_CC_SWITCH`, `LLM_MAX_TOKENS`, `LLM_MAX_DIFF_CHARS`
+- `LLM_CODEX_TIMEOUT_SECONDS`, `LLM_REASONING_EFFORT`, `LLM_FALLBACK_TO_CC_SWITCH`, `LLM_MAX_TOKENS`, `LLM_MAX_DIFF_CHARS`
 - For CLIProxyAPI/OpenAI-compatible Responses endpoints, set `LLM_CODEX_HTTP_API_KEY_ENV=OPENAI_API_KEY`, store the proxy key in `OPENAI_API_KEY`, and override the policy URL with `CODE_REVIEW_OVERRIDE_LLM_CODEX_HTTP_BASE_URL=http://host:port/v1`.
 - `LLM_REQUIRE_SUCCESS`, `LLM_REQUIRE_STRUCTURED_OUTPUT`, `LLM_REQUIRED_REASONING_EFFORT`, `LLM_REQUIRED_SPEED`
 - `REVIEW_FRAMEWORK`, `DRUPAL_SKILL_PATH`, `DRUPAL_SKILL_CONTEXT_MAX_CHARS`
@@ -390,20 +390,19 @@ MR discovery defaults to Open merge requests only: `REVIEWER_MR_STATE=opened` an
 LLM provider examples:
 
 ```bash
-# Preferred: Codex CLI GPT 5.5 first, then CC Switch Claude code opus.
-set LLM_PROVIDER=auto
+# Default: Codex CLI through CPA, with no automatic provider fallback.
+set LLM_PROVIDER=codex-cli
 set LLM_NETWORK_MODE=direct
 set LLM_CODEX_MODEL=gpt-5.6-sol
 set LLM_CODEX_TIMEOUT_SECONDS=300
-set LLM_TIMEOUT_SECONDS=180
 set LLM_MAX_RETRIES=3
+set LLM_FALLBACK_TO_CC_SWITCH=0
 set LLM_SPEED=standard
 set LLM_REASONING_EFFORT=high
 set CODEX_CLI_PATH=C:\path\to\codex.exe
-set "LLM_CC_SWITCH_PROVIDER=Claude code opus"
 set DPS_REVIEW_REQUIRE_CODEX=1
 
-# CC Switch only, using the provider configured in CC Switch.
+# CC Switch remains an explicit legacy/manual provider, not a fallback.
 set LLM_PROVIDER=cc-switch
 set "LLM_CC_SWITCH_PROVIDER=Claude code opus"
 ```
@@ -432,9 +431,7 @@ You can also pass `--speed fast` on `review.py`; Codex maps that to `service_tie
 
 The review prompt is tuned for deep release-risk review, similar to `ECHNL-5539.md`: migration scope, DB/file update ordering, idempotency, rollback, compatibility, DPS layering, and concrete SQL/Mongo/UAT verification checks.
 
-By default, release reviews use a 300-second Codex timeout, 180-second fallback-provider timeout, and 3 retries. Reviews fail fast when all LLM providers fail, when the provider returns non-JSON output, or when the effective reasoning effort/speed is below the required level. DPS/DPS9/DPS11 GitLab projects force `codex-cli`; after the configured retries fail, CodeReviewer exits instead of falling back to CC Switch. This prevents static-rule-only reports from being mistaken for detailed ECHNL-5539-style reviews. To intentionally allow fallback behavior for local experiments only, set `LLM_REQUIRE_SUCCESS=0` or `LLM_REQUIRE_STRUCTURED_OUTPUT=0`.
-
-CC Switch should hold the fallback provider credentials so keys are not duplicated in this repo. The default CC Switch selector is `Claude code opus`; set `LLM_CC_SWITCH_PROVIDER=DeepSeek` only when DeepSeek fallback is intentionally required.
+By default, reviews use Codex CLI through CPA with a 300-second Codex timeout and no automatic CC Switch fallback. Reviews fail when CPA/Codex fails, when the provider returns non-JSON output, or when the effective reasoning effort/speed is below the required level. DPS/DPS9/DPS11 use one bounded Codex attempt. CC Switch remains available only when an operator explicitly selects `LLM_PROVIDER=cc-switch` for a separate legacy/manual run.
 
 GitLab/Jira writeback is never silent. For CLI use, generate and review the Markdown report first, then re-run with both `--post-gitlab-comment` and `--yes` to confirm.
 

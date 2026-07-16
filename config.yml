@@ -123,7 +123,10 @@ app:
     context_per_issue_chars: 6000
     context_max_issues: 8
   llm:
-    provider: auto
+    # Codex CLI is routed through the local CPA Responses endpoint. Do not
+    # automatically switch providers when CPA/Codex fails.
+    provider: codex-cli
+    fallback_to_cc_switch: false
     network_mode: direct
     #codex_model: gpt-5.5
     codex_model: gpt-5.6-sol # deepest reasoning for release reviews

@@ -26,13 +26,13 @@ def check_network(gitlab_url: str = "https://gitlab.tx-tech.com") -> NetworkStat
     codex_available = _codex_available()
 
     if gitlab_open and not codex_available:
-        action = "GitLab is reachable, but Codex is unavailable. Use CC Switch fallback or fix Codex CLI/auth."
+        action = "GitLab is reachable, but Codex is unavailable. Fix Codex CLI and CPA authentication before review."
     elif not gitlab_open and codex_available:
         action = "Codex is available, but GitLab is not reachable. Check VPN DIRECT rule, or review a local repo/diff."
     elif gitlab_open and codex_available:
         action = "GitLab and the Codex CLI binary are reachable. Run --codex-check to verify real Codex execution."
     else:
-        action = "Neither GitLab nor Codex is reachable. Fix network or review a local repo/diff after switching to CC Switch."
+        action = "Neither GitLab nor Codex is reachable. Fix GitLab networking and the CPA/Codex path before review."
 
     return NetworkStatus(
         gitlab_host=host,
@@ -40,7 +40,7 @@ def check_network(gitlab_url: str = "https://gitlab.tx-tech.com") -> NetworkStat
         gitlab_hint="GitLab is reachable via current network/DIRECT rule." if gitlab_open else "GitLab is not reachable; check VPN DIRECT rule or use local repo/diff review.",
         codex_available=codex_available,
         codex_hint="Codex CLI binary is available; use python review.py --codex-check to test model execution." if codex_available else "Codex CLI is unavailable or not responsive in this environment.",
-        deepseek_hint="CC Switch Claude code opus remains available as fallback.",
+        deepseek_hint="Automatic CC Switch fallback is disabled; CPA/Codex is the configured review path.",
         recommended_action=action,
     )
 

@@ -89,9 +89,9 @@ app:
         git_version: [GIT_VERSION, DPS11_GIT_VERSION, DPS9_GIT_VERSION]
     chunk_auto: true
   llm:
-    provider: auto
+    provider: codex-cli
+    fallback_to_cc_switch: false
     codex_model: gpt-5.6-sol
-    cc_switch_provider: Claude code opus
     reasoning_effort: high
     speed: standard
     codex_timeout_seconds: 300

@@ -178,15 +178,18 @@ def _run_auto_review(
         attempts.append(("codex-cli", str(config.get("codex_model") or "gpt-5.6-sol"), "", codex_timeout))
     else:
         notes.append("LLM_NETWORK_MODE=non-vpn; skipped Codex by explicit network-mode override.")
-    attempts.append(
-        (
-            "cc-switch",
-            str(config.get("cc_switch_model") or config.get("model") or config.get("codex_model") or ""),
-            str(config.get("cc_switch_provider") or DEFAULT_CC_SWITCH_PROVIDER),
-            timeout,
+    if bool(config.get("fallback_to_cc_switch")):
+        attempts.append(
+            (
+                "cc-switch",
+                str(config.get("cc_switch_model") or config.get("model") or config.get("codex_model") or ""),
+                str(config.get("cc_switch_provider") or DEFAULT_CC_SWITCH_PROVIDER),
+                timeout,
+            )
         )
-    )
-    for provider, model, selector, provider_timeout in attempts:
+    else:
+        notes.append("Automatic CC Switch fallback is disabled; CPA/Codex is the only automatic review path.")
+    for provider_index, (provider, model, selector, provider_timeout) in enumerate(attempts):
         for attempt in range(1, max_retries + 1):
             try:
                 if provider == "cc-switch":
@@ -220,7 +223,10 @@ def _run_auto_review(
                 if attempt < max_retries:
                     notes.append(f"{provider} attempt {attempt}/{max_retries} failed, retrying: {brief}")
                     continue
-                notes.append(f"{provider} failed after {max_retries} attempt(s), falling back: {brief}")
+                if provider_index + 1 < len(attempts):
+                    notes.append(f"{provider} failed after {max_retries} attempt(s), falling back: {brief}")
+                else:
+                    notes.append(f"{provider} failed after {max_retries} attempt(s); no automatic fallback: {brief}")
 
     message = "LLM auto review failed: " + " | ".join(notes or ["no provider attempts ran"])
     if _llm_require_success():
@@ -306,7 +312,7 @@ def _run_single_review(
             hint = (
                 f" {no_fallback_reason}"
                 if no_fallback_reason
-                else " Set LLM_PROVIDER=auto to allow CC Switch fallback after Codex failure."
+                else " Automatic provider fallback is disabled; verify CPA/Codex connectivity and retry."
             )
         raise RuntimeError(f"LLM provider '{provider}' failed after {max_retries} attempt(s): {last_error}{hint}")
     return LLMReviewOutput(
