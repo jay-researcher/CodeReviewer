@@ -147,6 +147,9 @@ def _attach_git_tools_project_match(review_input: ReviewInput) -> None:
     if match.get("project_name"):
         review_input.metadata["project_name"] = match["project_name"]
         review_input.metadata["git_tools_project_name"] = match["project_name"]
+    if match.get("project_type"):
+        review_input.metadata["project_type"] = match["project_type"]
+        review_input.metadata["git_tools_project_type"] = match["project_type"]
     if match.get("llm_model"):
         review_input.metadata["llm_model_config"] = match["llm_model"]
     if match.get("dev_branch"):
@@ -174,6 +177,7 @@ def _git_tools_project_match(project_path: str) -> dict[str, Any]:
         "repository_url": "",
         "responsible": "",
         "project_name": "",
+        "project_type": "",
         "llm_model": "",
         "dev_branch": [],
     }
@@ -194,6 +198,7 @@ def _git_tools_project_match(project_path: str) -> dict[str, Any]:
                 "repository_url": entry.repository_url,
                 "responsible": entry.responsible,
                 "project_name": entry.project_name,
+                "project_type": entry.project_type,
                 "llm_model": entry.llm_model,
                 "dev_branch": entry.dev_branch,
             }
@@ -1092,6 +1097,7 @@ def review_reviewer_merge_requests(
                 "git_tools_module": review_input.metadata.get("git_tools_module", ""),
                 "responsible": review_input.metadata.get("responsible", ""),
                 "project_name": review_input.metadata.get("project_name", ""),
+                "project_type": review_input.metadata.get("project_type", ""),
                 "llm_model_config": review_input.metadata.get("llm_model_config", ""),
             }
             _attach_project_context(review_input, None)
@@ -2006,6 +2012,7 @@ def _combine_jira_issue_review_inputs(
             "git_tools_module": review_input.metadata.get("git_tools_module", ""),
             "responsible": review_input.metadata.get("responsible") or review_input.metadata.get("git_tools_responsible", ""),
             "project_name": review_input.metadata.get("project_name") or review_input.metadata.get("git_tools_project_name", ""),
+            "project_type": review_input.metadata.get("project_type") or review_input.metadata.get("git_tools_project_type", ""),
             "llm_model_config": review_input.metadata.get("llm_model_config", ""),
             "discovery_source": discovered_by_url.get(review_input.mr_url, {}).get("source", ""),
         }
@@ -2132,6 +2139,10 @@ def _combine_jira_issue_review_inputs(
     if project_names:
         metadata["project_names"] = project_names
         metadata["project_name"] = project_names[0] if len(project_names) == 1 else "+".join(project_names)
+    project_types = _distinct_values_from_related_mrs(related_mrs, "project_type")
+    if project_types:
+        metadata["project_types"] = project_types
+        metadata["project_type"] = project_types[0] if len(project_types) == 1 else "mixed"
     llm_models = _distinct_values_from_related_mrs(related_mrs, "llm_model_config")
     if llm_models:
         metadata["llm_model_configs"] = llm_models
@@ -2245,6 +2256,7 @@ def list_reviewer_merge_requests(
                 "git_tools_module": project_match.get("module", ""),
                 "responsible": project_match.get("responsible", ""),
                 "project_name": project_match.get("project_name", ""),
+                "project_type": project_match.get("project_type", ""),
                 "llm_model_config": project_match.get("llm_model", ""),
             }
         )
@@ -2393,6 +2405,7 @@ def _discover_sprint_merge_requests(
                     "git_tools_module": project_match.get("module", ""),
                     "responsible": project_match.get("responsible", ""),
                     "project_name": project_match.get("project_name", ""),
+                    "project_type": project_match.get("project_type", ""),
                     "llm_model_config": project_match.get("llm_model", ""),
                     "dev_branch": _configured_dev_branches(project_match),
                 }

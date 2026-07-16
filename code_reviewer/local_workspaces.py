@@ -26,6 +26,7 @@ class WorkspaceEntry:
     repository_url: str = ""
     responsible: str = ""
     project_name: str = ""
+    project_type: str = ""
     llm_model: str = ""
     dev_branch: list[str] = field(default_factory=list)
     branches: list[str] = field(default_factory=list)
@@ -121,6 +122,8 @@ def load_workspace_entries(groups: str = "", projects: str = "") -> list[Workspa
                 entry.responsible = git_entry.responsible
             if not entry.project_name:
                 entry.project_name = git_entry.project_name
+            if not entry.project_type:
+                entry.project_type = git_entry.project_type
             if not entry.llm_model:
                 entry.llm_model = git_entry.llm_model
             if not entry.dev_branch:
@@ -146,6 +149,8 @@ def load_workspace_entries(groups: str = "", projects: str = "") -> list[Workspa
                 entry.responsible = git_entry.responsible
             if not entry.project_name:
                 entry.project_name = git_entry.project_name
+            if not entry.project_type:
+                entry.project_type = git_entry.project_type
             if not entry.llm_model:
                 entry.llm_model = git_entry.llm_model
             if not entry.dev_branch:
@@ -205,6 +210,7 @@ def _workspace_entries_from_payload(payload: dict[str, Any], base: Path) -> list
                         repository_url=str(value.get("repository_url") or ""),
                         responsible=str(value.get("responsible") or ""),
                         project_name=str(value.get("project_name") or ""),
+                        project_type=str(value.get("type") or value.get("project_type") or ""),
                         llm_model=str(value.get("llm_model") or ""),
                         dev_branch=_string_list(value.get("dev_branch")),
                         branches=_string_list(value.get("branch") or value.get("branches")),
@@ -226,6 +232,7 @@ def _workspace_entries_from_payload(payload: dict[str, Any], base: Path) -> list
                 repository_url=str(value.get("repository_url") or ""),
                 responsible=str(value.get("responsible") or ""),
                 project_name=str(value.get("project_name") or ""),
+                project_type=str(value.get("type") or value.get("project_type") or ""),
                 llm_model=str(value.get("llm_model") or ""),
                 dev_branch=_string_list(value.get("dev_branch")),
                 branches=_string_list(value.get("branch") or value.get("branches")),
@@ -252,6 +259,7 @@ def _workspace_entries_from_payload(payload: dict[str, Any], base: Path) -> list
                             repository_url=str(value.get("repository_url") or ""),
                             responsible=str(value.get("responsible") or ""),
                             project_name=str(value.get("project_name") or ""),
+                            project_type=str(value.get("type") or value.get("project_type") or ""),
                             llm_model=str(value.get("llm_model") or ""),
                             dev_branch=_string_list(value.get("dev_branch")),
                             branches=_string_list(value.get("branch") or value.get("branches")),
@@ -293,6 +301,7 @@ def _workspace_entry(
     repository_url: str = "",
     responsible: str = "",
     project_name: str = "",
+    project_type: str = "",
     llm_model: str = "",
     dev_branch: list[str] | None = None,
     branches: list[str] | None = None,
@@ -310,6 +319,7 @@ def _workspace_entry(
         repository_url=repository_url or project_or_url,
         responsible=responsible,
         project_name=project_name,
+        project_type=project_type,
         llm_model=llm_model,
         dev_branch=dev_branch or [],
         branches=branches or [],
@@ -340,43 +350,86 @@ def _git_tools_entries_from_payload(payload: dict[str, Any], groups: set[str]) -
             continue
         if not isinstance(modules, dict):
             continue
-        for module, value in modules.items():
-            if not isinstance(value, dict):
-                continue
-            url = _clean_repository_url(str(value.get("repository_url") or ""))
-            responsible = str(value.get("responsible") or "")
-            project_name = str(value.get("project_name") or "")
-            llm_model = str(value.get("llm_model") or "")
-            dev_branch = _string_list(value.get("dev_branch"))
-            branches = _string_list(value.get("branch") or value.get("branches"))
-            project_path = _project_path_from_value(url)
-            if project_path:
-                base = dict(
-                        project_path=project_path,
-                        group=str(group),
-                        module=str(module),
-                        repository_url=url,
-                        responsible=responsible,
-                        project_name=project_name,
-                        llm_model=llm_model,
-                        dev_branch=dev_branch,
-                        branches=branches,
-                        source="git-tools",
-                )
-                copies = value.get("working_copies")
-                added_copy = False
-                if isinstance(copies, list):
-                    for copy in copies:
-                        if not isinstance(copy, dict):
-                            continue
-                        copy_branches = _string_list(copy.get("branch") or copy.get("branches")) or branches
-                        copy_path = _local_path(copy.get("local_working_copy"), config_base=git_tools_config_path().parent)
-                        entries.append(WorkspaceEntry(local_path=copy_path, branches=copy_branches, **base))
-                        added_copy = True
-                local_path = _local_path(value.get("local_working_copy"), config_base=git_tools_config_path().parent)
-                if not added_copy:
-                    entries.append(WorkspaceEntry(local_path=local_path, **base))
+        _collect_git_tools_payload_entries(entries, str(group), modules)
     return entries
+
+
+def _collect_git_tools_payload_entries(
+    entries: list[WorkspaceEntry],
+    group: str,
+    value: dict[str, Any],
+    *,
+    module: str = "",
+    inherited: dict[str, Any] | None = None,
+) -> None:
+    """Read both flat git-tools config and JiraReviewer nested project config."""
+    inherited = dict(inherited or {})
+    for key in ("responsible", "project_name", "llm_model", "dev_branch", "branch", "branches", "type", "project_type"):
+        if key in value and value.get(key) not in (None, "", []):
+            inherited[key] = value.get(key)
+
+    url = _clean_repository_url(str(value.get("repository_url") or ""))
+    project_path = _project_path_from_value(url)
+    if project_path:
+        responsible = _people_text(value.get("responsible", inherited.get("responsible", "")))
+        project_type = _normalize_project_type(value.get("type") or value.get("project_type") or inherited.get("type") or inherited.get("project_type"))
+        branches = _string_list(value.get("branch") or value.get("branches") or inherited.get("branch") or inherited.get("branches"))
+        base = dict(
+            project_path=project_path,
+            group=group,
+            module=module,
+            repository_url=url,
+            responsible=responsible,
+            project_name=str(value.get("project_name") or inherited.get("project_name") or ""),
+            project_type=project_type,
+            llm_model=str(value.get("llm_model") or inherited.get("llm_model") or ""),
+            dev_branch=_string_list(value.get("dev_branch") or inherited.get("dev_branch")),
+            branches=branches,
+            source="git-tools",
+        )
+        copies = value.get("working_copies")
+        added_copy = False
+        if isinstance(copies, list):
+            for copy in copies:
+                if not isinstance(copy, dict):
+                    continue
+                copy_branches = _string_list(copy.get("branch") or copy.get("branches")) or branches
+                copy_path = _local_path(copy.get("local_working_copy"), config_base=git_tools_config_path().parent)
+                entries.append(WorkspaceEntry(local_path=copy_path, branches=copy_branches, **base))
+                added_copy = True
+        if not added_copy:
+            entries.append(
+                WorkspaceEntry(
+                    local_path=_local_path(value.get("local_working_copy"), config_base=git_tools_config_path().parent),
+                    **base,
+                )
+            )
+
+    for child_key, child in value.items():
+        if not isinstance(child, dict) or child_key == "working_copies":
+            continue
+        _collect_git_tools_payload_entries(
+            entries,
+            group,
+            child,
+            module=str(child_key),
+            inherited=inherited,
+        )
+
+
+def _people_text(value: Any) -> str:
+    if isinstance(value, list):
+        return "+".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _normalize_project_type(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    if text in {"frontend", "front-end", "web", "client"}:
+        return "frontend"
+    if text in {"backend", "back-end", "server", "api"}:
+        return "backend"
+    return text
 
 
 def _git_tools_entries_from_text(text: str, groups: set[str]) -> list[WorkspaceEntry]:
@@ -384,6 +437,7 @@ def _git_tools_entries_from_text(text: str, groups: set[str]) -> list[WorkspaceE
     group = ""
     module = ""
     fields: dict[str, Any] = {}
+    group_fields: dict[str, Any] = {}
     list_field = ""
 
     def flush() -> None:
@@ -401,6 +455,7 @@ def _git_tools_entries_from_text(text: str, groups: set[str]) -> list[WorkspaceE
                     repository_url=url,
                     responsible=fields.get("responsible", ""),
                     project_name=fields.get("project_name", ""),
+                    project_type=_normalize_project_type(fields.get("type") or fields.get("project_type")),
                     llm_model=fields.get("llm_model", ""),
                     dev_branch=_string_list(fields.get("dev_branch", "")),
                     branches=_string_list(fields.get("branch", "")),
@@ -415,16 +470,24 @@ def _git_tools_entries_from_text(text: str, groups: set[str]) -> list[WorkspaceE
             group = group_match.group(1).strip()
             module = ""
             fields = {}
+            group_fields = {}
             list_field = ""
             continue
         module_match = re.match(r"^\s{2}([A-Za-z0-9_.-]+):\s*$", raw_line)
         if module_match:
             flush()
             module = module_match.group(1).strip()
-            fields = {}
+            fields = dict(group_fields)
             list_field = ""
             continue
         if groups and group not in groups:
+            continue
+        group_field_match = re.match(r"^\s{2}([A-Za-z0-9_.-]+):\s*([^\r\n]+)", raw_line)
+        if group_field_match and not module:
+            key = group_field_match.group(1).strip()
+            value = group_field_match.group(2).strip().strip("'\"")
+            group_fields[key] = value
+            fields[key] = value
             continue
         list_match = re.match(r"^\s{6}-\s*([^\r\n]+)", raw_line)
         if list_match and list_field:

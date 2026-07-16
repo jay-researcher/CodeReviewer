@@ -226,6 +226,7 @@ app:
     source_diff_context_max_chars: 100000
 
 dps9-repository:
+  type: backend
   ttl_contrib_common:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_common.git
     responsible: "kevin.tan"
@@ -339,6 +340,7 @@ dps9-repository:
     branch: 9.3.78
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_contrib_services
 dps11-repository:
+  type: backend
   ttl_contrib_common:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_common.git
     responsible: "kevin.tan"
@@ -460,6 +462,7 @@ dps11-repository:
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/momd
 build-repository:
   itrade-client:
+    type: frontend
     repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/itrade-client.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
@@ -469,6 +472,7 @@ build-repository:
       - 7.5.1.38
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/build-repository/itrade-client
   services-terminal:
+    type: frontend
     repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/services-terminal.git
     responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
@@ -476,6 +480,7 @@ build-repository:
     branch: 5.0.62
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/build-repository/services-terminal
   wvadmin:
+    type: frontend
     repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/wvadmin.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
@@ -483,6 +488,7 @@ build-repository:
     branch: 1.0.83
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/build-repository/wvadmin
   dps:
+    type: backend
     repository_url: https://gitlab.tx-tech.com/web-sv-build/dps.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
@@ -492,6 +498,7 @@ build-repository:
       - 11.2.83
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/build-repository/dps
 itrade-client:
+  type: frontend
   itrade-client-7.5.0:
     repository_url: https://gitlab.tx-tech.com/itrade-sv/client/web.git
     responsible: "wen.yi"
@@ -520,6 +527,7 @@ itrade-client:
     branch: 5.0.62
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/itrade-client/services-terminal
 wvadmin-repository:
+  type: frontend
   momd:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/momd.git
     responsible: "wen.yi"

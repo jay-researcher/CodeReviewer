@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
-from code_reviewer.local_workspaces import WorkspaceEntry, _git_tools_entries_from_text
+from code_reviewer.local_workspaces import WorkspaceEntry, _git_tools_entries_from_payload, _git_tools_entries_from_text
 from code_reviewer.analyzer import _jira_involved_file_findings
 from code_reviewer.config import DEFAULT_CC_SWITCH_PROVIDER, _load_windows_user_environment, llm_config
 from code_reviewer.gitlab_client import GitLabClient
@@ -385,6 +385,46 @@ build-repository:
             expected_path = Path.cwd() / expected_path
         self.assertEqual(entries[0].local_path, expected_path)
 
+    def test_git_tools_config_inherits_frontend_backend_type(self) -> None:
+        entries = _git_tools_entries_from_payload(
+            {
+                "middle-office": {
+                    "responsible": ["kevin.tan"],
+                    "wvadmin-projects": {
+                        "type": "frontend",
+                        "dev_repository_url": {
+                            "form": {"repository_url": "https://gitlab.example.com/group/form.git"}
+                        },
+                    },
+                    "dps11-projects": {
+                        "type": "backend",
+                        "dev_repository": {
+                            "user": {"repository_url": "https://gitlab.example.com/group/user.git"}
+                        },
+                    },
+                }
+            },
+            set(),
+        )
+
+        by_path = {entry.project_path: entry for entry in entries}
+        self.assertEqual(by_path["group/form"].project_type, "frontend")
+        self.assertEqual(by_path["group/user"].project_type, "backend")
+        self.assertEqual(by_path["group/user"].responsible, "kevin.tan")
+
+    def test_text_config_group_type_is_inherited_by_projects(self) -> None:
+        entries = _git_tools_entries_from_text(
+            """
+backend-projects:
+  type: backend
+  api:
+    repository_url: https://gitlab.example.com/group/api.git
+""",
+            set(),
+        )
+
+        self.assertEqual(entries[0].project_type, "backend")
+
     def test_project_context_reads_the_requested_git_ref(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp) / "repo"
@@ -691,6 +731,45 @@ group:
                 "sunny.cheng/ECHNL-5308_has-issue-critical.md",
                 "wen.yi/ECHNL-5308_has-issue-high.md",
             ],
+        )
+
+    def test_reports_split_same_issue_and_owner_by_frontend_backend_type(self) -> None:
+        result = ReviewResult(
+            review_input=ReviewInput(
+                project="jira-issue",
+                jira_key="ECHNL-8888",
+                mr_id="multi-mr-2",
+                changed_files=[
+                    ChangedFile(path="group/web!1/src/a.ts", additions=1, diff="+web"),
+                    ChangedFile(path="group/api!2/src/a.php", additions=1, diff="+api"),
+                ],
+                metadata={
+                    "related_merge_requests": [
+                        {"mr_id": "1", "project_path": "group/web", "responsible": "wen.yi", "project_type": "frontend", "file_prefix": "group/web!1"},
+                        {"mr_id": "2", "project_path": "group/api", "responsible": "wen.yi", "project_type": "backend", "file_prefix": "group/api!2"},
+                    ]
+                },
+            ),
+            findings=[
+                Finding("High", "group/web!1/src/a.ts", 1, "Web issue", "detail", "fix"),
+                Finding("Critical", "group/api!2/src/a.php", 1, "API issue", "detail", "fix"),
+            ],
+            conclusion="Review result",
+            risk_summary=[],
+            test_suggestions=[],
+        )
+
+        split = split_result_by_responsible(result)
+        by_type = {item.review_input.metadata["project_type"]: item for item in split}
+        self.assertEqual([finding.title for finding in by_type["frontend"].findings], ["Web issue"])
+        self.assertEqual([finding.title for finding in by_type["backend"].findings], ["API issue"])
+
+        with tempfile.TemporaryDirectory() as temp:
+            saved = save_reports(result, Path(temp))
+            names = sorted(path.name for _report, path in saved)
+        self.assertEqual(
+            names,
+            ["ECHNL-8888_backend_has-issue-critical.md", "ECHNL-8888_frontend_has-issue-high.md"],
         )
 
     def test_mr_review_fingerprint_tracks_commit_changes_not_updated_time_only(self) -> None:

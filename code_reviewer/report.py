@@ -37,6 +37,7 @@ def render_markdown(result: ReviewResult, language: str | None = None) -> str:
         f"- Jira{sep}{source.jira_key or '-'}",
         f"- Sprint{sep}{source.sprint or '-'}",
         f"- MR Type{sep}{source.metadata.get('mr_type', '-')}",
+        f"- Project Type{sep}{source.metadata.get('project_type') or source.metadata.get('git_tools_project_type') or '-'}",
         f"- LLM Provider{sep}{source.metadata.get('llm_provider', '-')}",
         f"- LLM Model{sep}{source.metadata.get('llm_model', '-')}",
         f"- LLM Reasoning Effort{sep}{source.metadata.get('llm_reasoning_effort', '-')}",
@@ -499,13 +500,14 @@ def report_filename(
     severity_counts: dict[str, int] | None = None,
     responsible: str = "",
     simplified: bool = False,
+    scope: str = "",
 ) -> str:
     status = _report_status_suffix(severity_counts or {})
     if simplified or responsible:
         if "chunk" in (mr_id or "").lower():
-            base_parts = [jira_key or "NO-JIRA", mr_id, status]
+            base_parts = [jira_key or "NO-JIRA", scope, mr_id, status]
         else:
-            base_parts = [jira_key or mr_id or "NO-JIRA", status]
+            base_parts = [jira_key or mr_id or "NO-JIRA", scope, status]
     else:
         base_parts = [project, mr_id, jira_key, status]
     base = "_".join(part for part in base_parts if part) or "review-report"
@@ -530,6 +532,7 @@ def save_report(result: ReviewResult, output_dir: Path, filename: str | None = N
             result.severity_counts,
             responsible=responsible_prefix,
             simplified=simplified_name,
+            scope=str(source.metadata.get("split_report_project_type") or ""),
         )
     )
     if _web_report_owner(source.metadata):
@@ -556,17 +559,16 @@ def save_reports(result: ReviewResult, output_dir: Path, filename: str | None = 
 
 
 def split_result_by_responsible(result: ReviewResult) -> list[ReviewResult]:
-    if _web_report_owner(result.review_input.metadata):
-        return [result]
     related_mrs = result.review_input.metadata.get("related_merge_requests") or []
     if not isinstance(related_mrs, list) or not related_mrs:
         return [result]
-    groups = _related_mr_groups_by_responsible(related_mrs)
+    groups = _related_mr_groups_by_report_scope(related_mrs)
     if len(groups) <= 1:
         return [result]
 
     split_results: list[ReviewResult] = []
-    for responsible, items in groups.items():
+    for group_key, items in groups.items():
+        responsible, project_type = group_key
         prefixes = [_related_mr_prefix(item) for item in items]
         prefixes = [prefix for prefix in prefixes if prefix]
         changed_files = [
@@ -586,6 +588,10 @@ def split_result_by_responsible(result: ReviewResult) -> list[ReviewResult]:
         metadata["responsible"] = "+".join(metadata["responsible_people"])
         metadata["split_from_responsible"] = _canonical_responsible_name(result.review_input.metadata)
         metadata["split_report_responsible"] = responsible
+        if project_type:
+            metadata["project_type"] = project_type
+            metadata["git_tools_project_type"] = project_type
+            metadata["split_report_project_type"] = project_type
         metadata["split_report_count"] = len(groups)
         metadata["split_report_file_prefixes"] = prefixes
         metadata["multi_mr_file_links"] = _filter_file_links(metadata.get("multi_mr_file_links"), changed_paths)
@@ -623,6 +629,7 @@ def render_handling_result_template(result: ReviewResult, language: str | None =
             result.severity_counts,
             responsible=responsible_prefix,
             simplified=bool(responsible_prefix) or bool(_web_report_owner(source.metadata)),
+            scope=str(source.metadata.get("split_report_project_type") or ""),
         )
     title = _handling_title(report_name, language)
     return _render_handling_template(title, _findings_for_handling_template(result.findings), language)
@@ -731,17 +738,27 @@ def _render_handling_template(title: str, findings: list[tuple[str, str]], langu
     return "\n".join(lines).strip() + "\n"
 
 
-def _related_mr_groups_by_responsible(related_mrs: list[object]) -> dict[str, list[dict[str, object]]]:
-    groups: dict[str, list[dict[str, object]]] = {}
+def _related_mr_groups_by_report_scope(related_mrs: list[object]) -> dict[tuple[str, str], list[dict[str, object]]]:
+    groups: dict[tuple[str, str], list[dict[str, object]]] = {}
     for item in related_mrs:
         if not isinstance(item, dict):
             continue
         owners = _responsible_people_for_split(str(item.get("responsible") or ""))
         if not owners:
             owners = ["unassigned"]
+        project_type = _normalize_report_project_type(item.get("project_type"))
         for responsible in owners:
-            groups.setdefault(responsible, []).append(item)
+            groups.setdefault((responsible, project_type), []).append(item)
     return groups
+
+
+def _normalize_report_project_type(value: object) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    if text in {"frontend", "front-end", "web", "client"}:
+        return "frontend"
+    if text in {"backend", "back-end", "server", "api"}:
+        return "backend"
+    return text
 
 
 def _canonical_responsible_text(value: str) -> str:
