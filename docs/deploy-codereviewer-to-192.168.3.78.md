@@ -1,6 +1,6 @@
 # 部署 CodeReviewer 到 192.168.3.78
 
-更新日期：2026-07-14
+更新日期：2026-07-16
 
 本文记录本次真实部署结果。通用部署原则和完整生产建议参见 [CodeReviewer-RHEL9-Deployment-Guide.md](CodeReviewer-RHEL9-Deployment-Guide.md)。
 
@@ -9,17 +9,33 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `6.23.0` |
-| 部署提交 | `4af19602e8a44e391f783e4925df669e808ca258` |
+| CodeReviewer 版本 | `7.0.3` |
+| 部署提交 | `c66e767064915bd8664ad1af2a10fa7c135a56c2` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `GET /api/version` 返回 `{"ok": true, "version": "6.23.0"}` |
+| 健康检查 | `GET /api/version` 返回 `{"ok": true, "version": "7.0.3"}` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 76 passed |
+| RHEL9 测试 | 98 passed |
+
+## 7.0.3 升级记录
+
+2026-07-16 将生产环境从 6.23.0 升级到 7.0.3。部署使用 GitHub `20260714` 分支固定提交 `c66e767064915bd8664ad1af2a10fa7c135a56c2` 的 `git archive` 制品，上传后先在 staging 目录完成 SHA-256、编译和 98 项 RHEL9 测试，再进行短暂停机切换。
+
+数据保护措施和验证结果：
+
+- 原 6.23.0 运行目录完整保留在 `/opt/codereviewer/releases/previous-6.23.0-20260716-191527`；
+- 切换前停止服务并再次复制 `/opt/codereviewer/current/data`，保留 `web_users.json`、Review History、Discussion、GitNexus 报告及索引；
+- 原有 6 个账户全部保留，并使用升级前密码逐一通过新版 Login API 和 Robot Challenge 验证；
+- 7.0.3 将原有明文密码等价迁移为 PBKDF2-SHA256 Hash，实际密码没有改变；
+- 新增 4 个试用 Developer 账户后，线上共 10 个用户，认证文件权限保持为 `0600 codereviewer:codereviewer`；
+- 新建 `/opt/codereviewer/current/data/codereviewer.db` 保存 7.x Issue Review 工作流，所有原数据文件均通过存在性和 SHA-256 校验；
+- 生产 `.env` 原文件备份为 `/etc/codereviewer/codereviewer.env.backup-20260716-191718`，没有写入源码或制品。
+
+7.0.3 默认通过 Codex CLI 接入 `192.168.3.170:8318/v1` CPA Responses API，`fallback_to_cc_switch: false`。升级时发现生产旧 CPA Key 已失效并返回 HTTP 401，更新为当前 CPA 客户端 Key 后，远端 `review.py --codex-check` 已通过。CC Switch 不再作为自动 fallback。
 
 首次部署时 GitHub token 尚缺少 `Contents: write`，因此本次部署使用 `git archive` 生成同一提交的制品，经 SSH/SFTP 传输后解压；运行目录中的 `.deployment-commit` 固定记录上述提交 SHA。2026-07-14 已补齐 `Contents: Read and write` 并成功推送 `main`，后续更新改用 GitHub 仓库作为发布源。
 
