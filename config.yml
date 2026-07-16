@@ -140,6 +140,9 @@ app:
     codex_http_api_key_env: OPENAI_API_KEY
     codex_stream_max_retries: 2
     max_retries: 3
+    # DPS reviews cannot fall back to another provider. One bounded Codex
+    # attempt avoids repeating the same 300-second request after a hard timeout.
+    dps_codex_max_retries: 1
     max_tokens: 3000
     max_diff_chars: 60000
     # GIT_VERSION reviews already have deterministic YAML/lock validation and

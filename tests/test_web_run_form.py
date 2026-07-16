@@ -58,6 +58,9 @@ class WebRunFormTests(unittest.TestCase):
         self.assertIn('maxlength="255" size="50"', page)
         self.assertIn('class="followup-adf-preview"', page)
         self.assertIn('type="button">Edit issue</button>', page)
+        self.assertIn('class="finding-head-action" data-handle-finding=', page)
+        self.assertIn('.finding-handling-form:not(.followup-active) .finding-handling-secondary { display: none; }', page)
+        self.assertNotIn('class="finding-submit-row"', page)
         self.assertIn('function adfTextPreview(document, maxLength = 180)', page)
         self.assertNotIn('Edit Issue Description (ADF)', page)
 

@@ -54,6 +54,8 @@ def run_llm_review(review_input: ReviewInput) -> LLMReviewOutput:
     timeout = int(config["timeout_seconds"])
     codex_timeout = int(config.get("codex_timeout_seconds") or timeout)
     max_retries = _retry_count(config.get("max_retries"))
+    if dps_codex_required:
+        max_retries = _retry_count(config.get("dps_codex_max_retries") or 1)
     reasoning_effort = str(config.get("reasoning_effort") or "high")
     speed = str(config.get("speed") or "standard")
     _assert_llm_runtime_level(reasoning_effort, speed)
@@ -344,21 +346,15 @@ def _looks_like_dps_project(review_input: ReviewInput) -> bool:
                     str(item.get("git_tools_module") or ""),
                 ]
             )
-    normalized = " ".join(values).lower().replace("\\", "/")
-    return any(
-        token in normalized
-        for token in (
-            "dps9",
-            "dps11",
-            "dps-repository",
-            "dps9-repository",
-            "dps11-repository",
-            "/dps/",
-            "/dps11/",
-            "/dps9/",
-            "drupalservices",
-        )
-    )
+    normalized_values = [value.lower().replace("\\", "/").strip() for value in values if value.strip()]
+    for value in normalized_values:
+        if "drupalservices" in value or any(
+            token in value for token in ("dps-repository", "dps9-repository", "dps11-repository")
+        ):
+            return True
+        if re.search(r"(?:^|/)(?:dps|dps9|dps11)(?:/|$)", value):
+            return True
+    return False
 
 
 def llm_metadata(output: LLMReviewOutput) -> dict[str, Any]:
@@ -433,7 +429,13 @@ def _call_codex_cli(
             "",
         ).strip()
         if api_key_env and not process_env.get(api_key_env):
-            raise RuntimeError(f"Codex HTTP provider requires environment variable {api_key_env}.")
+            hint = (
+                " Reopen PowerShell/VS Code after changing a Windows User environment variable, "
+                f"or import it into the current session before retrying."
+                if os.name == "nt"
+                else ""
+            )
+            raise RuntimeError(f"Codex HTTP provider requires environment variable {api_key_env}.{hint}")
         stream_retries = app_config_int("llm.codex_stream_max_retries", "LLM_CODEX_STREAM_MAX_RETRIES", 2)
         provider_config = [
             ("model_provider", f'"{provider_id}"'),

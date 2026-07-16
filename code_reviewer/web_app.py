@@ -4791,24 +4791,24 @@ def render_index(user: str = "") -> str:
     .finding-card, .timeline-card, .draft-card, .discussion-card {
       margin-bottom: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
     }
-    .finding-head, .draft-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .finding-head, .draft-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+    .finding-head-main { min-width: 0; }
+    .finding-head-action { flex: 0 0 auto; min-width: 132px; }
     .finding-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
     .finding-actions textarea { min-height: 74px; }
-    .finding-handling-form { display: grid; grid-template-columns: minmax(260px, .64fr) minmax(0, 1.36fr); gap: 18px; margin-top: 14px; }
-    .finding-handling-form:not(.followup-active) { grid-template-columns: minmax(280px, 420px) minmax(160px, 1fr); }
+    .finding-handling-form { display: grid; grid-template-columns: minmax(280px, .68fr) minmax(420px, 1.32fr); gap: 18px; margin-top: 16px; }
+    .finding-handling-form:not(.followup-active) { grid-template-columns: minmax(280px, 460px); }
     .finding-handling-primary, .finding-handling-secondary { display: grid; gap: 9px; align-content: start; min-width: 0; }
-    .finding-handling-secondary { padding-left: 18px; border-left: 1px solid var(--line); }
+    .finding-handling-secondary { min-height: 100%; padding-left: 18px; border-left: 1px solid var(--line); }
+    .finding-handling-form:not(.followup-active) .finding-handling-secondary { display: none; }
     .finding-handling-primary label, .finding-handling-secondary label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
     .finding-handling-primary textarea { min-height: 132px; }
-    .finding-submit-row { display: flex; justify-content: flex-end; gap: 8px; }
-    .finding-submit-row button { min-width: 132px; }
-    .finding-handling-form:not(.followup-active) .finding-submit-row { align-self: start; }
-    .followup-fields { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--bg) 35%, var(--panel)); }
+    .followup-fields { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--accent) 2.5%, var(--panel)); }
     .followup-fields[hidden] { display: none; }
     .followup-fields-head { display: grid; gap: 6px; }
     .followup-fields-head input { width: 100%; min-width: min(50ch, 100%); }
-    .followup-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
-    .followup-card-head strong { display: block; margin-bottom: 3px; }
+    .followup-card-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 2px; }
+    .followup-card-head strong { display: block; margin-bottom: 4px; font-size: 14px; }
     .followup-card-head button { flex: 0 0 auto; min-height: 34px; padding: 6px 12px; }
     .followup-adf-state { min-width: 0; line-height: 1.45; }
     .followup-adf-preview { display: -webkit-box; overflow: hidden; margin-top: 3px; color: var(--muted); -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
@@ -4851,8 +4851,7 @@ def render_index(user: str = "") -> str:
       .finding-handling-form:not(.followup-active) { grid-template-columns: 1fr; }
       .finding-handling-secondary { padding-left: 0; padding-top: 14px; border-left: 0; border-top: 1px solid var(--line); }
       .followup-fields-head { grid-template-columns: 1fr; }
-      .finding-submit-row { justify-content: stretch; }
-      .finding-submit-row button { width: 100%; }
+      .finding-head-action { min-width: 0; }
     }
   </style>
 </head>
@@ -7288,8 +7287,8 @@ function jiraKeyFromReportPath(reportPath) {
       const needsApproval = handling && handling.approval_status === 'pending';
       const isManager = role === 'manager';
       const isPendingBlocker = pendingBlockerIds.has(String(finding.id || ''));
-      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta">${escapeHtml(finding.file_path || 'No file')} · ${escapeHtml(statusLabel(finding.lineage_state))}</div></div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : ''}</div>
-        ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-handling-form"><div class="finding-handling-primary"><label>处理结果<select id="disposition-${finding.id}" data-finding-disposition="${finding.id}"><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select></label><label>处理说明<textarea id="note-${finding.id}" placeholder="说明修改内容、判断依据及测试结果（必填）"></textarea></label></div><div class="finding-handling-secondary"><div id="followup-${finding.id}" class="followup-fields" hidden><div class="followup-fields-head"><label>Issue Summary<input id="jira-summary-${finding.id}" maxlength="255" size="50" placeholder="概括待跟进问题，建议 20–50 个字符"></label></div><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('Describe the follow-up requirement.')))}</textarea><div class="followup-card-head"><div class="followup-adf-state"><strong>Issue Description</strong><div id="jira-adf-preview-${finding.id}" class="followup-adf-preview">Describe the follow-up requirement.</div><div id="jira-adf-status-${finding.id}" class="meta">ADF description not reviewed.</div></div><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit issue</button></div></div><div class="finding-submit-row"><button data-handle-finding="${finding.id}" type="button">Submit handling</button></div></div></div>`}
+      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div class="finding-head-main"><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta">${escapeHtml(finding.file_path || 'No file')} · ${escapeHtml(statusLabel(finding.lineage_state))}</div></div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : `<button class="finding-head-action" data-handle-finding="${finding.id}" type="button">Submit handling</button>`}</div>
+        ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-handling-form"><div class="finding-handling-primary"><label>处理结果<select id="disposition-${finding.id}" data-finding-disposition="${finding.id}"><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select></label><label>处理说明<textarea id="note-${finding.id}" placeholder="说明修改内容、判断依据及测试结果（必填）"></textarea></label></div><div class="finding-handling-secondary"><div id="followup-${finding.id}" class="followup-fields" hidden><div class="followup-fields-head"><label>Issue Summary<input id="jira-summary-${finding.id}" maxlength="255" size="50" placeholder="概括待跟进问题，建议 20–50 个字符"></label></div><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('Describe the follow-up requirement.')))}</textarea><div class="followup-card-head"><div class="followup-adf-state"><strong>Issue Description</strong><div id="jira-adf-preview-${finding.id}" class="followup-adf-preview">Describe the follow-up requirement.</div><div id="jira-adf-status-${finding.id}" class="meta">ADF description not reviewed.</div></div><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit issue</button></div></div></div></div>`}
       </article>`;
     }
 

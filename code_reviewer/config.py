@@ -359,17 +359,57 @@ def apply_speed_profile(speed: str | None = None, *, force: bool = False) -> str
     return selected
 
 
+def _load_windows_user_environment(
+    names: tuple[str, ...] = ("OPENAI_API_KEY",),
+    *,
+    windows: bool | None = None,
+) -> list[str]:
+    """Refresh selected user-scoped variables for already-open Windows shells.
+
+    Windows broadcasts environment changes to newly started applications, but an
+    existing PowerShell/VS Code process keeps its old environment snapshot.  Read
+    only the explicitly approved credential names and never overwrite a value
+    already supplied by the process or .env file.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return []
+    try:
+        import winreg
+
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ)
+    except (ImportError, OSError):
+        return []
+    loaded: list[str] = []
+    try:
+        for name in names:
+            if os.environ.get(name):
+                continue
+            try:
+                value, _value_type = winreg.QueryValueEx(key, name)
+            except OSError:
+                continue
+            text = str(value or "").strip()
+            if text:
+                os.environ[name] = text
+                loaded.append(name)
+    finally:
+        winreg.CloseKey(key)
+    return loaded
+
+
 def load_environment() -> None:
     env_file = ROOT_DIR / ".env"
     loaded = load_dotenv(env_file)
-    if loaded or not env_file.exists():
-        return
-    for raw_line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+    if not loaded and env_file.exists():
+        for raw_line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+    _load_windows_user_environment()
 
 
 load_environment()
@@ -470,6 +510,7 @@ def llm_config() -> dict[str, str | int]:
         "use_cc_switch": app_config_str("llm.use_cc_switch", "LLM_USE_CC_SWITCH", ""),
         "timeout_seconds": app_config_int("llm.timeout_seconds", "LLM_TIMEOUT_SECONDS", 180),
         "max_retries": app_config_int("llm.max_retries", "LLM_MAX_RETRIES", 3),
+        "dps_codex_max_retries": app_config_int("llm.dps_codex_max_retries", "DPS_CODEX_MAX_RETRIES", 1),
     }
 
 

@@ -7,11 +7,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
 from code_reviewer.local_workspaces import WorkspaceEntry, _git_tools_entries_from_text
 from code_reviewer.analyzer import _jira_involved_file_findings
-from code_reviewer.config import DEFAULT_CC_SWITCH_PROVIDER, llm_config
+from code_reviewer.config import DEFAULT_CC_SWITCH_PROVIDER, _load_windows_user_environment, llm_config
 from code_reviewer.gitlab_client import GitLabClient
 from code_reviewer.jira_client import JiraIssue
 from code_reviewer.models import ChangedFile, Finding, ReviewInput, ReviewResult
@@ -29,7 +30,7 @@ from code_reviewer.review_service import (
     _missing_remote_branch_error,
     review_fingerprint_from_merge_requests,
 )
-from code_reviewer.llm_provider import _call_codex_cli, preview_llm_prompt_budget
+from code_reviewer.llm_provider import _call_codex_cli, _looks_like_dps_project, preview_llm_prompt_budget
 from code_reviewer.local_changes import (
     _ensure_mr_commits,
     _issue_branch_candidates,
@@ -41,6 +42,31 @@ from web import _acquire_instance_lock
 
 
 class LocalContextTests(unittest.TestCase):
+    def test_windows_user_openai_key_is_loaded_for_an_existing_shell(self) -> None:
+        closed: list[object] = []
+        registry_key = object()
+        fake_winreg = SimpleNamespace(
+            HKEY_CURRENT_USER=object(),
+            KEY_READ=1,
+            OpenKey=lambda *_args: registry_key,
+            QueryValueEx=lambda key, name: ("user-scoped-key", 1),
+            CloseKey=closed.append,
+        )
+        with (
+            patch.dict(sys.modules, {"winreg": fake_winreg}),
+            patch.dict(os.environ, {"OPENAI_API_KEY": ""}),
+        ):
+            loaded = _load_windows_user_environment(windows=True)
+            self.assertEqual(os.environ["OPENAI_API_KEY"], "user-scoped-key")
+
+        self.assertEqual(loaded, ["OPENAI_API_KEY"])
+        self.assertEqual(closed, [registry_key])
+
+    def test_dps_root_project_requires_codex(self) -> None:
+        self.assertTrue(_looks_like_dps_project(ReviewInput(project="web-sv-build/dps")))
+        self.assertTrue(_looks_like_dps_project(ReviewInput(project="web-sv-build/dps11")))
+        self.assertFalse(_looks_like_dps_project(ReviewInput(project="web-sv-build/wvadmin")))
+
     def test_deleted_target_branch_uses_exact_mr_base_context(self) -> None:
         workspace = WorkspaceEntry(
             project_path="group/project",
