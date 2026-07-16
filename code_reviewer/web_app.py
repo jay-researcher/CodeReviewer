@@ -4014,6 +4014,19 @@ def render_index(user: str = "") -> str:
       margin: 0 0 10px;
       font-size: 14px;
     }
+    .thread-reply-column { padding: 18px; background: var(--panel); }
+    .thread-section-heading { margin: 0 0 14px; padding: 0 2px 12px; border-bottom: 1px solid var(--line); }
+    .thread-section-heading h3 { margin: 0 0 4px; font-size: 18px; line-height: 1.35; }
+    .thread-section-heading p { margin: 0; line-height: 1.45; }
+    .thread-reply-column .thread-form { gap: 12px; padding: 0 2px 2px; }
+    .thread-reply-card { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--bg) 35%, var(--panel)); }
+    .thread-reply-card label { display: grid; gap: 6px; margin: 0; color: var(--muted); font-size: 12px; }
+    .thread-reply-card textarea { min-height: 112px; background: var(--panel); }
+    .thread-reply-card-head h4 { margin: 0 0 4px; font-size: 14px; }
+    .thread-reply-card-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .thread-reply-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .thread-reply-actions button { min-width: 112px; }
+    .thread-reply-column .handling-guidance { margin-top: 0; }
     .thread-messages {
       display: grid;
       gap: 8px;
@@ -5095,20 +5108,31 @@ __ADMIN_TRACE_SECTION__
           <h3>History</h3>
           <div id="threadMessages" class="thread-messages meta"></div>
         </section>
-        <section class="thread-column">
-          <h3>Reply</h3>
+        <section class="thread-column thread-reply-column">
+          <div class="thread-section-heading">
+            <h3>Reply</h3>
+            <p class="meta">记录本次 Review 的沟通结论，或整理需要后续跟进的事项。</p>
+          </div>
           <div class="thread-form">
-            <label>Message
-              <textarea id="threadMessage" placeholder="记录组长处理说明，例如：1 已整改，Pass通过；2 不是阻碍，另报issue跟进。"></textarea>
-            </label>
-            <div class="actions">
-              <button class="secondary small-action" id="sendThreadMessageBtn" type="button">Send</button>
+            <div class="thread-reply-card">
+              <label>Reply message
+                <textarea id="threadMessage" placeholder="记录组长处理说明，例如：1 已整改，Pass通过；2 不是阻碍，另报 issue 跟进。"></textarea>
+              </label>
+              <div class="thread-reply-actions">
+                <button id="sendThreadMessageBtn" type="button">Send reply</button>
+              </div>
             </div>
-            <label>Follow-up整理说明
-              <textarea id="followupInstruction" placeholder="告诉 LLM/整理器需要怎样汇总后续跟进清单，例如：只整理不是阻碍、另报 issue 跟进的改善项。"></textarea>
-            </label>
-            <div class="actions">
-              <button class="secondary small-action" id="generateFollowupsBtn" type="button">Generate Follow-ups</button>
+            <div class="thread-reply-card">
+              <div class="thread-reply-card-head">
+                <h4>Follow-up 整理</h4>
+                <p>定义整理范围，生成的内容会显示在右侧 Follow-up Draft。</p>
+              </div>
+              <label>整理要求
+                <textarea id="followupInstruction" placeholder="例如：只整理“不是阻碍，另报 Jira”的改善项，并按优先级列出验收目标。"></textarea>
+              </label>
+              <div class="thread-reply-actions">
+                <button class="secondary" id="generateFollowupsBtn" type="button">Generate follow-ups</button>
+              </div>
             </div>
             <aside class="handling-guidance" aria-labelledby="handlingGuidanceTitle">
               <h4 id="handlingGuidanceTitle">处理说明</h4>

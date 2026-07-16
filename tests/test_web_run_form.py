@@ -82,6 +82,15 @@ class WebRunFormTests(unittest.TestCase):
         self.assertIn("textContent = 'Apply description';", page)
         self.assertIn('id="closeDraftEditorBtn" class="secondary small-action" type="button">Cancel</button>', page)
 
+    def test_discuss_reply_matches_issue_review_card_layout(self) -> None:
+        page = render_index("admin")
+
+        self.assertIn('class="thread-column thread-reply-column"', page)
+        self.assertIn('class="thread-section-heading"', page)
+        self.assertEqual(page.count('class="thread-reply-card"'), 2)
+        self.assertIn('id="sendThreadMessageBtn" type="button">Send reply</button>', page)
+        self.assertIn('id="generateFollowupsBtn" type="button">Generate follow-ups</button>', page)
+
 
 if __name__ == "__main__":
     unittest.main()

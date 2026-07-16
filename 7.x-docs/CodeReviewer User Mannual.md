@@ -568,6 +568,7 @@ ADF 节点、层级或属性不符合规则。重点检查：
 - Critical、High 和 Remaining blockers 指标支持点击定位到 Problem List 中第一个匹配的 Finding。
 - ADF Issue Description 默认使用可视化 Block 编辑器，可从工具栏添加组件、拖放排序、编辑或删除；ADF JSON 仅作为隐藏存储格式，不再要求用户直接编辑。
 - Jira Follow-up 弹窗使用语义明确的 `Apply description` / `Save draft` 与 `Cancel` 操作。
+- Discuss 的 Reply 列与 Issue Review 详情区统一为安全间距、卡片分组、字段标签和右对齐操作布局。
 
 ---
 
