@@ -2,7 +2,7 @@
 
 > 中文名称：CodeReviewer 7.x 用户手册
 >
-> 当前适用版本：7.0.0
+> 当前适用版本：7.0.1
 >
 > 文档性质：7.x 持续维护主手册
 >
@@ -499,6 +499,18 @@ ADF 节点、层级或属性不符合规则。重点检查：
 
 可选的 Atlaskit React/Vite 资源未构建。系统仍会使用内置 ADF 编辑和预览，不影响 ADF JSON、Expand、表格、列表及截图草稿。
 
+### LLM provider `codex-cli` timed out
+
+如果任务已经发现 MR，但在约 300 秒后连续重试并失败，说明问题位于 Codex 通道而不是 Jira 或 GitLab 抓取。Windows 本地环境默认通过 `http://127.0.0.1:8318/v1` 接入 CLIProxyAPI；请确认：
+
+- CLIProxyAPI 正在监听 8318 端口；
+- `OPENAI_API_KEY` 保存的是 CLIProxyAPI 客户端 key，且未写入仓库；
+- `LLM_CODEX_HTTP_API_KEY_ENV` 或策略配置指向 `OPENAI_API_KEY`；
+- CLIProxyAPI 的 `/v1/models` 和 Responses API 均可访问；
+- 修复通道后重新运行 Review，失败的旧任务不会自动续跑。
+
+DPS/DPS9/DPS11 项目必须完成 Codex 审查。Codex 连续失败时，系统不会降级为规则扫描或其他 LLM，以免将不完整报告误认为正式 Review 结果。
+
 ## 15. 数据与安全注意事项
 
 - 不要将密码、Token 或 Jira/GitLab 凭据写入报告、Discussion 或 Git。
@@ -546,6 +558,12 @@ ADF 节点、层级或属性不符合规则。重点检查：
 - 并发版本冲突不会静默覆盖。
 
 ## 17. 7.x 版本更新记录
+
+### 7.0.1 — 2026-07-16
+
+- Windows 本地 CodeReviewer 默认通过 CLIProxyAPI `127.0.0.1:8318/v1` 调用 Codex Responses API。
+- CLIProxyAPI 凭据继续由外部 `OPENAI_API_KEY` 注入，不保存到 Git 仓库。
+- 补充 Codex 300 秒超时的诊断说明，明确 MR 已发现时无需重复排查 Jira/GitLab。
 
 ### 7.0.0 — 2026-07-15
 

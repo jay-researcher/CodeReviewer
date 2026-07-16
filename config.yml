@@ -134,7 +134,10 @@ app:
     codex_timeout_seconds: 300
     codex_ignore_user_config: true
     codex_force_http: true
-    codex_http_base_url: https://chatgpt.com/backend-api/codex
+    # Local CodeReviewer uses CLIProxyAPI's OpenAI-compatible Responses API.
+    # Keep the credential outside the repository in OPENAI_API_KEY.
+    codex_http_base_url: http://127.0.0.1:8318/v1
+    codex_http_api_key_env: OPENAI_API_KEY
     codex_stream_max_retries: 2
     max_retries: 3
     max_tokens: 3000
