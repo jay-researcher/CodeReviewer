@@ -27,6 +27,12 @@ class UiFeedback7211Tests(unittest.TestCase):
         ]
         self.assertIn("$('coverageJira').value = '';", open_coverage)
         self.assertNotIn("$('jira')?.value", open_coverage)
+        self.assertIn("resumeCoverageJob({ preserveJiraInput: true });", open_coverage)
+        self.assertIn(
+            "if (!options.preserveJiraInput && scope.jira != null) $('coverageJira').value",
+            self.page,
+        )
+        self.assertIn("pollCoverageJob(data.job.id || '', options);", self.page)
 
     def test_sprint_review_uses_overview_and_issue_tabs(self) -> None:
         page = self.page
@@ -43,8 +49,19 @@ class UiFeedback7211Tests(unittest.TestCase):
             ".sprint-application-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));",
             page,
         )
-        self.assertIn(".sprint-overview-metric .meta { font-size: 13px; }", page)
-        self.assertIn("font-size: 22px;", page)
+        self.assertIn(".sprint-overview-metric .meta { font-size: 14px; }", page)
+        self.assertIn("font-size: 24px;", page)
+        self.assertIn(".sprint-application-head strong", page)
+        self.assertIn("font-size: 16px;", page)
+
+    def test_sprint_overview_uses_readable_card_typography(self) -> None:
+        page = self.page
+        self.assertIn(".coverage-dialog {", page)
+        self.assertIn(".coverage-report-total strong { font-size: 24px;", page)
+        self.assertIn(".coverage-lifecycle-stat span { display: block; color: var(--muted); font-size: 13px; }", page)
+        self.assertIn(".coverage-application-state strong { display: block; margin-top: 2px; font-size: 15px; }", page)
+        self.assertIn(".coverage-card-key {", page)
+        self.assertIn(".coverage-card-summary {", page)
 
     def test_user_management_selects_first_user_and_has_a_wider_list(self) -> None:
         page = self.page

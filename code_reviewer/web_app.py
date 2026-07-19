@@ -52,6 +52,7 @@ from .config_store import (
 from .local_workspaces import git_tools_project_entries
 from .network import check_network_dict
 from .report import handling_result_filename, render_handling_result_template_from_markdown
+from .review_scope import ReviewScope, review_scope_for_merge_request
 from .review_service import (
     ReviewCancelled,
     jira_issue_review_fingerprint,
@@ -64,7 +65,13 @@ from .review_service import (
 )
 from .storage import load_review_history
 from .adf import ADFValidationError, empty_adf, render_adf_html, validate_adf
-from .workflow_store import blocking_severities, report_fingerprint, workflow_store
+from .workflow_store import (
+    blocking_severities,
+    report_fingerprint,
+    review_scope_label,
+    scope_people,
+    workflow_store,
+)
 
 
 WEB_USERS_FILE = Path(os.getenv("WEB_USERS_FILE", str(DATA_DIR / "web_users.json"))).expanduser()
@@ -119,6 +126,20 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not self._client_ip_allowed():
             self._send_ip_forbidden(parsed.path)
+            return
+        if parsed.path == "/assets/login-code-review-bg.png":
+            asset = WEB_STATIC_DIR / "login-code-review-bg.png"
+            if not asset.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            content = asset.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(content)
             return
         if parsed.path == "/login":
             self._send_html(render_login())
@@ -1917,13 +1938,19 @@ def list_reports(output_dir: str = "", user: str = "", search: str = "", days: i
     for directory in _report_history_directories(output_dir):
         query = f"?output_dir={quote(str(directory), safe='')}"
         for path in directory.rglob("*.md"):
-            if not _can_access_report(directory, path, user):
-                continue
             stat = path.stat()
             if cutoff and stat.st_mtime < cutoff:
                 continue
             relative = path.relative_to(directory).as_posix()
-            responsible = path.relative_to(directory).parts[0] if len(path.relative_to(directory).parts) > 1 else ""
+            owner = path.relative_to(directory).parts[0] if len(path.relative_to(directory).parts) > 1 else ""
+            metadata = _read_report_metadata(path)
+            if not _can_access_report(directory, path, user, metadata=metadata):
+                continue
+            metadata_people = sorted(
+                scope_people(metadata.get("responsible_scope") or metadata.get("responsible")),
+                key=str.casefold,
+            )
+            responsible = "+".join(metadata_people) or owner
             if not _report_matches_search(relative, path.name, responsible, search):
                 continue
             reports.append(
@@ -1931,6 +1958,13 @@ def list_reports(output_dir: str = "", user: str = "", search: str = "", days: i
                     "name": path.name,
                     "relative_path": relative,
                     "responsible": responsible,
+                    "report_owner": owner,
+                    "application": str(metadata.get("application") or ""),
+                    "release_line": str(metadata.get("release_line") or ""),
+                    "scope_label": review_scope_label(
+                        str(metadata.get("application") or ""),
+                        str(metadata.get("release_line") or ""),
+                    ),
                     "output_dir": str(directory),
                     "output_dir_name": directory.name,
                     "size": stat.st_size,
@@ -1997,6 +2031,7 @@ def _coverage_issue_row(jira_key: str, summary: str = "", jira_status: str = "")
         "jira_status": jira_status,
         "responsibles": set(),
         "applications": set(),
+        "review_scopes": set(),
         "project_paths": set(),
         "mr_count": 0,
     }
@@ -2004,61 +2039,41 @@ def _coverage_issue_row(jira_key: str, summary: str = "", jira_status: str = "")
 
 def _review_application_from_discovery(item: dict[str, object]) -> str:
     """Map an MR to its release application using configured GitLab metadata."""
-    explicit = str(item.get("application") or "").strip()
-    if explicit in REVIEW_APPLICATION_ORDER:
-        return explicit
-    group = str(item.get("git_tools_group") or "").strip().lower()
-    module = str(item.get("git_tools_module") or "").strip().lower()
-    project_name = str(item.get("project_name") or "").strip().lower()
-    project_path = str(item.get("gitlab_project") or item.get("project_path") or "").strip().lower()
-    identity = " ".join((module, project_name, project_path))
+    return _review_scope_from_discovery(item).application
 
-    if group in {"dps9-repository", "dps11-repository"}:
-        return "DPS"
-    if group == "wvadmin-repository":
-        return "WVAdmin"
-    if group == "itrade-client":
-        return "Services Terminal" if "service-terminal" in identity or "services-terminal" in identity else "iTrade Client"
-    if group == "build-repository":
-        if "wvadmin" in identity:
-            return "WVAdmin"
-        if "service-terminal" in identity or "services-terminal" in identity:
-            return "Services Terminal"
-        if "itrade-client" in identity:
-            return "iTrade Client"
-        if module == "dps" or "web-sv-build/dps" in project_path:
-            return "DPS"
 
-    # Config metadata is preferred. These path fallbacks cover older discovery
-    # records created before git-tools group/module fields were persisted.
-    if "/dps/" in project_path or "/dps11/" in project_path or project_path.endswith("/dps"):
-        return "DPS"
-    if "/wvadm/" in project_path or project_path.endswith("/wvadmin"):
-        return "WVAdmin"
-    if "itrade-sv/terminal/" in project_path or "services-terminal" in project_path:
-        return "Services Terminal"
-    if "itrade-sv/client/" in project_path or "itrade-client" in project_path:
-        return "iTrade Client"
-    return "Unmapped"
+def _review_scope_from_discovery(item: dict[str, object]) -> ReviewScope:
+    normalized = dict(item)
+    normalized.setdefault("project_path", item.get("gitlab_project") or item.get("project_path"))
+    return review_scope_for_merge_request(normalized)
 
 
 def _application_review_progress(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    scoped: dict[str, list[dict[str, object]]] = {}
+    scoped: dict[tuple[str, str], list[dict[str, object]]] = {}
     for row in rows:
+        statuses = row.get("scope_statuses")
+        if isinstance(statuses, list) and statuses:
+            for item in statuses:
+                if not isinstance(item, dict):
+                    continue
+                key = (
+                    str(item.get("application") or "Unmapped"),
+                    str(item.get("release_line") or ""),
+                )
+                scoped.setdefault(key, []).append({**row, **item})
+            continue
         applications = row.get("applications")
         values = applications if isinstance(applications, list) else []
-        normalized = list(dict.fromkeys(str(value or "").strip() for value in values if str(value or "").strip()))
-        if not normalized:
-            normalized = ["Unmapped"]
+        normalized = list(dict.fromkeys(str(value or "").strip() for value in values if str(value or "").strip())) or ["Unmapped"]
         for application in normalized:
-            scoped.setdefault(application, []).append(row)
+            scoped.setdefault((application, ""), []).append(row)
 
     result: list[dict[str, object]] = []
     status_names = ("missing", "running", "pending", "ready", "passed", "failed")
-    for application, application_rows in scoped.items():
+    for (application, release_line), application_rows in scoped.items():
         counts = {name: 0 for name in status_names}
         for row in application_rows:
-            status = str(row.get("workflow_status") or "missing")
+            status = str(row.get("scope_status") or row.get("workflow_status") or "missing")
             counts[status if status in counts else "missing"] += 1
         total = len(application_rows)
         passed = counts["passed"]
@@ -2069,6 +2084,8 @@ def _application_review_progress(rows: list[dict[str, object]]) -> list[dict[str
         result.append(
             {
                 "application": application,
+                "release_line": release_line,
+                "scope_label": review_scope_label(application, release_line),
                 "issue_count": total,
                 "issues_with_reports": report_count,
                 "issues_without_reports": total - report_count,
@@ -2080,7 +2097,14 @@ def _application_review_progress(rows: list[dict[str, object]]) -> list[dict[str
             }
         )
     order = {name: index for index, name in enumerate(REVIEW_APPLICATION_ORDER)}
-    return sorted(result, key=lambda item: (order.get(str(item["application"]), len(order)), str(item["application"])))
+    return sorted(
+        result,
+        key=lambda item: (
+            order.get(str(item["application"]), len(order)),
+            str(item.get("release_line") or ""),
+            str(item["application"]),
+        ),
+    )
 
 
 def _emit_coverage_progress(progress: object, event: str, message: str, **data: object) -> None:
@@ -2176,8 +2200,9 @@ def build_review_coverage(
         row["jira_status"] = str(item.get("jira_status") or row.get("jira_status") or "")
         if responsible:
             row["responsibles"].update(_split_people(responsible))
-        application = _review_application_from_discovery(item)
-        row["applications"].add(application)
+        review_scope = _review_scope_from_discovery(item)
+        row["applications"].add(review_scope.application)
+        row["review_scopes"].add((review_scope.application, review_scope.release_line))
         project_path = str(item.get("gitlab_project") or item.get("project_path") or "").strip()
         if project_path:
             row["project_paths"].add(project_path)
@@ -2254,22 +2279,67 @@ def build_review_coverage(
             workflow_status = "missing"
         workflow_issue = workflow_issues.get(key) or {}
         current_cycle = workflow_issue.get("current_cycle") if isinstance(workflow_issue.get("current_cycle"), dict) else {}
-        applications = sorted(
-            row.get("applications") or {"Unmapped"},
-            key=lambda name: (
-                REVIEW_APPLICATION_ORDER.index(name) if name in REVIEW_APPLICATION_ORDER else len(REVIEW_APPLICATION_ORDER),
-                str(name),
-            ),
+        review_scopes = set(row.get("review_scopes") or set())
+        review_scopes.update(
+            (
+                str(item.get("application") or "Unmapped"),
+                str(item.get("release_line") or ""),
+            )
+            for item in report_states
         )
+        if not review_scopes:
+            review_scopes = {("Unmapped", "")}
+        scope_statuses: list[dict[str, object]] = []
+        for application, release_line in sorted(
+            review_scopes,
+            key=lambda name: (
+                REVIEW_APPLICATION_ORDER.index(name[0]) if name[0] in REVIEW_APPLICATION_ORDER else len(REVIEW_APPLICATION_ORDER),
+                str(name[1]),
+            ),
+        ):
+            scoped_reports = [
+                item
+                for item in report_states
+                if str(item.get("application") or "Unmapped") == application
+                and str(item.get("release_line") or "") == release_line
+            ]
+            if active_jobs:
+                scope_status = "running"
+            elif scoped_reports:
+                scope_status = _aggregate_coverage_report_status(scoped_reports)
+            elif failed_jobs:
+                scope_status = "failed"
+            else:
+                scope_status = "missing"
+            scope_statuses.append(
+                {
+                    "application": application,
+                    "release_line": release_line,
+                    "scope_label": review_scope_label(application, release_line),
+                    "scope_status": scope_status,
+                    "has_report": bool(scoped_reports),
+                    "report_count": len(scoped_reports),
+                }
+            )
+        applications = list(dict.fromkeys(item["application"] for item in scope_statuses))
         rows.append(
             {
                 **{
                     name: value
                     for name, value in row.items()
-                    if name not in {"responsibles", "applications", "project_paths"}
+                    if name not in {"responsibles", "applications", "review_scopes", "project_paths"}
                 },
                 "responsible": "+".join(sorted(row.get("responsibles") or [], key=str.lower)) or "-",
                 "applications": applications,
+                "application_scopes": [
+                    {
+                        "application": item["application"],
+                        "release_line": item["release_line"],
+                        "scope_label": item["scope_label"],
+                    }
+                    for item in scope_statuses
+                ],
+                "scope_statuses": scope_statuses,
                 "project_paths": sorted(row.get("project_paths") or [], key=str.lower),
                 "workflow_status": workflow_status,
                 "report_review_status": report_review_status,
@@ -2326,6 +2396,8 @@ def _coverage_report_state(report: dict[str, object]) -> dict[str, object]:
     passed = any(isinstance(item, dict) and item.get("kind") == "manual-pass" for item in messages)
     handling = thread.get("handling_results") if isinstance(thread.get("handling_results"), dict) else {}
     summary = _handling_summary(findings, handling)
+    metadata = _extract_report_metadata(text)
+    scope = review_scope_for_merge_request(metadata)
     if passed:
         status = "passed"
     elif not findings or (summary["pending"] == 0 and summary["blocking_pending"] == 0):
@@ -2337,6 +2409,9 @@ def _coverage_report_state(report: dict[str, object]) -> dict[str, object]:
         "finding_count": len(findings),
         "handled_count": summary["completed"],
         "blocking_pending": summary["blocking_pending"],
+        "application": scope.application,
+        "release_line": scope.release_line,
+        "scope_label": review_scope_label(scope.application, scope.release_line),
     }
 
 
@@ -3099,7 +3174,7 @@ def list_responsibles(output_dir: str = "", user: str = "", days: int | None = N
                 continue
             relative_parts = path.relative_to(directory).parts
             responsible = relative_parts[0] if len(relative_parts) > 1 else "__root__"
-            if not _can_access_responsible(responsible, user):
+            if not _can_access_report(directory, path, user):
                 continue
             label = "root" if responsible == "__root__" else responsible
             group_key = f"{directory}::{responsible}" if multi_dir else responsible
@@ -3160,7 +3235,13 @@ def _report_dir(output_dir: str = "") -> Path:
     return (Path(output_dir).expanduser() if output_dir else report_output_dir()).resolve()
 
 
-def _can_access_report(base: Path, report_path: Path, user: str) -> bool:
+def _can_access_report(
+    base: Path,
+    report_path: Path,
+    user: str,
+    *,
+    metadata: dict[str, object] | None = None,
+) -> bool:
     if not user:
         return False
     try:
@@ -3168,7 +3249,24 @@ def _can_access_report(base: Path, report_path: Path, user: str) -> bool:
     except ValueError:
         return False
     responsible = parts[0] if len(parts) > 1 else "__root__"
-    return _can_access_responsible(responsible, user)
+    if _can_access_responsible(responsible, user):
+        return True
+    metadata = metadata if metadata is not None else _read_report_metadata(report_path)
+    report_people = {
+        item.casefold()
+        for item in scope_people(metadata.get("responsible_scope") or metadata.get("responsible"))
+    }
+    allowed = {item.casefold() for item in _web_user_responsibles(user)}
+    return bool(report_people & allowed)
+
+
+def _read_report_metadata(path: Path, max_chars: int = 65536) -> dict[str, object]:
+    """Read only the report header where the hidden metadata contract lives."""
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as stream:
+            return _extract_report_metadata(stream.read(max(4096, max_chars)))
+    except OSError:
+        return {}
 
 
 def _can_access_responsible(responsible: str, user: str) -> bool:
@@ -3258,8 +3356,11 @@ def _issue_access_allowed(user: str, jira_key: str) -> bool:
     if not detail:
         return False
     issue = detail.get("issue") if isinstance(detail.get("issue"), dict) else {}
-    owners = {item.lower() for item in _split_people(str(issue.get("responsible") or ""))}
-    allowed = {item.lower() for item in _web_user_responsibles(user)}
+    owners = {
+        item.casefold()
+        for item in scope_people(issue.get("responsible_scope") or issue.get("responsible"))
+    }
+    allowed = {item.casefold() for item in _web_user_responsibles(user)}
     return bool(owners & allowed)
 
 
@@ -3474,31 +3575,36 @@ def _sync_workflow_history(limit: int = 10000) -> None:
             continue
         metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
         summary = str(metadata.get("jira_summary") or "")
-        responsible = str(metadata.get("responsible") or metadata.get("web_report_owner") or report_path.parent.name)
+        responsible_values = scope_people(
+            metadata.get("responsible_scope")
+            or metadata.get("responsible")
+            or metadata.get("web_report_owner")
+            or report_path.parent.name
+        )
+        responsible = "+".join(sorted(responsible_values, key=str.casefold))
         findings = _extract_report_findings(report_path.read_text(encoding="utf-8", errors="ignore"))
         cycle_id, sprint_id = _workflow_cycle_from_history_entry(
             store, entry, metadata, jira_key, summary, responsible
         )
         run_group_id = str(metadata.get("run_group_id") or "")
         related_mrs = metadata.get("related_merge_requests")
-        application_candidates = {
-            _review_application_from_discovery(item)
+        related_scopes = {
+            _review_scope_from_discovery(item)
             for item in related_mrs
             if isinstance(item, dict)
         } if isinstance(related_mrs, list) else set()
-        if not application_candidates:
-            application_candidates.add(
-                _review_application_from_discovery(
-                    {
-                        "application": metadata.get("application"),
-                        "git_tools_group": metadata.get("git_tools_group"),
-                        "git_tools_module": metadata.get("git_tools_module"),
-                        "project_name": metadata.get("project_name"),
-                        "project_path": metadata.get("git_tools_project_path") or entry.get("project"),
-                    }
-                )
-            )
-        application = next(iter(application_candidates)) if len(application_candidates) == 1 else "Unmapped"
+        metadata_scope = _review_scope_from_discovery(
+            {
+                **metadata,
+                "project_path": metadata.get("git_tools_project_path") or entry.get("project"),
+            }
+        )
+        if not related_scopes:
+            related_scopes.add(metadata_scope)
+        if len(related_scopes) == 1:
+            report_scope = next(iter(related_scopes))
+        else:
+            report_scope = ReviewScope("Unmapped", "Unmapped release line")
         if run_group_id:
             store.create_run_group(
                 cycle_id=cycle_id,
@@ -3519,8 +3625,9 @@ def _sync_workflow_history(limit: int = 10000) -> None:
             cycle_id=cycle_id,
             run_group_id=run_group_id,
             project_type=str(metadata.get("split_report_project_type") or metadata.get("project_type") or ""),
-            application=application,
-            responsible_scope=str(metadata.get("responsible_scope") or responsible),
+            application=report_scope.application,
+            release_line=report_scope.release_line,
+            responsible_scope=metadata.get("responsible_scope") or responsible,
             mr_fingerprint=str(metadata.get("review_fingerprint") or ""),
             stable_fingerprint=str(metadata.get("review_stable_fingerprint") or ""),
         )
@@ -3650,6 +3757,7 @@ def _filter_history_for_user(history: list[dict[str, object]], user: str) -> lis
 
 def _web_history_item(item: dict[str, object]) -> dict[str, object]:
     counts = item.get("severity_counts")
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     return {
         "reviewed_at": item.get("reviewed_at") or "",
         "report_path": item.get("report_path") or "",
@@ -3661,6 +3769,16 @@ def _web_history_item(item: dict[str, object]) -> dict[str, object]:
         "conclusion": item.get("conclusion") or "",
         "finding_count": item.get("finding_count") or 0,
         "severity_counts": counts if isinstance(counts, dict) else {},
+        "application": metadata.get("application") or "",
+        "release_line": metadata.get("release_line") or "",
+        "scope_label": review_scope_label(
+            str(metadata.get("application") or ""),
+            str(metadata.get("release_line") or ""),
+        ),
+        "responsible_scope": sorted(
+            scope_people(metadata.get("responsible_scope") or metadata.get("responsible")),
+            key=str.casefold,
+        ),
     }
 
 
@@ -3668,10 +3786,19 @@ def _history_report_belongs_to_user(report_path: Path, user: str) -> bool:
     if not user or not report_path:
         return False
     try:
-        base = report_output_dir().expanduser().resolve()
         target = report_path.expanduser().resolve()
-        if base == target or base in target.parents:
-            return _can_access_report(base, target, user)
+        for base in _report_history_directories():
+            if base == target or base in target.parents:
+                return _can_access_report(base, target, user)
+        if target.is_file():
+            metadata = _read_report_metadata(target)
+            report_people = {
+                item.casefold()
+                for item in scope_people(metadata.get("responsible_scope") or metadata.get("responsible"))
+            }
+            allowed = {item.casefold() for item in _web_user_responsibles(user)}
+            if report_people & allowed:
+                return True
     except Exception:
         pass
     return user.lower() in {part.lower() for part in report_path.parts}
@@ -4233,6 +4360,7 @@ _CONFIG_SENSITIVE_KEY = re.compile(r"(?:password|secret|api[_-]?key|private[_-]?
 _PROJECT_EDITABLE_FIELDS = {
     "repository_url", "responsible", "project_name", "llm_model",
     "branch", "branches", "dev_branch", "type", "project_type", "application",
+    "release_line", "release_lines",
 }
 
 
@@ -4585,23 +4713,27 @@ def render_login() -> str:
   <style>
     :root {{
       color-scheme: light dark;
-      --bg: #f6f7f9;
-      --panel: #ffffff;
-      --text: #1d232b;
-      --muted: #68717d;
-      --line: #d9dee7;
+      --bg: #071a33;
+      --panel: rgba(255, 255, 255, .96);
+      --text: #10243e;
+      --muted: #5b6f87;
+      --line: #cddcf0;
       --accent: #0b6bcb;
+      --accent-strong: #0754a3;
+      --accent-soft: #eaf4ff;
       --danger: #b42318;
       --ok: #137333;
     }}
     @media (prefers-color-scheme: dark) {{
       :root {{
-        --bg: #111418;
-        --panel: #171b21;
-        --text: #edf1f7;
-        --muted: #a8b1bd;
-        --line: #2c333d;
-        --accent: #6aa9ff;
+        --bg: #06152a;
+        --panel: rgba(9, 28, 52, .95);
+        --text: #edf6ff;
+        --muted: #a9bfd8;
+        --line: #29486d;
+        --accent: #5aa7ff;
+        --accent-strong: #8fc4ff;
+        --accent-soft: #102f53;
         --danger: #ff8a7a;
         --ok: #73d18a;
       }}
@@ -4611,21 +4743,61 @@ def render_login() -> str:
       margin: 0;
       min-height: 100vh;
       display: grid;
-      place-items: center;
-      background: var(--bg);
+      place-items: center start;
+      overflow: hidden;
+      padding: clamp(24px, 5vw, 80px);
+      background-color: var(--bg);
+      background-image:
+        linear-gradient(90deg, rgba(3, 17, 36, .12) 0%, rgba(3, 17, 36, .04) 48%, rgba(3, 17, 36, .2) 100%),
+        url("/assets/login-code-review-bg.png");
+      background-position: center;
+      background-size: cover;
+      background-repeat: no-repeat;
       color: var(--text);
       font-family: Arial, "Microsoft YaHei", sans-serif;
     }}
     main {{
-      width: min(420px, calc(100vw - 32px));
+      position: relative;
+      width: min(448px, calc(100vw - 32px));
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 24px;
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: 0 28px 70px rgba(2, 13, 29, .34), 0 0 0 1px rgba(255, 255, 255, .18) inset;
+      backdrop-filter: blur(18px) saturate(125%);
+      -webkit-backdrop-filter: blur(18px) saturate(125%);
     }}
-    h1 {{ margin: 0; font-size: 22px; }}
-    .login-head {{ display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 18px; }}
-    label {{ display: grid; gap: 6px; margin-bottom: 14px; color: var(--muted); font-size: 13px; }}
+    h1 {{ margin: 2px 0 0; font-size: 27px; letter-spacing: -.02em; }}
+    .login-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin: 0; }}
+    .login-brand {{ display: flex; align-items: center; gap: 12px; min-width: 0; }}
+    .brand-mark {{
+      width: 44px;
+      height: 44px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+      border-radius: 12px;
+      background: linear-gradient(145deg, var(--accent), #248bff);
+      color: white;
+      font-size: 22px;
+      font-weight: 800;
+      box-shadow: 0 8px 20px color-mix(in srgb, var(--accent) 28%, transparent);
+    }}
+    .login-kicker {{
+      color: var(--accent-strong);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }}
+    .login-subtitle {{
+      margin: 12px 0 24px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }}
+    label {{ display: grid; gap: 7px; margin-bottom: 16px; color: var(--muted); font-size: 14px; }}
     .field-label {{
       display: inline-flex;
       align-items: baseline;
@@ -4634,9 +4806,27 @@ def render_login() -> str:
       min-width: 0;
       line-height: 1.35;
     }}
-    input, button {{ width: 100%; min-height: 42px; border-radius: 6px; font: inherit; }}
-    input {{ border: 1px solid var(--line); background: transparent; color: var(--text); padding: 10px; }}
-    button {{ border: 1px solid var(--accent); background: var(--accent); color: white; cursor: pointer; }}
+    input, button {{ width: 100%; min-height: 44px; border-radius: 8px; font: inherit; }}
+    input {{
+      border: 1px solid var(--line);
+      background: color-mix(in srgb, var(--panel) 86%, var(--accent-soft));
+      color: var(--text);
+      padding: 10px 12px;
+      transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
+    }}
+    input:hover {{ border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); }}
+    input:focus {{ border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }}
+    button {{
+      border: 1px solid var(--accent);
+      background: linear-gradient(135deg, var(--accent), #167ee5);
+      color: white;
+      font-weight: 650;
+      cursor: pointer;
+      transition: transform .16s ease, box-shadow .16s ease, filter .16s ease;
+    }}
+    button:hover {{ filter: brightness(1.04); box-shadow: 0 8px 18px color-mix(in srgb, var(--accent) 20%, transparent); }}
+    button:active {{ transform: translateY(1px); }}
+    button:focus-visible {{ outline: 0; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }}
     .password-field {{
       position: relative;
       display: flex;
@@ -4658,8 +4848,9 @@ def render_login() -> str:
       position: absolute;
       right: 6px;
       border-color: var(--line);
-      background: transparent;
-      color: var(--accent);
+      background: color-mix(in srgb, var(--panel) 88%, var(--accent-soft));
+      color: var(--accent-strong);
+      font-weight: 650;
     }}
     .challenge-line {{
       display: flex;
@@ -4680,8 +4871,8 @@ def render_login() -> str:
     .challenge-reset {{
       flex: 0 0 auto;
       border-color: var(--line);
-      background: transparent;
-      color: var(--accent);
+      background: color-mix(in srgb, var(--panel) 88%, var(--accent-soft));
+      color: var(--accent-strong);
     }}
     .status {{ min-height: 24px; margin-top: 12px; color: var(--muted); }}
     .status.error {{ color: var(--danger); }}
@@ -4704,7 +4895,7 @@ def render_login() -> str:
       padding: 4px 9px;
       border-color: var(--line);
       border-radius: 999px;
-      background: transparent;
+      background: color-mix(in srgb, var(--panel) 88%, var(--accent-soft));
       color: var(--muted);
       font-size: 12px;
       white-space: nowrap;
@@ -4726,14 +4917,37 @@ def render_login() -> str:
     .health-check .health-dot {{ margin-top: 4px; }}
     .health-check strong {{ display: block; font-size: 13px; }}
     .health-check span {{ display: block; margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.45; }}
+    @media (max-width: 640px) {{
+      body {{
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: auto;
+        padding: 16px;
+        background-position: 62% center;
+      }}
+      main {{ width: calc(100vw - 32px); max-width: 448px; flex: 0 0 auto; padding: 22px; border-radius: 14px; }}
+      .login-head {{ align-items: center; }}
+      .health-indicator {{ width: 34px; min-width: 34px; padding: 4px; justify-content: center; }}
+      .health-indicator > span:last-child {{ position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }}
+      .login-kicker {{ display: none; }}
+      h1 {{ font-size: 24px; }}
+    }}
+    @media (prefers-reduced-motion: reduce) {{
+      input, button {{ transition: none; }}
+    }}
   </style>
 </head>
 <body>
   <main>
     <div class="login-head">
-      <h1>CodeReviewer</h1>
+      <div class="login-brand">
+        <span class="brand-mark" aria-hidden="true">&#x2713;</span>
+        <div><div class="login-kicker">Secure review workspace</div><h1>CodeReviewer</h1></div>
+      </div>
       <button id="loginHealthBtn" class="health-indicator" data-status="checking" type="button" aria-haspopup="dialog"><span class="health-dot" aria-hidden="true"></span><span id="loginHealthLabel">Checking</span></button>
     </div>
+    <p class="login-subtitle">Review changes, resolve findings, and move every release forward with confidence.</p>
     <label><span class="field-label">Username <span class="required-mark" aria-hidden="true">*</span></span>
       <input id="username" autocomplete="username" placeholder="responsible" required>
     </label>
@@ -4969,16 +5183,17 @@ def render_index(user: str = "") -> str:
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #f6f7f9;
+      --bg: #edf5ff;
       --panel: #ffffff;
-      --text: #1d232b;
-      --muted: #68717d;
-      --line: #d9dee7;
+      --text: #10243e;
+      --muted: #5c7088;
+      --line: #cfdded;
       --accent: #0b6bcb;
-      --accent-strong: #094f96;
+      --accent-strong: #0754a3;
+      --accent-soft: #e8f3ff;
       --danger: #b42318;
       --ok: #137333;
-      --code: #111827;
+      --code: #08172b;
       --dialog-s: 560px;
       --dialog-m: 760px;
       --dialog-l: 1160px;
@@ -4987,16 +5202,17 @@ def render_index(user: str = "") -> str:
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #111418;
-        --panel: #171b21;
-        --text: #edf1f7;
-        --muted: #a8b1bd;
-        --line: #2c333d;
-        --accent: #6aa9ff;
-        --accent-strong: #98c4ff;
+        --bg: #071426;
+        --panel: #0d1c30;
+        --text: #edf6ff;
+        --muted: #a8bdd5;
+        --line: #294561;
+        --accent: #58a6ff;
+        --accent-strong: #91c6ff;
+        --accent-soft: #123253;
         --danger: #ff8a7a;
         --ok: #73d18a;
-        --code: #0f141b;
+        --code: #050e1c;
       }
     }
     * { box-sizing: border-box; }
@@ -5014,12 +5230,16 @@ def render_index(user: str = "") -> str:
       height: 100%;
       overflow: hidden;
       font-family: Arial, "Microsoft YaHei", sans-serif;
-      background: var(--bg);
+      background:
+        radial-gradient(circle at 16% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 34%),
+        linear-gradient(145deg, color-mix(in srgb, var(--bg) 92%, white), var(--bg));
       color: var(--text);
     }
     header {
       border-bottom: 1px solid var(--line);
-      background: var(--panel);
+      background: color-mix(in srgb, var(--panel) 92%, var(--accent-soft));
+      box-shadow: 0 4px 18px rgba(7, 49, 92, .06);
+      backdrop-filter: blur(12px);
     }
     .topbar, main {
       width: min(1880px, calc(100vw - 32px));
@@ -5066,7 +5286,8 @@ def render_index(user: str = "") -> str:
       min-height: 0;
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 10px;
+      box-shadow: 0 4px 18px rgba(7, 49, 92, .055);
     }
     aside {
       min-width: 0;
@@ -5338,9 +5559,17 @@ def render_index(user: str = "") -> str:
     input, select, textarea {
       width: 100%;
       border: 1px solid var(--line);
-      background: transparent;
+      background: color-mix(in srgb, var(--panel) 95%, var(--accent-soft));
       color: var(--text);
       padding: 10px;
+      transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+    }
+    input:hover, select:hover, textarea:hover { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--accent);
+      outline: 0;
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+      background: var(--panel);
     }
     textarea {
       min-height: 180px;
@@ -5355,14 +5584,20 @@ def render_index(user: str = "") -> str:
       color: white;
       padding: 8px 14px;
       cursor: pointer;
+      box-shadow: 0 3px 9px color-mix(in srgb, var(--accent) 12%, transparent);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
     }
+    button:hover:not(:disabled) { filter: brightness(1.035); box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 20%, transparent); }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:focus-visible { outline: 0; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
     button:disabled {
       cursor: wait;
       opacity: 0.64;
     }
     button.secondary {
-      background: transparent;
+      background: color-mix(in srgb, var(--panel) 94%, var(--accent-soft));
       color: var(--accent-strong);
+      box-shadow: none;
     }
     .grid {
       display: grid;
@@ -5783,6 +6018,7 @@ def render_index(user: str = "") -> str:
       flex-direction: column;
       gap: 12px;
       padding: 20px;
+      font-size: 14px;
       border: 1px solid var(--line);
       border-radius: 12px;
       background: var(--panel);
@@ -5805,6 +6041,7 @@ def render_index(user: str = "") -> str:
     }
     .coverage-filters label {
       margin: 0;
+      font-size: 14px;
     }
     .coverage-filters #coverageScanBtn {
       min-width: 96px;
@@ -5877,10 +6114,10 @@ def render_index(user: str = "") -> str:
     .coverage-report-total span,
     .coverage-lifecycle-head span {
       color: var(--muted);
-      font-size: 11px;
+      font-size: 13px;
     }
-    .coverage-report-total strong { font-size: 22px; }
-    .coverage-report-total small { color: var(--muted); font-size: 11px; }
+    .coverage-report-total strong { font-size: 24px; line-height: 1.2; }
+    .coverage-report-total small { color: var(--muted); font-size: 12px; }
     .coverage-ratio-track {
       grid-column: 1 / -1;
       display: flex;
@@ -5898,6 +6135,7 @@ def render_index(user: str = "") -> str:
       gap: 10px;
       margin-bottom: 8px;
     }
+    .coverage-lifecycle-head strong { font-size: 16px; }
     .coverage-operational {
       display: flex;
       align-items: center;
@@ -5922,8 +6160,8 @@ def render_index(user: str = "") -> str:
       border-radius: 8px;
       background: color-mix(in srgb, var(--bg) 68%, var(--panel));
     }
-    .coverage-lifecycle-stat span { display: block; color: var(--muted); font-size: 11px; }
-    .coverage-lifecycle-stat strong { display: block; margin-top: 3px; font-size: 18px; }
+    .coverage-lifecycle-stat span { display: block; color: var(--muted); font-size: 13px; }
+    .coverage-lifecycle-stat strong { display: block; margin-top: 3px; font-size: 20px; }
     @media (max-width: 900px) {
       .coverage-summary { grid-template-columns: 1fr; }
     }
@@ -5947,12 +6185,12 @@ def render_index(user: str = "") -> str:
       justify-content: space-between;
       gap: 14px;
     }
-    .coverage-applications-head strong { display: block; font-size: 14px; }
+    .coverage-applications-head strong { display: block; font-size: 16px; }
     .coverage-applications-head span {
       display: block;
       margin-top: 2px;
       color: var(--muted);
-      font-size: 11px;
+      font-size: 13px;
       line-height: 1.4;
       text-align: right;
     }
@@ -5989,21 +6227,21 @@ def render_index(user: str = "") -> str:
     }
     .coverage-application-title strong {
       overflow: hidden;
-      font-size: 14px;
+      font-size: 16px;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     .coverage-application-percent {
       flex: 0 0 auto;
       color: var(--accent-strong);
-      font-size: 19px;
+      font-size: 21px;
       font-weight: 750;
     }
     .coverage-application-progress-copy {
       color: var(--muted);
-      font-size: 11px;
+      font-size: 13px;
     }
-    .coverage-application-progress-copy strong { color: var(--text); font-size: 11px; }
+    .coverage-application-progress-copy strong { color: var(--text); font-size: 13px; }
     .coverage-application-track {
       height: 6px;
       overflow: hidden;
@@ -6023,7 +6261,7 @@ def render_index(user: str = "") -> str:
       justify-content: space-between;
       gap: 8px;
       color: var(--muted);
-      font-size: 11px;
+      font-size: 12px;
     }
     .coverage-application-report-coverage span {
       padding: 4px 7px;
@@ -6046,16 +6284,16 @@ def render_index(user: str = "") -> str:
       display: block;
       overflow: hidden;
       color: var(--muted);
-      font-size: 10px;
+      font-size: 12px;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .coverage-application-state strong { display: block; margin-top: 2px; font-size: 13px; }
+    .coverage-application-state strong { display: block; margin-top: 2px; font-size: 15px; }
     .coverage-application-footer {
       padding-top: 7px;
       border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
       color: var(--muted);
-      font-size: 11px;
+      font-size: 12px;
     }
     .coverage-application-footer .ready { color: var(--ok); font-weight: 700; }
     .coverage-application-footer .blocked { color: var(--danger); font-weight: 650; }
@@ -6171,12 +6409,12 @@ def render_index(user: str = "") -> str:
       gap: 5px;
       flex: 0 0 auto;
       color: var(--muted);
-      font-size: 11px;
+      font-size: 12px;
       text-align: right;
     }
     .coverage-card-key {
       color: var(--accent-strong);
-      font-size: 14px;
+      font-size: 16px;
       overflow-wrap: anywhere;
     }
     .coverage-card-summary {
@@ -6186,13 +6424,13 @@ def render_index(user: str = "") -> str:
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 2;
       color: var(--text);
-      font-size: 13px;
+      font-size: 14px;
       line-height: 1.42;
     }
     .coverage-card-owner {
       overflow: hidden;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 13px;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
@@ -6207,7 +6445,7 @@ def render_index(user: str = "") -> str:
       border-radius: 999px;
       background: color-mix(in srgb, var(--accent) 5%, var(--panel));
       color: var(--accent-strong);
-      font-size: 10px;
+      font-size: 11px;
       font-weight: 650;
     }
     .coverage-card-cycle {
@@ -6216,7 +6454,7 @@ def render_index(user: str = "") -> str:
       gap: 6px;
       min-width: 0;
       color: var(--muted);
-      font-size: 11px;
+      font-size: 12px;
       overflow-wrap: anywhere;
     }
     .coverage-card-cycle::before {
@@ -6241,20 +6479,20 @@ def render_index(user: str = "") -> str:
     .coverage-card-metric span {
       display: block;
       color: var(--muted);
-      font-size: 10px;
+      font-size: 11px;
       text-transform: uppercase;
       letter-spacing: .04em;
     }
     .coverage-card-metric strong {
       display: block;
       margin-top: 2px;
-      font-size: 14px;
+      font-size: 16px;
     }
     .coverage-card-metric small {
       display: block;
       margin-top: 2px;
       color: var(--muted);
-      font-size: 11px;
+      font-size: 12px;
     }
     .coverage-card-footer {
       min-height: 30px;
@@ -6265,7 +6503,7 @@ def render_index(user: str = "") -> str:
     .coverage-run-review {
       min-height: 28px;
       padding: 4px 9px;
-      font-size: 12px;
+      font-size: 13px;
       white-space: nowrap;
     }
     .coverage-empty {
@@ -7503,11 +7741,14 @@ def render_index(user: str = "") -> str:
     .sprint-overview-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
     .sprint-overview-footer button { width: auto; min-width: 148px; }
     .sprint-overview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-    .sprint-overview-head strong { overflow-wrap: anywhere; }
+    .sprint-overview-head strong { overflow-wrap: anywhere; font-size: 18px; line-height: 1.3; }
+    .sprint-overview-head .meta,
+    .sprint-overview-footer .meta { font-size: 13px; }
+    .sprint-overview-head .count-pill { font-size: 12px; }
     .sprint-overview-metrics { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; }
     .sprint-overview-metric { padding: 13px 14px; border: 1px solid color-mix(in srgb, var(--line) 72%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--bg) 65%, var(--panel)); }
-    .sprint-overview-metric .meta { font-size: 13px; }
-    .sprint-overview-metric strong { display: block; margin-top: 4px; font-size: 22px; line-height: 1.2; }
+    .sprint-overview-metric .meta { font-size: 14px; }
+    .sprint-overview-metric strong { display: block; margin-top: 4px; font-size: 24px; line-height: 1.2; }
     .sprint-application-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
     .sprint-application-card {
       min-width: 0; display: grid; gap: 9px; padding: 12px;
@@ -7516,12 +7757,14 @@ def render_index(user: str = "") -> str:
     }
     .sprint-application-card:hover, .sprint-application-card:focus-visible { border-color: var(--accent); outline: 0; box-shadow: 0 4px 12px rgba(15,23,42,.08); }
     .sprint-application-head, .sprint-application-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-    .sprint-application-head strong { min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
-    .sprint-application-percent { color: var(--accent-strong); font-size: 19px; font-weight: 800; }
+    .sprint-application-head strong { min-width: 0; overflow-wrap: anywhere; font-size: 16px; }
+    .sprint-application-head .status-chip { font-size: 12px; }
+    .sprint-application-progress-head .meta { font-size: 13px; }
+    .sprint-application-percent { color: var(--accent-strong); font-size: 22px; font-weight: 800; }
     .sprint-application-progress { height: 5px; overflow: hidden; border-radius: 999px; background: var(--line); }
     .sprint-application-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #1971c2, #16845b); }
     .sprint-application-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 8px; }
-    .sprint-application-stat { min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+    .sprint-application-stat { min-width: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
     .sprint-application-stat strong { margin-left: 3px; color: var(--text); }
     .sprint-application-card[data-ready="true"] { border-color: color-mix(in srgb, var(--ok) 42%, var(--line)); background: color-mix(in srgb, var(--ok) 5%, var(--panel)); }
     .sprint-application-card[data-application="Unmapped"] { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); }
@@ -9472,7 +9715,7 @@ __ADMIN_TRACE_SECTION__
       $('coverageRoleHint').textContent = currentUserRole === 'manager'
         ? 'Manager view: all configured responsible teams and Sprint issues.'
         : 'Auditor view: only GitLab projects and reports matching your responsible scope.';
-      resumeCoverageJob();
+      resumeCoverageJob({ preserveJiraInput: true });
       requestAnimationFrame(() => $('coverageJira').focus());
     }
 
@@ -9555,7 +9798,7 @@ __ADMIN_TRACE_SECTION__
       coverageJobSnapshot = job;
       rememberCoverageJob(job.id || '');
       const scope = job.scope || {};
-      if (scope.jira != null) $('coverageJira').value = scope.jira || '';
+      if (!options.preserveJiraInput && scope.jira != null) $('coverageJira').value = scope.jira || '';
       if (scope.sprint != null) $('coverageSprint').value = scope.sprint || '';
       if (scope.jira_filter != null) $('coverageFilter').value = scope.jira_filter || '';
       const status = String(job.status || '');
@@ -9600,14 +9843,14 @@ __ADMIN_TRACE_SECTION__
       startCoverageTiming();
     }
 
-    async function pollCoverageJob(jobId) {
+    async function pollCoverageJob(jobId, options = {}) {
       window.clearTimeout(coveragePollTimer);
       if (!jobId) return;
       try {
         const data = await fetchJson(`/api/review-coverage-jobs/${encodeURIComponent(jobId)}`);
-        applyCoverageJob(data.job || {});
+        applyCoverageJob(data.job || {}, options);
         if (coverageJobIsActive(data.job)) {
-          coveragePollTimer = window.setTimeout(() => pollCoverageJob(jobId), 1500);
+          coveragePollTimer = window.setTimeout(() => pollCoverageJob(jobId, options), 1500);
         }
       } catch (error) {
         if (jobId !== coverageJobId) return;
@@ -9617,7 +9860,7 @@ __ADMIN_TRACE_SECTION__
       }
     }
 
-    async function resumeCoverageJob() {
+    async function resumeCoverageJob(options = {}) {
       try {
         const data = await fetchJson(
           coverageJobId
@@ -9625,8 +9868,8 @@ __ADMIN_TRACE_SECTION__
             : '/api/review-coverage-jobs'
         );
         if (!data.job) return;
-        applyCoverageJob(data.job, { reused: true });
-        if (coverageJobIsActive(data.job)) pollCoverageJob(data.job.id || '');
+        applyCoverageJob(data.job, { reused: true, preserveJiraInput: Boolean(options.preserveJiraInput) });
+        if (coverageJobIsActive(data.job)) pollCoverageJob(data.job.id || '', options);
       } catch (error) {
         rememberCoverageJob('');
       }
@@ -9706,8 +9949,8 @@ __ADMIN_TRACE_SECTION__
         <div class="coverage-application-grid">
           ${applicationProgress.map((application) => {
             const stateCounts = application.counts || {};
-            const name = String(application.application || 'Unmapped');
-            const unmapped = name === 'Unmapped';
+            const name = String(application.scope_label || application.application || 'Unmapped');
+            const unmapped = String(application.application || 'Unmapped') === 'Unmapped';
             const ready = Boolean(application.gate_ready);
             const percent = Math.max(0, Math.min(100, Number(application.readiness_percent || 0)));
             return `
@@ -11732,7 +11975,7 @@ function jiraKeyFromReportPath(reportPath) {
     }
 
     function renderIssueReviewOverview() {
-      const applicationOrder = ['WVAdmin', 'iTrade Client', 'Services Terminal', 'DPS'];
+      const applicationOrder = ['WVAdmin', 'iTrade Client 7.5.0', 'iTrade Client 7.5.1', 'Services Terminal', 'DPS9', 'DPS11'];
       const groups = new Map();
       issueReviews.forEach(issue => {
         const cycles = (issue.cycles || []).length ? issue.cycles : [issue.current_cycle || {}];
@@ -11760,12 +12003,13 @@ function jiraKeyFromReportPath(reportPath) {
             progress = [{application:'Unmapped', state: issue.latest_run_id ? 'handling' : 'without-report', report_count:issue.latest_run_id ? 1 : 0}];
           }
           progress.forEach(item => {
-            const application = String(item.application || 'Unmapped');
-            if (!perApplication.has(application)) perApplication.set(application, []);
-            perApplication.get(application).push({issue, cycle, progress:item});
+            const scopeLabel = String(item.scope_label || item.application || 'Unmapped');
+            if (!perApplication.has(scopeLabel)) perApplication.set(scopeLabel, []);
+            perApplication.get(scopeLabel).push({issue, cycle, progress:item});
           });
         });
-        const applications = [...applicationOrder, ...(perApplication.has('Unmapped') ? ['Unmapped'] : [])];
+        const additionalScopes = [...perApplication.keys()].filter(name => !applicationOrder.includes(name)).sort();
+        const applications = [...applicationOrder, ...additionalScopes];
         const appCards = applications.map(application => {
           const scoped = perApplication.get(application) || [];
           const unique = new Map(scoped.map(item => [item.issue.jira_key, item]));
@@ -11781,7 +12025,7 @@ function jiraKeyFromReportPath(reportPath) {
           const failed = countState('failed');
           const remaining = Math.max(0, appTotal - reviewPass);
           const percent = appTotal ? Math.round(reviewPass * 100 / appTotal) : null;
-          const readyForGate = appTotal > 0 && remaining === 0 && application !== 'Unmapped';
+          const readyForGate = appTotal > 0 && remaining === 0 && application !== 'Unmapped' && !application.startsWith('Unmapped ');
           return `<button class="sprint-application-card" data-ready="${readyForGate ? 'true' : 'false'}" data-application="${escapeHtml(application)}" data-open-sprint="${escapeHtml(group.key)}" data-sprint-label="${escapeHtml(`${group.sprintName} (${group.sprintId})`)}" type="button" aria-label="View ${escapeHtml(application)} issues in ${escapeHtml(group.sprintName)}">
             <span class="sprint-application-head"><strong>${escapeHtml(application)}</strong><span class="status-chip">${readyForGate ? 'Ready for Gate' : (appTotal ? `${remaining} remaining` : 'N/A')}</span></span>
             <span class="sprint-application-progress-head"><span class="meta">Review Pass</span><span class="sprint-application-percent">${percent === null ? 'N/A' : `${percent}%`}</span></span>
@@ -11904,7 +12148,7 @@ function jiraKeyFromReportPath(reportPath) {
           if (issueReviewSprintFilter && cycleKey !== issueReviewSprintFilter) return false;
           const progress = Array.isArray(cycle.application_progress) ? cycle.application_progress : [];
           if (!progress.length) return issueReviewApplicationFilter === 'Unmapped';
-          return progress.some(entry => String(entry.application || 'Unmapped') === issueReviewApplicationFilter);
+          return progress.some(entry => String(entry.scope_label || entry.application || 'Unmapped') === issueReviewApplicationFilter);
         });
         const haystack = [item.jira_key, item.summary, item.responsible, item.status, ...cycles.flatMap(cycle => [cycle.sprint_id, cycle.sprint_name])].join(' ').toLowerCase();
         return inSprint && inApplication && haystack.includes(query);
@@ -11960,7 +12204,7 @@ function jiraKeyFromReportPath(reportPath) {
     function renderIssueReviewDetail(data) {
       const issue = data.issue || {};
       const runs = data.runs || [];
-      const latest = runs[0] || { findings: [] };
+      const latest = data.latest_run_group || runs[0] || { findings: [] };
       const findings = latest.findings || [];
       const readiness = data.pass_readiness || {};
       const severity = latest.severity_counts || {};
@@ -12074,7 +12318,8 @@ function jiraKeyFromReportPath(reportPath) {
       const hasEvidence = Boolean(problemText || suggestionText);
       const lineage = ({new:'New in this run', persisting:`Still present${finding.first_seen_run ? ` since Run ${finding.first_seen_run}` : ''}`, resolved:'Resolved after re-scan'})[String(finding.lineage_state || '').toLowerCase()] || statusLabel(finding.lineage_state);
       const fileStatus = finding.file_path || 'Architecture / No specific file';
-      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div class="finding-head-main"><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta finding-context">${escapeHtml(fileStatus)} · ${escapeHtml(lineage)}</div>${hasEvidence ? `<div class="finding-evidence-preview" id="finding-summary-${finding.id}">${problemText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">问题</span><span class="finding-evidence-text">${escapeHtml(problemText)}</span></div>` : ''}${suggestionText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">建议</span><span class="finding-evidence-text">${escapeHtml(suggestionText)}</span></div>` : ''}</div><button class="finding-summary-toggle" type="button" data-expand-finding="${finding.id}" aria-label="View full details" aria-expanded="false" aria-controls="finding-summary-${finding.id}">更多</button>` : ''}</div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : `<button class="finding-head-action" data-handle-finding="${finding.id}" type="button">Submit</button>`}</div>
+      const scopeLabel = String(finding.scope_label || finding.application || 'Unmapped');
+      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div class="finding-head-main"><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <span class="status-chip">${escapeHtml(scopeLabel)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta finding-context">${escapeHtml(fileStatus)} · ${escapeHtml(lineage)}</div>${hasEvidence ? `<div class="finding-evidence-preview" id="finding-summary-${finding.id}">${problemText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">问题</span><span class="finding-evidence-text">${escapeHtml(problemText)}</span></div>` : ''}${suggestionText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">建议</span><span class="finding-evidence-text">${escapeHtml(suggestionText)}</span></div>` : ''}</div><button class="finding-summary-toggle" type="button" data-expand-finding="${finding.id}" aria-label="View full details" aria-expanded="false" aria-controls="finding-summary-${finding.id}">更多</button>` : ''}</div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : `<button class="finding-head-action" data-handle-finding="${finding.id}" type="button">Submit</button>`}</div>
         ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-handling-form"><div class="finding-handling-primary"><label><span>处理结果 <span class="required-mark" aria-hidden="true">*</span></span><select id="disposition-${finding.id}" data-finding-disposition="${finding.id}" required><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select></label><label><span id="note-label-${finding.id}">处理说明 <span class="required-mark" aria-hidden="true">*</span></span><textarea id="note-${finding.id}" aria-labelledby="note-label-${finding.id}" aria-describedby="error-${finding.id}" placeholder="说明修改内容、判断依据及测试结果" required></textarea></label><div id="error-${finding.id}" class="field-message" role="alert"></div></div><div class="finding-handling-secondary"><div id="followup-${finding.id}" class="followup-fields" hidden><div class="followup-fields-head"><label><span>Issue Summary <span class="required-mark" aria-hidden="true">*</span></span><textarea class="summary-input" id="jira-summary-${finding.id}" maxlength="255" rows="2" placeholder="概括待跟进问题，建议 20–50 个字符"></textarea></label></div><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('')))}</textarea><div class="followup-card-head"><div class="followup-adf-state"><strong>Issue Description <span class="required-mark" aria-hidden="true">*</span></strong><div id="jira-adf-preview-${finding.id}" class="followup-adf-preview">Not provided yet.</div><div id="jira-adf-status-${finding.id}" class="meta">Open the editor and add the follow-up details.</div></div><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit issue</button></div></div></div></div>`}
       </article>`;
     }

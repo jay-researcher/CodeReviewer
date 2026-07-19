@@ -28,6 +28,7 @@ from code_reviewer.review_service import (
     _combine_jira_issue_review_inputs,
     _ignored_branch_type,
     _missing_remote_branch_error,
+    _review_fetched_inputs_for_issue,
     review_fingerprint_from_merge_requests,
 )
 from code_reviewer.llm_provider import (
@@ -47,6 +48,113 @@ from web import _acquire_instance_lock
 
 
 class LocalContextTests(unittest.TestCase):
+    def test_issue_review_partitions_llm_input_by_application_release_line(self) -> None:
+        issue = JiraIssue(
+            key="ECHNL-7213",
+            summary="Cross application delivery",
+            description="Requirement",
+            assignee="owner",
+            status="Development Done",
+            sprint="10085",
+            issue_type="Story",
+            labels=[],
+        )
+        scopes = [
+            ("1", "iTrade Client", "7.5.0", "src/750.ts"),
+            ("2", "iTrade Client", "7.5.1", "src/751.ts"),
+            ("3", "DPS", "DPS11", "src/dps.php"),
+        ]
+        inputs = [
+            ReviewInput(
+                project=f"group/project-{mr_id}",
+                mr_id=mr_id,
+                jira_key=issue.key,
+                source_branch=f"feature/{issue.key}",
+                target_branch=release_line,
+                changed_files=[ChangedFile(path=path, diff=f"+{path}")],
+                raw_diff=f"+{path}",
+                metadata={
+                    "application": application,
+                    "release_line": release_line,
+                    "responsible": "owner",
+                    "gitlab_project_path": f"group/project-{mr_id}",
+                    "git_tools_project_match": "matched",
+                },
+            )
+            for mr_id, application, release_line, path in scopes
+        ]
+        deferred = [
+            {
+                "application": "DPS",
+                "release_line": "DPS11",
+                "project_path": "web-sv-build/dps",
+                "source_branch": "DPS11_Config-1.0",
+            }
+        ]
+        analyzed: list[ReviewInput] = []
+
+        def fake_analyze(review_input: ReviewInput, progress: object = None) -> ReviewResult:
+            analyzed.append(review_input)
+            return ReviewResult(
+                review_input=review_input,
+                findings=[],
+                conclusion="Pass",
+                risk_summary=[],
+                test_suggestions=[],
+            )
+
+        def fake_save(result: ReviewResult, *_args: object, **_kwargs: object) -> dict[str, object]:
+            scope = f"{result.review_input.metadata['application']}:{result.review_input.metadata['release_line']}"
+            return {
+                "report": f"{scope}.md",
+                "reports": [{"path": f"{scope}.md", "name": f"{scope}.md"}],
+                "gitnexus_report": "",
+            }
+
+        with (
+            patch("code_reviewer.review_service.analyze", side_effect=fake_analyze),
+            patch("code_reviewer.review_service._save_review_reports", side_effect=fake_save),
+            patch(
+                "code_reviewer.review_service._preview_prompt_budget_no_raise",
+                return_value={"original_chars": 100, "max_chars": 160000},
+            ),
+        ):
+            result = _review_fetched_inputs_for_issue(
+                issue=issue,
+                fetched_inputs=inputs,
+                discovered_items=[],
+                configured_project_paths=[],
+                output_dir=Path("."),
+                progress=None,
+                deferred_release_gate_resources=deferred,
+            )
+
+        self.assertEqual(3, len(analyzed))
+        self.assertEqual(3, result["scope_count"])
+        self.assertEqual(
+            {
+                ("iTrade Client", "7.5.0"),
+                ("iTrade Client", "7.5.1"),
+                ("DPS", "DPS11"),
+            },
+            {
+                (
+                    str(item.metadata.get("application")),
+                    str(item.metadata.get("release_line")),
+                )
+                for item in analyzed
+            },
+        )
+        self.assertEqual(1, len({str(item.metadata["run_group_id"]) for item in analyzed}))
+        for item in analyzed:
+            related = item.metadata.get("related_merge_requests") or []
+            self.assertEqual(1, len(related))
+            deferred_items = item.metadata.get("deferred_release_gate_resources") or []
+            if item.metadata.get("application") == "DPS":
+                self.assertEqual(1, len(deferred_items))
+            else:
+                self.assertEqual([], deferred_items)
+
     def test_windows_user_openai_key_is_loaded_for_an_existing_shell(self) -> None:
         closed: list[object] = []
         registry_key = object()
@@ -157,6 +265,8 @@ class LocalContextTests(unittest.TestCase):
                     "responsible": "wen.yi",
                     "git_tools_project_name": "itrade-client",
                     "gitlab_project_path": "group/project",
+                    "application": "iTrade Client",
+                    "release_line": "7.5.1",
                 },
             )
             for index in range(1, 5)
@@ -660,7 +770,7 @@ group:
         self.assertEqual(_ignored_branch_type("feature/Git_Version-ECHNL-1"), "")
         self.assertEqual(_ignored_branch_type("gitversion/ECHNL-1"), "")
 
-    def test_multi_owner_responsible_expands_to_individual_reports(self) -> None:
+    def test_same_application_release_line_merges_mrs_and_responsible_scope(self) -> None:
         result = ReviewResult(
             review_input=ReviewInput(
                 project="jira-issue",
@@ -677,6 +787,9 @@ group:
                             "mr_url": "https://gitlab.example.com/group/web/-/merge_requests/1",
                             "project_path": "group/web",
                             "responsible": "wen.yi",
+                            "application": "iTrade Client",
+                            "project_type": "frontend",
+                            "target_branch": "7.5.1.38",
                             "file_prefix": "group/web!1",
                         },
                         {
@@ -684,6 +797,9 @@ group:
                             "mr_url": "https://gitlab.example.com/group/api/-/merge_requests/2",
                             "project_path": "group/api",
                             "responsible": "kevin.tan+sunny.cheng",
+                            "application": "iTrade Client",
+                            "project_type": "backend",
+                            "target_branch": "ITRADE_CLIENT_7.5.1",
                             "file_prefix": "group/api!2",
                         },
                     ]
@@ -713,12 +829,22 @@ group:
         )
 
         split = split_result_by_responsible(result)
-        by_owner = {item.review_input.metadata["responsible"]: item for item in split}
-
-        self.assertEqual(sorted(by_owner), ["kevin.tan", "sunny.cheng", "wen.yi"])
-        self.assertEqual([finding.title for finding in by_owner["wen.yi"].findings], ["Web issue"])
-        self.assertEqual([finding.title for finding in by_owner["kevin.tan"].findings], ["API issue"])
-        self.assertEqual([finding.title for finding in by_owner["sunny.cheng"].findings], ["API issue"])
+        self.assertEqual(1, len(split))
+        report = split[0]
+        self.assertEqual("iTrade Client", report.review_input.metadata["application"])
+        self.assertEqual("7.5.1", report.review_input.metadata["release_line"])
+        self.assertEqual("mixed", report.review_input.metadata["project_type"])
+        self.assertEqual(
+            ["kevin.tan", "sunny.cheng", "wen.yi"],
+            report.review_input.metadata["responsible_scope"],
+        )
+        self.assertEqual(
+            ["Web issue", "API issue"],
+            [finding.title for finding in report.findings],
+        )
+        markdown = render_markdown(report, language="en")
+        self.assertIn("- Application: iTrade Client", markdown)
+        self.assertIn("- Release Line: 7.5.1", markdown)
 
         with tempfile.TemporaryDirectory() as temp:
             saved = save_reports(result, Path(temp))
@@ -727,13 +853,11 @@ group:
         self.assertEqual(
             relative_paths,
             [
-                "kevin.tan/ECHNL-5308_has-issue-critical.md",
-                "sunny.cheng/ECHNL-5308_has-issue-critical.md",
-                "wen.yi/ECHNL-5308_has-issue-high.md",
+                "kevin.tan+sunny.cheng+wen.yi/ECHNL-5308_iTrade-Client-7.5.1_has-issue-critical.md",
             ],
         )
 
-    def test_reports_split_same_issue_and_owner_by_frontend_backend_type(self) -> None:
+    def test_reports_split_by_application_instead_of_project_type(self) -> None:
         result = ReviewResult(
             review_input=ReviewInput(
                 project="jira-issue",
@@ -745,8 +869,24 @@ group:
                 ],
                 metadata={
                     "related_merge_requests": [
-                        {"mr_id": "1", "project_path": "group/web", "responsible": "wen.yi", "project_type": "frontend", "file_prefix": "group/web!1"},
-                        {"mr_id": "2", "project_path": "group/api", "responsible": "wen.yi", "project_type": "backend", "file_prefix": "group/api!2"},
+                        {
+                            "mr_id": "1",
+                            "project_path": "group/web",
+                            "responsible": "wen.yi",
+                            "project_type": "frontend",
+                            "application": "iTrade Client",
+                            "target_branch": "7.5.1.39",
+                            "file_prefix": "group/web!1",
+                        },
+                        {
+                            "mr_id": "2",
+                            "project_path": "group/dps9/api",
+                            "responsible": "wen.yi",
+                            "project_type": "backend",
+                            "application": "DPS",
+                            "target_branch": "9.3.80",
+                            "file_prefix": "group/api!2",
+                        },
                     ]
                 },
             ),
@@ -760,17 +900,87 @@ group:
         )
 
         split = split_result_by_responsible(result)
-        by_type = {item.review_input.metadata["project_type"]: item for item in split}
-        self.assertEqual([finding.title for finding in by_type["frontend"].findings], ["Web issue"])
-        self.assertEqual([finding.title for finding in by_type["backend"].findings], ["API issue"])
+        by_application = {
+            (item.review_input.metadata["application"], item.review_input.metadata["release_line"]): item
+            for item in split
+        }
+        self.assertEqual(
+            ["Web issue"],
+            [finding.title for finding in by_application[("iTrade Client", "7.5.1")].findings],
+        )
+        self.assertEqual(
+            ["API issue"],
+            [finding.title for finding in by_application[("DPS", "DPS9")].findings],
+        )
 
         with tempfile.TemporaryDirectory() as temp:
             saved = save_reports(result, Path(temp))
             names = sorted(path.name for _report, path in saved)
         self.assertEqual(
             names,
-            ["ECHNL-8888_backend_has-issue-critical.md", "ECHNL-8888_frontend_has-issue-high.md"],
+            ["ECHNL-8888_DPS9_has-issue-critical.md", "ECHNL-8888_iTrade-Client-7.5.1_has-issue-high.md"],
         )
+
+    def test_release_lines_applications_and_unmapped_scopes_stay_isolated(self) -> None:
+        scope_specs = [
+            ("itrade!1", "iTrade Client", "7.5.0.38", "group/itrade-client", "frontend"),
+            ("itrade!2", "iTrade Client", "7.5.1.39", "group/itrade-client", "frontend"),
+            ("dps9!3", "DPS", "9.3.80", "group/dps9/api", "backend"),
+            ("dps11!4", "DPS", "11.2.84", "group/dps11/api", "backend"),
+            ("wvadmin!5", "WVAdmin", "1.0.84", "group/wvadmin", "frontend"),
+            ("terminal!6", "Services Terminal", "5.0.63", "group/services-terminal", "frontend"),
+            ("alpha!7", "", "main", "group/alpha", "frontend"),
+            ("beta!8", "", "main", "group/beta", "backend"),
+        ]
+        changed_files = [
+            ChangedFile(path=f"{prefix}/src/change.txt", additions=1, diff=f"+{prefix}")
+            for prefix, _application, _branch, _project, _type in scope_specs
+        ]
+        related_mrs = [
+            {
+                "mr_id": prefix.rsplit("!", 1)[-1],
+                "project_path": project,
+                "responsible": "wen.yi",
+                "project_type": project_type,
+                "application": application,
+                "target_branch": branch,
+                "file_prefix": prefix,
+            }
+            for prefix, application, branch, project, project_type in scope_specs
+        ]
+        result = ReviewResult(
+            review_input=ReviewInput(
+                project="jira-issue",
+                jira_key="ECHNL-9999",
+                mr_id="multi-mr-8",
+                changed_files=changed_files,
+                metadata={"related_merge_requests": related_mrs},
+            ),
+            findings=[],
+            conclusion="Pass",
+            risk_summary=[],
+            test_suggestions=[],
+        )
+
+        split = split_result_by_responsible(result)
+        self.assertEqual(8, len(split))
+        scopes = {
+            (
+                item.review_input.metadata["application"],
+                item.review_input.metadata["release_line"],
+                item.review_input.metadata["split_report_scope_component"],
+            )
+            for item in split
+        }
+        self.assertIn(("iTrade Client", "7.5.0", "iTrade-Client-7.5.0"), scopes)
+        self.assertIn(("iTrade Client", "7.5.1", "iTrade-Client-7.5.1"), scopes)
+        self.assertIn(("DPS", "DPS9", "DPS9"), scopes)
+        self.assertIn(("DPS", "DPS11", "DPS11"), scopes)
+        self.assertIn(("WVAdmin", "1.0", "WVAdmin"), scopes)
+        self.assertIn(("Services Terminal", "5.0", "Services-Terminal"), scopes)
+        unmapped = [scope for scope in scopes if scope[0] == "Unmapped"]
+        self.assertEqual(2, len(unmapped))
+        self.assertEqual(2, len({scope[2] for scope in unmapped}))
 
     def test_mr_review_fingerprint_tracks_commit_changes_not_updated_time_only(self) -> None:
         base = {

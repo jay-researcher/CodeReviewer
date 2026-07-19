@@ -2,8 +2,10 @@
 
 > 语言：中文 | [English](CodeReviewer-7.0-Issue-Workflow.md)
 
-版本：7.2.12
+版本：7.2.13
 
+> 7.2.13 范围补充：普通 Jira Review 在进入 LLM 前按“应用 + 版本线”拆分，报告、Finding、Handling 和 Snapshot 使用同一边界。WVAdmin、Services Terminal、iTrade Client 7.5.0/7.5.1、DPS9/DPS11 相互独立；访问权限使用全部 Run 的 responsible scope 并集。Company Config/SCR 继续延后，并且只注入匹配的 Release Gate 范围。
+>
 > 7.2.12 UI 补充：Sprint Overview 不继承主页 Jira 字段，并以 Overview / Sprint issues 分开准备度和 Issue 卡片；Issue Review 应用卡在桌面使用可读的三列网格，Problems 分别展示“问题”和“建议”，弹窗统一使用 S/M/L/XL/Full 尺寸规范。
 >
 > 7.2.11 补充：单 Issue Review 在 Progress 中展示已有报告检查；Problems 显示问题/建议摘要，并从结构化延后资源元数据明确区分 Company Config 与 SCR。分支配置支持精确值与版本通配符；Jira REST 保持权威数据和唯一写入边界，Rovo 仅用于只读候选上下文，本地 jira-prd/RAG 默认关闭。
@@ -56,11 +58,13 @@
 
 ## Review Cycle 与增量边界
 
-同一 Jira Issue 始终保留一条主历史记录。后续加入新 Sprint 处理时创建新的 Review Cycle；一次逻辑审核创建 Run Group，并关联本次 frontend/backend Runs：
+同一 Jira Issue 始终保留一条主历史记录。后续加入新 Sprint 处理时创建新的 Review Cycle；一次逻辑审核创建 Run Group，并关联本次应用级 Runs：
 
 ```text
-Issue → Sprint membership → Review Cycle → Run Group → project-type Runs
+Issue → Sprint membership → Review Cycle → Run Group → Application Runs → project type
 ```
+
+应用是报告、处理和 Release Gate 的业务边界；`frontend/backend` 是技术元数据。iTrade Client、Services Terminal、WVAdmin 分别是独立的 frontend 应用。iTrade Client 的 `7.5` 主版本包含 `7.5.0.x`、`7.5.1.x` 两条并行版本线；DPS 是 backend 应用，其 DPS9/DPS11 主版本线必须分别保留。
 
 MR revision 使用 GitLab project、MR IID 和 Head SHA 标识。以前 Cycle 已审核且 Head SHA 未变化的 revision 会被排除；Head SHA 改变则重新审核。只有当前 Cycle 的 `base_sha → head_sha` diff 可以产生本轮 Finding；目标分支最新代码只作为影响上下文，原 Description 与以前正式模板 Comments 作为历史需求上下文，不能夹带旧 Cycle diff。
 
@@ -120,7 +124,7 @@ GIT_VERSION MR 使用专用的发布门禁 LLM 上下文预算。确定性的 YA
 
 ```text
 Web Run Review / Sprint
-  → 查看普通 frontend/backend 报告及 deferred Company Config/SCR
+  → 查看应用级报告及 deferred Company Config/SCR
   → Sprint Job 中 Continue to Release Gate
   → 确认或输入 GIT_VERSION MR URL
   → Run Release Gate
@@ -131,6 +135,8 @@ Web Run Review / Sprint
 普通 Sprint Review 发现 Company Config/SCR 后，将其列为 deferred，不把这些构建资源放入普通代码 Prompt。发现 GIT_VERSION MR 时，Job 卡片提供 `Continue to Release Gate`；未自动发现时，Manager 也可在 Run Review 的 Release Gate 工作区直接输入完整 MR URL。
 
 Release Gate 通过与其他 Review 相同的 Web Job 队列执行，支持进度、暂停、停止、重试、报告预览和历史恢复。服务端只允许 Manager 启动，并在进入 LLM 前验证目标 MR 必须包含版本化 `git_version.yml`/`build.yml` 资源。
+
+`config.yml #build-repository` 是 Release Gate 的权威应用映射：iTrade Client、Services Terminal、WVAdmin 各自使用独立前端构建仓库的 GIT_VERSION MR；iTrade Client 还必须按 `7.5.0.*`/`7.5.1.*` 版本线分别校验。DPS9/DPS11 使用 DPS 后端构建仓库，并按 `9.3.*`/`11.2.*` 版本线校验。完整规则见 [构建仓库与应用边界知识](CodeReviewer-Build-Repository-Knowledge.zh-CN.md)。
 
 Release Gate 状态：
 

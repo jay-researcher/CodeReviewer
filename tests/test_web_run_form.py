@@ -102,7 +102,7 @@ class WebRunFormTests(unittest.TestCase):
         self.assertIn('class="coverage-card-applications"', page)
         self.assertIn("item.review_cycle_number", page)
         self.assertIn("No Review Cycle yet", page)
-        self.assertIn("async function pollCoverageJob(jobId)", page)
+        self.assertIn("async function pollCoverageJob(jobId, options = {})", page)
         self.assertIn("Closing this window will not stop it.", page)
         self.assertNotIn("coverageController.abort(), 60000", page)
         self.assertIn("runReview({ keepCoverageOpen: true })", page)

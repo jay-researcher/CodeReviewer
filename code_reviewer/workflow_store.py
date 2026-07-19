@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import base64
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -14,9 +16,10 @@ from typing import Any, Iterator, Protocol
 
 from .adf import adf_json, adf_plain_text, empty_adf, validate_adf
 from .config import DATA_DIR, app_config_get
+from .review_scope import review_scope_for_merge_request
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DISPOSITIONS = {"fixed", "follow-up", "not-issue"}
 ISSUE_STATUSES = {
     "not-reviewed",
@@ -65,6 +68,63 @@ def blocking_severities() -> set[str]:
 
 
 APPLICATION_ORDER = ("WVAdmin", "iTrade Client", "Services Terminal", "DPS", "Unmapped")
+
+
+def scope_people(value: object) -> set[str]:
+    """Return the distinct people encoded by a Responsible Scope value.
+
+    Persisted reports have used plain strings, delimiter-separated strings,
+    JSON arrays, and Python-list string representations.  Keeping this parser
+    storage-neutral lets both repository filtering and HTTP authorization use
+    exactly the same interpretation.
+    """
+    if value is None:
+        return set()
+    if isinstance(value, dict):
+        people: set[str] = set()
+        for item in value.values():
+            people.update(scope_people(item))
+        return people
+    if isinstance(value, (list, tuple, set, frozenset)):
+        people = set()
+        for item in value:
+            people.update(scope_people(item))
+        return people
+    if not isinstance(value, str):
+        return set()
+
+    text = value.strip()
+    if not text:
+        return set()
+    if text[:1] in {"[", "{", "("}:
+        parsed: object | None = None
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                parsed = None
+        if parsed is not None and parsed != text:
+            return scope_people(parsed)
+    return {
+        item.strip().strip("\"'")
+        for item in re.split(r"[+,;|\r\n]+", text)
+        if item.strip().strip("\"'")
+    }
+
+
+def review_scope_label(application: str, release_line: str = "") -> str:
+    """Build the stable display label for an application/release-line scope."""
+    application = application.strip() or "Unmapped"
+    release_line = release_line.strip()
+    if not release_line:
+        return application
+    if application == "iTrade Client":
+        return f"{application} {release_line}"
+    if application == "DPS":
+        return release_line if release_line.casefold().startswith("dps") else f"{application} {release_line}"
+    return application
 
 
 def review_application_from_scope(item: dict[str, Any]) -> str:
@@ -180,6 +240,7 @@ class WorkflowStore:
                     conclusion TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'completed',
                     severity_counts_json TEXT NOT NULL DEFAULT '{}',
+                    release_line TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     UNIQUE(jira_key, report_fingerprint)
                 );
@@ -267,6 +328,7 @@ class WorkflowStore:
                 """
             )
             self._migrate_v2(db)
+            self._migrate_v3(db)
             db.execute(
                 "INSERT INTO schema_meta(key, value) VALUES('version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(SCHEMA_VERSION),),
@@ -456,6 +518,17 @@ class WorkflowStore:
             """
         )
         self._backfill_cycles(db)
+
+    def _migrate_v3(self, db: sqlite3.Connection) -> None:
+        """Add the application release-line boundary without rewriting v2 data."""
+        self._add_column(db, "review_runs", "release_line TEXT NOT NULL DEFAULT ''")
+        self._execute_script(
+            db,
+            """
+            CREATE INDEX IF NOT EXISTS idx_review_runs_release_scope
+                ON review_runs(cycle_id, application, release_line, run_number DESC);
+            """,
+        )
 
     def _backfill_cycles(self, db: sqlite3.Connection) -> None:
         """Create deterministic legacy ownership without altering business records."""
@@ -756,7 +829,8 @@ class WorkflowStore:
         run_group_id: str = "",
         project_type: str = "",
         application: str = "",
-        responsible_scope: str = "",
+        release_line: str = "",
+        responsible_scope: object = "",
         mr_fingerprint: str = "",
         stable_fingerprint: str = "",
     ) -> str:
@@ -765,13 +839,24 @@ class WorkflowStore:
             raise ValueError("Jira key is required.")
         timestamp = created_at or utc_now()
         report_identity = report_fingerprint(report_path)
+        if isinstance(responsible_scope, str):
+            persisted_responsible_scope = responsible_scope.strip()
+        else:
+            persisted_responsible_scope = json.dumps(
+                sorted(scope_people(responsible_scope), key=str.casefold),
+                ensure_ascii=False,
+            )
+        if not scope_people(persisted_responsible_scope):
+            persisted_responsible_scope = responsible.strip()
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO review_issues(jira_key, summary, responsible, status, created_at, updated_at)
                    VALUES(?, ?, ?, 'handling', ?, ?)
                    ON CONFLICT(jira_key) DO UPDATE SET
                      summary=CASE WHEN excluded.summary<>'' THEN excluded.summary ELSE review_issues.summary END,
-                     responsible=CASE WHEN excluded.responsible<>'' THEN excluded.responsible ELSE review_issues.responsible END,
+                     responsible=CASE
+                       WHEN review_issues.responsible='' AND excluded.responsible<>''
+                       THEN excluded.responsible ELSE review_issues.responsible END,
                      updated_at=excluded.updated_at""",
                 (jira_key, summary, responsible, timestamp, timestamp),
             )
@@ -828,18 +913,21 @@ class WorkflowStore:
                 severity_counts[severity] = severity_counts.get(severity, 0) + 1
             db.execute(
                 """INSERT INTO review_runs(id, jira_key, report_path, report_fingerprint, run_number, conclusion,
-                   severity_counts_json, created_at, cycle_id, run_group_id, project_type, application, responsible_scope,
-                   mr_fingerprint, stable_fingerprint) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   severity_counts_json, created_at, cycle_id, run_group_id, project_type, application, release_line,
+                   responsible_scope, mr_fingerprint, stable_fingerprint)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     run_id, jira_key, report_path, report_identity, run_number, conclusion,
                     json.dumps(severity_counts), timestamp, cycle_id, run_group_id, project_type.strip().lower(),
-                    application.strip(), responsible_scope.strip(), mr_fingerprint.strip(), stable_fingerprint.strip(),
+                    application.strip(), release_line.strip(), persisted_responsible_scope,
+                    mr_fingerprint.strip(), stable_fingerprint.strip(),
                 ),
             )
             previous = db.execute(
-                """SELECT id FROM review_runs WHERE jira_key=? AND cycle_id=? AND project_type=? AND id<>?
+                """SELECT id FROM review_runs
+                   WHERE jira_key=? AND cycle_id=? AND application=? AND release_line=? AND id<>?
                    ORDER BY run_number DESC LIMIT 1""",
-                (jira_key, cycle_id, project_type.strip().lower(), run_id),
+                (jira_key, cycle_id, application.strip(), release_line.strip(), run_id),
             ).fetchone()
             previous_fingerprints: set[str] = set()
             if previous:
@@ -1418,24 +1506,47 @@ class WorkflowStore:
                         imported["passes"] += 1
         return imported
 
+    @staticmethod
+    def _issue_scope_people(
+        db: sqlite3.Connection, jira_key: str, legacy_responsible: object = ""
+    ) -> set[str]:
+        people = scope_people(legacy_responsible)
+        for row in db.execute(
+            "SELECT responsible_scope FROM review_runs WHERE jira_key=?",
+            (jira_key,),
+        ):
+            people.update(scope_people(row["responsible_scope"]))
+        return people
+
     def list_issues(self, *, responsibles: list[str] | None = None, view_all: bool = False) -> list[dict[str, Any]]:
         with self.connect() as db:
-            params: list[Any] = []
-            where = ""
+            allowed: set[str] = set()
             if not view_all:
-                values = [item.strip().lower() for item in (responsibles or []) if item.strip()]
-                if not values:
+                allowed = {
+                    person.casefold()
+                    for value in (responsibles or [])
+                    for person in scope_people(value)
+                }
+                if not allowed:
                     return []
-                where = "WHERE lower(i.responsible) IN (%s)" % ",".join("?" for _ in values)
-                params.extend(values)
             rows = db.execute(
                 f"""SELECT i.*, r.run_number, r.conclusion, r.severity_counts_json,
                     (SELECT COUNT(*) FROM review_runs rr WHERE rr.jira_key=i.jira_key) AS run_count,
                     (SELECT COUNT(*) FROM findings f WHERE f.run_id=i.latest_run_id) AS finding_count
                     FROM review_issues i LEFT JOIN review_runs r ON r.id=i.latest_run_id
-                    {where} ORDER BY i.updated_at DESC""",
-                params,
+                    ORDER BY i.updated_at DESC""",
             ).fetchall()
+            if not view_all:
+                rows = [
+                    row
+                    for row in rows
+                    if allowed.intersection(
+                        person.casefold()
+                        for person in self._issue_scope_people(
+                            db, str(row["jira_key"]), row["responsible"]
+                        )
+                    )
+                ]
             return [self._issue_summary(db, row) for row in rows]
 
     def issue_detail(self, jira_key: str) -> dict[str, Any] | None:
@@ -1454,6 +1565,37 @@ class WorkflowStore:
                     finding["handling"] = self._row(handling) if handling else None
                     findings.append(finding)
                 run["findings"] = findings
+            latest_run = runs[0] if runs else {}
+            latest_group_id = str(latest_run.get("run_group_id") or "")
+            latest_group_runs = [
+                run
+                for run in runs
+                if latest_group_id and str(run.get("run_group_id") or "") == latest_group_id
+            ] or ([latest_run] if latest_run else [])
+            latest_group_findings: list[dict[str, Any]] = []
+            latest_group_severity: dict[str, int] = {}
+            for run in latest_group_runs:
+                scope_label = review_scope_label(
+                    str(run.get("application") or ""),
+                    str(run.get("release_line") or ""),
+                )
+                for severity, count in (run.get("severity_counts") or {}).items():
+                    latest_group_severity[str(severity)] = latest_group_severity.get(str(severity), 0) + int(count or 0)
+                for source_finding in run.get("findings") or []:
+                    finding = dict(source_finding)
+                    finding["application"] = run.get("application") or "Unmapped"
+                    finding["release_line"] = run.get("release_line") or ""
+                    finding["scope_label"] = scope_label
+                    finding["run_id"] = run.get("id") or ""
+                    latest_group_findings.append(finding)
+            latest_run_group = {
+                **latest_run,
+                "runs": latest_group_runs,
+                "run_count": len(latest_group_runs),
+                "findings": latest_group_findings,
+                "finding_count": len(latest_group_findings),
+                "severity_counts": latest_group_severity,
+            } if latest_run else {}
             discussions = [self._row(row) for row in db.execute("SELECT * FROM discussions WHERE jira_key=? ORDER BY created_at", (jira_key.upper(),))]
             drafts = self._drafts(db, jira_key.upper())
             passes = [self._row(row) for row in db.execute("SELECT * FROM pass_records WHERE jira_key=? ORDER BY created_at DESC", (jira_key.upper(),))]
@@ -1493,9 +1635,15 @@ class WorkflowStore:
                     "SELECT * FROM deferred_release_resources WHERE jira_key=? ORDER BY created_at", (jira_key.upper(),)
                 )
             ]
+            issue_item = self._row(issue)
+            issue_item["responsible_scope"] = sorted(
+                self._issue_scope_people(db, jira_key.upper(), issue["responsible"]),
+                key=str.casefold,
+            )
             return {
-                "issue": self._row(issue), "cycles": cycles, "sprint_memberships": memberships,
+                "issue": issue_item, "cycles": cycles, "sprint_memberships": memberships,
                 "run_groups": run_groups, "runs": runs, "description_snapshots": description_snapshots,
+                "latest_run_group": latest_run_group,
                 "review_snapshots": review_snapshots, "deferred_resources": deferred_resources,
                 "discussions": discussions, "drafts": drafts, "passes": passes,
                 "pass_readiness": self._pass_readiness(db, jira_key),
@@ -1615,14 +1763,44 @@ class WorkflowStore:
 
     def _issue_summary(self, db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         item = self._row(row)
+        item["responsible_scope"] = sorted(
+            self._issue_scope_people(db, str(row["jira_key"]), row["responsible"]),
+            key=str.casefold,
+        )
         item["severity_counts"] = json.loads(item.pop("severity_counts_json") or "{}") if "severity_counts_json" in item else {}
         handling_counts = {"fixed": 0, "follow-up": 0, "not-issue": 0, "pending": 0}
         if row["latest_run_id"]:
+            latest = db.execute(
+                "SELECT id, run_group_id FROM review_runs WHERE id=?", (row["latest_run_id"],)
+            ).fetchone()
+            logical_run_ids = [str(row["latest_run_id"])]
+            if latest and latest["run_group_id"]:
+                logical_run_ids = [
+                    str(run["id"])
+                    for run in db.execute(
+                        "SELECT id FROM review_runs WHERE run_group_id=? ORDER BY run_number",
+                        (latest["run_group_id"],),
+                    ).fetchall()
+                ]
+            placeholders = ",".join("?" for _ in logical_run_ids)
+            item["finding_count"] = int(
+                db.execute(
+                    f"SELECT COUNT(*) FROM findings WHERE run_id IN ({placeholders})",
+                    logical_run_ids,
+                ).fetchone()[0]
+            )
+            severity_counts: dict[str, int] = {}
+            for severity_row in db.execute(
+                f"SELECT severity, COUNT(*) AS count FROM findings WHERE run_id IN ({placeholders}) GROUP BY severity",
+                logical_run_ids,
+            ):
+                severity_counts[str(severity_row["severity"])] = int(severity_row["count"])
+            item["severity_counts"] = severity_counts
             for result in db.execute(
                 """SELECT h.disposition, h.approval_status FROM findings f
                    LEFT JOIN finding_handlings h ON h.id=(SELECT id FROM finding_handlings x WHERE x.finding_id=f.id ORDER BY updated_at DESC LIMIT 1)
-                   WHERE f.run_id=?""",
-                (row["latest_run_id"],),
+                   WHERE f.run_id IN (""" + placeholders + ")",
+                logical_run_ids,
             ):
                 disposition = str(result["disposition"] or "")
                 if disposition in handling_counts:
@@ -1659,36 +1837,81 @@ class WorkflowStore:
         """Return current-cycle state per application without mixing older Sprints."""
         cycle_id = str(cycle.get("cycle_id") or "")
         scope = cycle.get("mr_scope") if isinstance(cycle.get("mr_scope"), list) else []
-        expected = {
-            review_application_from_scope(item)
-            for item in scope
-            if isinstance(item, dict)
-        }
+        expected: set[tuple[str, str]] = set()
+        for item in scope:
+            if not isinstance(item, dict):
+                continue
+            review_scope = review_scope_for_merge_request(item)
+            release_line = review_scope.release_line
+            if (
+                review_scope.application != "Unmapped"
+                and not str(item.get("release_line") or "").strip()
+                and not any(
+                    str(item.get(field) or "").strip()
+                    for field in ("target_branch", "source_branch", "branch")
+                )
+            ):
+                # v2 Cycle snapshots predate release-line persistence. Keep their
+                # mapped application aligned with legacy runs whose line is empty.
+                release_line = ""
+            expected.add((review_scope.application, release_line))
         run_rows = db.execute(
             "SELECT * FROM review_runs WHERE cycle_id=? ORDER BY run_number", (cycle_id,)
         ).fetchall()
-        latest: dict[str, sqlite3.Row] = {}
-        report_counts: dict[str, int] = {}
+        latest: dict[tuple[str, str], sqlite3.Row] = {}
+        report_counts: dict[tuple[str, str], int] = {}
         for run in run_rows:
             application = str(run["application"] or "").strip()
             if application not in APPLICATION_ORDER:
-                application = next(iter(expected)) if len(expected) == 1 else "Unmapped"
-            expected.add(application)
-            report_counts[application] = report_counts.get(application, 0) + 1
-            latest[application] = run
+                expected_applications = {item[0] for item in expected}
+                application = (
+                    next(iter(expected_applications))
+                    if len(expected_applications) == 1
+                    else "Unmapped"
+                )
+            release_line = str(run["release_line"] or "").strip()
+            scope_key = (application, release_line)
+            expected.add(scope_key)
+            report_counts[scope_key] = report_counts.get(scope_key, 0) + 1
+            latest[scope_key] = run
         group_running = bool(db.execute(
             "SELECT 1 FROM review_run_groups WHERE cycle_id=? AND status IN ('queued','running') LIMIT 1",
             (cycle_id,),
         ).fetchone())
         rows: list[dict[str, Any]] = []
         blocking = blocking_severities()
-        for application in sorted(expected, key=lambda item: APPLICATION_ORDER.index(item) if item in APPLICATION_ORDER else 99):
-            run = latest.get(application)
+        for application, release_line in sorted(
+            expected,
+            key=lambda item: (
+                APPLICATION_ORDER.index(item[0]) if item[0] in APPLICATION_ORDER else 99,
+                item[1].casefold(),
+            ),
+        ):
+            scope_key = (application, release_line)
+            run = latest.get(scope_key)
+            current_runs: list[sqlite3.Row] = []
+            if run:
+                current_group_id = str(run["run_group_id"] or "")
+                current_runs = [
+                    candidate
+                    for candidate in run_rows
+                    if str(candidate["application"] or "").strip() == application
+                    and str(candidate["release_line"] or "").strip() == release_line
+                    and str(candidate["run_group_id"] or "") == current_group_id
+                ]
+                if not current_runs:
+                    current_runs = [run]
             finding_count = 0
             handled_count = 0
             pending_blockers = 0
-            if run:
-                findings = db.execute("SELECT * FROM findings WHERE run_id=?", (run["id"],)).fetchall()
+            if current_runs:
+                findings = [
+                    finding
+                    for current_run in current_runs
+                    for finding in db.execute(
+                        "SELECT * FROM findings WHERE run_id=?", (current_run["id"],)
+                    ).fetchall()
+                ]
                 finding_count = len(findings)
                 for finding in findings:
                     handling = db.execute(
@@ -1706,7 +1929,10 @@ class WorkflowStore:
                         pending_blockers += 1
             if not run:
                 state = "generating" if group_running else "without-report"
-            elif str(run["status"] or "").lower() in {"failed", "generation-failed", "rescan-failed"}:
+            elif any(
+                str(current_run["status"] or "").lower() in {"failed", "generation-failed", "rescan-failed"}
+                for current_run in current_runs
+            ):
                 state = "failed"
             elif str(cycle.get("pass_status") or "").lower() == "passed":
                 state = "review-pass"
@@ -1717,8 +1943,10 @@ class WorkflowStore:
             rows.append(
                 {
                     "application": application,
+                    "release_line": release_line,
+                    "scope_label": review_scope_label(application, release_line),
                     "state": state,
-                    "report_count": report_counts.get(application, 0),
+                    "report_count": report_counts.get(scope_key, 0),
                     "finding_count": finding_count,
                     "handled_count": handled_count,
                     "pending_blockers": pending_blockers,

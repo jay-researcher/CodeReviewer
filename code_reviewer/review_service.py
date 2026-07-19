@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -43,6 +44,7 @@ from .models import ChangedFile
 from .models import ReviewInput, ReviewResult
 from .project_context import attach_project_context
 from .resource_optimizer import is_optimizable_build_resource
+from .review_scope import review_scope_for_merge_request
 from .repository_sync import codebase_memory_change_context, sync_workspace
 from .report import render_markdown, save_report, save_reports
 from .resume import ResumeTracker, stable_resume_key
@@ -126,7 +128,11 @@ def _missing_remote_branch_error(error: str) -> bool:
 
 def _attach_git_tools_project_match(review_input: ReviewInput) -> None:
     project_path = str(review_input.metadata.get("gitlab_project_path") or "")
-    match = _git_tools_project_match(project_path)
+    match = _git_tools_project_match(
+        project_path,
+        target_branch=review_input.target_branch,
+        source_branch=review_input.source_branch,
+    )
     review_input.metadata.update(
         {
             "git_tools_project_match": match["status"],
@@ -154,6 +160,10 @@ def _attach_git_tools_project_match(review_input: ReviewInput) -> None:
         review_input.metadata["llm_model_config"] = match["llm_model"]
     if match.get("application"):
         review_input.metadata["application"] = match["application"]
+    if match.get("release_line"):
+        review_input.metadata["release_line"] = match["release_line"]
+    if match.get("release_lines"):
+        review_input.metadata["release_lines"] = match["release_lines"]
     if match.get("dev_branch"):
         review_input.metadata["dev_branch"] = match["dev_branch"]
 
@@ -176,7 +186,12 @@ def _attach_git_tools_project_match(review_input: ReviewInput) -> None:
         )
 
 
-def _git_tools_project_match(project_path: str) -> dict[str, Any]:
+def _git_tools_project_match(
+    project_path: str,
+    *,
+    target_branch: str = "",
+    source_branch: str = "",
+) -> dict[str, Any]:
     normalized = normalize_project_path(project_path)
     config_path = str(git_tools_config_path())
     entries = git_tools_project_entries()
@@ -192,6 +207,9 @@ def _git_tools_project_match(project_path: str) -> dict[str, Any]:
         "project_name": "",
         "project_type": "",
         "llm_model": "",
+        "application": "",
+        "release_line": "",
+        "release_lines": [],
         "dev_branch": [],
     }
     if not normalized:
@@ -200,9 +218,56 @@ def _git_tools_project_match(project_path: str) -> dict[str, Any]:
     if not entries:
         return result
 
-    for entry in entries:
-        if normalize_project_path(entry.project_path) != normalized:
-            continue
+    matches = [entry for entry in entries if normalize_project_path(entry.project_path) == normalized]
+    branch_candidates = [item.strip() for item in (target_branch, source_branch) if item.strip()]
+    if len(matches) > 1 and branch_candidates:
+        branch_matches = [
+            entry
+            for entry in matches
+            if entry.branches
+            and any(
+                fnmatchcase(branch.lower(), pattern.lower())
+                for branch in branch_candidates
+                for pattern in entry.branches
+            )
+        ]
+        if branch_matches:
+            matches = branch_matches
+
+    if len(matches) > 1:
+        # The iTrade source repository intentionally appears once per parallel
+        # release line. If no configured branch glob selects one entry, retain
+        # only shared metadata and let ReviewScope infer the line from the real
+        # source/target branch. Never silently inherit the first configured line.
+        shared_fields = (
+            "group",
+            "module",
+            "repository_url",
+            "responsible",
+            "project_name",
+            "project_type",
+            "llm_model",
+            "application",
+        )
+        result["status"] = "matched"
+        for field in shared_fields:
+            values = {str(getattr(entry, field) or "").strip() for entry in matches}
+            if len(values) == 1:
+                result[field] = values.pop()
+        result["release_lines"] = sorted(
+            {
+                line
+                for entry in matches
+                for line in ([entry.release_line] if entry.release_line else entry.release_lines)
+                if line
+            }
+        )
+        result["dev_branch"] = list(
+            dict.fromkeys(branch for entry in matches for branch in entry.dev_branch)
+        )
+        return result
+
+    for entry in matches:
         result.update(
             {
                 "status": "matched",
@@ -214,6 +279,8 @@ def _git_tools_project_match(project_path: str) -> dict[str, Any]:
                 "project_type": entry.project_type,
                 "llm_model": entry.llm_model,
                 "application": entry.application,
+                "release_line": entry.release_line,
+                "release_lines": entry.release_lines,
                 "dev_branch": entry.dev_branch,
             }
         )
@@ -505,7 +572,11 @@ def _hydrate_deferred_release_gate_resources(
 
 def _review_input_dev_branch_exclusion(review_input: ReviewInput, jira_key: str = "") -> dict[str, Any] | None:
     project_path = str(review_input.metadata.get("gitlab_project_path") or review_input.project or "")
-    project_match = _git_tools_project_match(project_path)
+    project_match = _git_tools_project_match(
+        project_path,
+        target_branch=review_input.target_branch,
+        source_branch=review_input.source_branch,
+    )
     if not _is_dev_version_branch(review_input.target_branch, project_match):
         return None
     return _dev_branch_exclusion(
@@ -519,12 +590,21 @@ def _review_input_dev_branch_exclusion(review_input: ReviewInput, jira_key: str 
     )
 
 
-def _git_tools_project_match_for_mr_url(mr_url: str) -> dict[str, Any]:
+def _git_tools_project_match_for_mr_url(
+    mr_url: str,
+    *,
+    target_branch: str = "",
+    source_branch: str = "",
+) -> dict[str, Any]:
     try:
         ref = parse_mr_url(mr_url)
     except Exception:
         return _git_tools_project_match("")
-    return _git_tools_project_match(ref.project_path)
+    return _git_tools_project_match(
+        ref.project_path,
+        target_branch=target_branch,
+        source_branch=source_branch,
+    )
 
 
 def _batch_output_dir(output_dir: Path | None) -> Path:
@@ -704,6 +784,17 @@ def _save_review_reports(
     }
 
 
+def _deferred_resource_in_review_scope(item: dict[str, Any], scope: object) -> bool:
+    resource_scope = review_scope_for_merge_request(item)
+    application = str(getattr(scope, "application", "") or "")
+    release_line = str(getattr(scope, "release_line", "") or "")
+    if resource_scope.application != application:
+        return False
+    if resource_scope.release_line in {"", "Unmapped release line"}:
+        return application == "Unmapped" or release_line in {"", "Unmapped release line"}
+    return resource_scope.release_line == release_line
+
+
 def _review_fetched_inputs_for_issue(
     *,
     issue: JiraIssue,
@@ -718,6 +809,8 @@ def _review_fetched_inputs_for_issue(
     total: int = 1,
     report_owner: str = "",
     deferred_release_gate_resources: list[dict[str, Any]] | None = None,
+    _scope_partitioned: bool = False,
+    _run_group_id: str = "",
 ) -> dict[str, Any]:
     run_group_seed = "|".join(
         [
@@ -727,7 +820,83 @@ def _review_fetched_inputs_for_issue(
         ]
         + sorted(f"{item.metadata.get('gitlab_project_path', item.project)}!{item.mr_id}@{item.commit}" for item in fetched_inputs)
     )
-    run_group_id = f"rg-{hashlib.sha256(run_group_seed.encode('utf-8')).hexdigest()[:20]}"
+    run_group_id = _run_group_id or f"rg-{hashlib.sha256(run_group_seed.encode('utf-8')).hexdigest()[:20]}"
+    if not _scope_partitioned:
+        scoped_inputs: dict[object, list[ReviewInput]] = {}
+        for review_input in fetched_inputs:
+            scope = review_scope_for_merge_request(
+                {
+                    **review_input.metadata,
+                    "project": review_input.project,
+                    "project_path": review_input.metadata.get("gitlab_project_path") or review_input.project,
+                    "mr_id": review_input.mr_id,
+                    "source_branch": review_input.source_branch,
+                    "target_branch": review_input.target_branch,
+                }
+            )
+            scoped_inputs.setdefault(scope, []).append(review_input)
+        if len(scoped_inputs) > 1:
+            all_reports: list[dict[str, Any]] = []
+            aggregate_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Warning": 0}
+            aggregate_findings = 0
+            aggregate_mrs: list[dict[str, Any]] = []
+            gitnexus_report = ""
+            for scope, scope_inputs in scoped_inputs.items():
+                scoped_deferred_resources = [
+                    item
+                    for item in (deferred_release_gate_resources or [])
+                    if isinstance(item, dict)
+                    and _deferred_resource_in_review_scope(item, scope)
+                ]
+                _progress(
+                    progress,
+                    "scope-reviewing",
+                    f"Reviewing {issue.key} for {scope.filename_component}",
+                    index=index,
+                    total=total,
+                    jira_key=issue.key,
+                    application=scope.application,
+                    release_line=scope.release_line,
+                    mr_count=len(scope_inputs),
+                )
+                scoped_result = _review_fetched_inputs_for_issue(
+                    issue=issue,
+                    fetched_inputs=scope_inputs,
+                    discovered_items=discovered_items,
+                    configured_project_paths=configured_project_paths,
+                    output_dir=output_dir,
+                    progress=progress,
+                    context_repo=context_repo,
+                    sprint=sprint,
+                    index=index,
+                    total=total,
+                    report_owner=report_owner,
+                    deferred_release_gate_resources=scoped_deferred_resources,
+                    _scope_partitioned=True,
+                    _run_group_id=run_group_id,
+                )
+                all_reports.extend(scoped_result.get("reports") or [])
+                for severity, count in (scoped_result.get("severity_counts") or {}).items():
+                    aggregate_counts[severity] = aggregate_counts.get(severity, 0) + int(count or 0)
+                aggregate_findings += int(scoped_result.get("finding_count") or 0)
+                aggregate_mrs.extend(scoped_result.get("mrs") or [])
+                gitnexus_report = gitnexus_report or str(scoped_result.get("gitnexus_report") or "")
+            primary = all_reports[0] if all_reports else {}
+            return {
+                "jira_key": issue.key,
+                "jira_summary": issue.summary,
+                "jira_status": issue.status,
+                "review_mode": "application-release-line-scoped",
+                "report": str(primary.get("path") or ""),
+                "reports": all_reports,
+                "gitnexus_report": gitnexus_report,
+                "conclusion": _aggregate_conclusion(aggregate_counts),
+                "severity_counts": aggregate_counts,
+                "finding_count": aggregate_findings,
+                "mr_count": len(fetched_inputs),
+                "scope_count": len(scoped_inputs),
+                "mrs": aggregate_mrs,
+            }
     combined_input = _combine_jira_issue_review_inputs(
         issue=issue,
         mr_inputs=fetched_inputs,
@@ -861,7 +1030,7 @@ def _review_fetched_inputs_for_issue(
         "finding_count": aggregate_findings,
         "mr_count": len(fetched_inputs),
         "chunk_count": len(chunks),
-        "chunk_strategy": "responsible+project",
+        "chunk_strategy": "application+release-line",
         "context_budget": budget,
         "mrs": aggregate_mrs,
     }
@@ -1030,18 +1199,17 @@ def _budget_near_limit(budget: dict[str, Any]) -> bool:
 
 
 def _review_chunk_key(review_input: ReviewInput) -> str:
-    responsible = str(review_input.metadata.get("responsible") or review_input.metadata.get("git_tools_responsible") or "unassigned")
-    people = [item.strip() for item in re.split(r"[+,;]+", responsible) if item.strip()]
-    responsible_key = "+".join(sorted({item.lower(): item for item in people}.values(), key=str.lower)) or "unassigned"
-    project = str(
-        review_input.metadata.get("project_name")
-        or review_input.metadata.get("git_tools_project_name")
-        or review_input.metadata.get("git_tools_module")
-        or review_input.metadata.get("gitlab_project_path")
-        or review_input.project
-        or "project"
-    ).strip()
-    return f"{responsible_key}|{project.lower()}"
+    scope = review_scope_for_merge_request(
+        {
+            **review_input.metadata,
+            "project": review_input.project,
+            "project_path": review_input.metadata.get("gitlab_project_path") or review_input.project,
+            "mr_id": review_input.mr_id,
+            "source_branch": review_input.source_branch,
+            "target_branch": review_input.target_branch,
+        }
+    )
+    return f"{scope.application.lower()}|{scope.release_line.lower()}|{scope.isolation_key.lower()}"
 
 
 def _aggregate_conclusion(counts: dict[str, int]) -> str:
@@ -1323,6 +1491,8 @@ def review_reviewer_merge_requests(
                 "project_name": review_input.metadata.get("project_name", ""),
                 "project_type": review_input.metadata.get("project_type", ""),
                 "application": review_input.metadata.get("application", ""),
+                "release_line": review_input.metadata.get("release_line", ""),
+                "release_lines": review_input.metadata.get("release_lines", []),
                 "llm_model_config": review_input.metadata.get("llm_model_config", ""),
             }
             _attach_project_context(review_input, None)
@@ -2589,6 +2759,8 @@ def _combine_jira_issue_review_inputs(
             "project_name": review_input.metadata.get("project_name") or review_input.metadata.get("git_tools_project_name", ""),
             "project_type": review_input.metadata.get("project_type") or review_input.metadata.get("git_tools_project_type", ""),
             "application": review_input.metadata.get("application", ""),
+            "release_line": review_input.metadata.get("release_line", ""),
+            "release_lines": review_input.metadata.get("release_lines", []),
             "llm_model_config": review_input.metadata.get("llm_model_config", ""),
             "discovery_source": discovered_by_url.get(review_input.mr_url, {}).get("source", ""),
         }
@@ -2725,6 +2897,14 @@ def _combine_jira_issue_review_inputs(
     if project_types:
         metadata["project_types"] = project_types
         metadata["project_type"] = project_types[0] if len(project_types) == 1 else "mixed"
+    applications = _distinct_values_from_related_mrs(related_mrs, "application")
+    if applications:
+        metadata["applications"] = applications
+        metadata["application"] = applications[0] if len(applications) == 1 else "Unmapped"
+    release_lines = _distinct_values_from_related_mrs(related_mrs, "release_line")
+    if release_lines:
+        metadata["release_lines"] = release_lines
+        metadata["release_line"] = release_lines[0] if len(release_lines) == 1 else "Unmapped release line"
     llm_models = _distinct_values_from_related_mrs(related_mrs, "llm_model_config")
     if llm_models:
         metadata["llm_model_configs"] = llm_models
@@ -2824,7 +3004,11 @@ def list_reviewer_merge_requests(
     items: list[dict[str, Any]] = []
     for item in mrs:
         web_url = str(item.get("web_url") or "")
-        project_match = _git_tools_project_match_for_mr_url(web_url)
+        project_match = _git_tools_project_match_for_mr_url(
+            web_url,
+            target_branch=str(item.get("target_branch") or ""),
+            source_branch=str(item.get("source_branch") or ""),
+        )
         items.append(
             {
                 "project": (item.get("references") or {}).get("full", "").split("!", 1)[0],
@@ -2842,6 +3026,8 @@ def list_reviewer_merge_requests(
                 "project_name": project_match.get("project_name", ""),
                 "project_type": project_match.get("project_type", ""),
                 "application": project_match.get("application", ""),
+                "release_line": project_match.get("release_line", ""),
+                "release_lines": project_match.get("release_lines", []),
                 "llm_model_config": project_match.get("llm_model", ""),
             }
         )
@@ -2956,7 +3142,11 @@ def _discover_sprint_merge_requests(
                 record = _hydrate_mr_record_for_routing(gitlab, record)
             except Exception as exc:
                 errors.append({"jira_key": issue.key, "mr_url": mr_url, "stage": "mr-routing", "error": str(exc)})
-            project_match = _git_tools_project_match_for_mr_url(mr_url)
+            project_match = _git_tools_project_match_for_mr_url(
+                mr_url,
+                target_branch=str(record.get("target_branch") or ""),
+                source_branch=str(record.get("source_branch") or ""),
+            )
             record_with_issue = {**record, "jira_key": issue.key}
             branch_type_exclusion = _jira_sprint_branch_type_exclusion(record_with_issue)
             if branch_type_exclusion:
@@ -3009,6 +3199,8 @@ def _discover_sprint_merge_requests(
                     "project_name": project_match.get("project_name", ""),
                     "project_type": project_match.get("project_type", ""),
                     "application": project_match.get("application", ""),
+                    "release_line": project_match.get("release_line", ""),
+                    "release_lines": project_match.get("release_lines", []),
                     "llm_model_config": project_match.get("llm_model", ""),
                     "dev_branch": _configured_dev_branches(project_match),
                 }

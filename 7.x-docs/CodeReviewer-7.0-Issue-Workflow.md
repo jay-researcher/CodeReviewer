@@ -2,9 +2,11 @@
 
 > Language: English | [中文版](CodeReviewer-7.0-Issue-Workflow.zh-CN.md)
 
-Version: 7.2.12
+Version: 7.2.13
 Development branch: `20260714`  
 
+> 7.2.13 scope clarification: ordinary Jira review partitions the LLM input, reports, findings, handling and snapshots by Application + Release Line. WVAdmin, Services Terminal, iTrade Client 7.5.0/7.5.1 and DPS9/DPS11 are independent scopes; responsible access is the union of all Run scopes. Company Config/SCR remains deferred and is injected only into its matching Release Gate scope.
+>
 > 7.2.12 UI clarification: Sprint Overview does not inherit the home Jira field and separates readiness from issue cards with Overview / Sprint issues tabs. Issue Review application cards use a readable three-column desktop grid, Problems show distinct Problem and Suggestion previews, and dialogs follow shared S/M/L/XL/Full sizing.
 >
 > 7.2.11 clarification: single-Issue review shows the existing-report preflight in Progress; Problems includes problem/suggestion previews and identifies Company Config versus SCR from structured deferred-resource metadata. Branch configuration accepts exact values and version wildcards. Jira REST remains authoritative and the only Jira write boundary; Rovo is read-only candidate context and local jira-prd/RAG is disabled by default.
@@ -53,11 +55,13 @@ Trial Developer mapping:
 
 ## Review Cycle and incremental boundary
 
-One Jira Issue remains one top-level history record. Each later Sprint treatment creates a Review Cycle, and one logical review creates a Run Group containing its frontend/backend Runs:
+One Jira Issue remains one top-level history record. Each later Sprint treatment creates a Review Cycle, and one logical review creates a Run Group containing application-level Runs:
 
 ```text
-Issue → Sprint membership → Review Cycle → Run Group → project-type Runs
+Issue → Sprint membership → Review Cycle → Run Group → Application Runs → project type
 ```
+
+Application is the business boundary for reports, handling and Release Gate; `frontend/backend` is technical metadata. iTrade Client, Services Terminal and WVAdmin are separate frontend applications. The iTrade Client `7.5` major version contains parallel `7.5.0.x` and `7.5.1.x` release lines. DPS is a backend application whose DPS9/DPS11 major release lines remain distinct.
 
 An MR revision is identified by GitLab project, MR IID and Head SHA. An unchanged revision already reviewed in an earlier Cycle is excluded; a new Head SHA is reviewed again. Only the current Cycle's `base_sha → head_sha` diffs are finding sources. Target-branch latest code is context only, and the original Description plus earlier formal template Comments are historical requirement context without earlier Cycle diffs.
 
@@ -117,7 +121,7 @@ The normal business workflow does not require a Manager to open a terminal:
 
 ```text
 Web Run Review / Sprint
-  → inspect normal frontend/backend reports and deferred Company Config/SCR
+  → inspect application reports and deferred Company Config/SCR
   → Continue to Release Gate from the Sprint Job
   → confirm or enter the GIT_VERSION MR URL
   → Run Release Gate
@@ -128,6 +132,8 @@ Web Run Review / Sprint
 Sprint Review records Company Config/SCR as deferred and excludes those build resources from the ordinary code prompt. If discovery finds a GIT_VERSION MR, the completed Job offers `Continue to Release Gate`; otherwise, Manager can enter the full MR URL directly in the Release Gate workspace.
 
 Release Gate uses the same Web Job queue as other reviews and supports progress, pause, stop, retry, report preview, and history recovery. The server restricts it to Manager and verifies before the LLM call that the MR contains versioned `git_version.yml`/`build.yml` resources.
+
+`config.yml #build-repository` is the authoritative Release Gate mapping. iTrade Client, Services Terminal and WVAdmin each use the GIT_VERSION MR from their own frontend build repository. iTrade Client is additionally validated against its `7.5.0.*` or `7.5.1.*` release line. DPS9/DPS11 use the DPS backend build repository and are validated against the `9.3.*`/`11.2.*` release line. See [Build repository and application boundary knowledge](CodeReviewer-Build-Repository-Knowledge.zh-CN.md) for the complete mapping.
 
 - `READY`: deterministic checks found no lock/resource error and final analysis found no configured Critical/High blocker; Manager must still read the report.
 - `BLOCKED`: source/build locks, locked resources, SCR/database payload, an LLM blocking finding, or another gate check failed; fix and rerun in Web.

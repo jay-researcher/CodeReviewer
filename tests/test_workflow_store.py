@@ -233,7 +233,7 @@ class WorkflowStoreTests(unittest.TestCase):
         db = sqlite3.connect(legacy_path)
         try:
             db.row_factory = sqlite3.Row
-            self.assertEqual(db.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], "2")
+            self.assertEqual(db.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], "3")
             self.assertEqual(db.execute("SELECT COUNT(*) FROM review_cycles").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM review_run_groups").fetchone()[0], 1)
             run = db.execute("SELECT cycle_id, run_group_id FROM review_runs WHERE id='run-1'").fetchone()

@@ -12,6 +12,10 @@ from urllib.parse import quote
 from .config import app_config_bool, app_config_int, app_config_list, report_language
 from .models import ChangedFile, Finding
 from .models import ReviewInput, ReviewResult
+from .review_scope import (
+    group_merge_requests_by_review_scope,
+    review_scope_filename_component,
+)
 
 
 def render_markdown(result: ReviewResult, language: str | None = None) -> str:
@@ -38,6 +42,8 @@ def render_markdown(result: ReviewResult, language: str | None = None) -> str:
         f"- Sprint{sep}{source.sprint or '-'}",
         f"- MR Type{sep}{source.metadata.get('mr_type', '-')}",
         f"- Project Type{sep}{source.metadata.get('project_type') or source.metadata.get('git_tools_project_type') or '-'}",
+        f"- Application{sep}{source.metadata.get('application') or 'Unmapped'}",
+        f"- Release Line{sep}{source.metadata.get('release_line') or 'Unmapped release line'}",
         f"- LLM Provider{sep}{source.metadata.get('llm_provider', '-')}",
         f"- LLM Model{sep}{source.metadata.get('llm_model', '-')}",
         f"- LLM Reasoning Effort{sep}{source.metadata.get('llm_reasoning_effort', '-')}",
@@ -228,6 +234,9 @@ def _report_metadata_comment(source: ReviewInput) -> str:
         "mr_id": source.mr_id,
         "generated_at": source.generated_at.isoformat(timespec="seconds"),
         "responsible": metadata.get("responsible", ""),
+        "responsible_scope": metadata.get("responsible_scope", []),
+        "application": metadata.get("application", ""),
+        "release_line": metadata.get("release_line", ""),
         "web_report_owner": metadata.get("web_report_owner", ""),
         "review_fingerprint": metadata.get("review_fingerprint", ""),
         "review_stable_fingerprint": metadata.get("review_stable_fingerprint", ""),
@@ -569,7 +578,7 @@ def save_report(result: ReviewResult, output_dir: Path, filename: str | None = N
             result.severity_counts,
             responsible=responsible_prefix,
             simplified=simplified_name,
-            scope=str(source.metadata.get("split_report_project_type") or ""),
+            scope=_report_scope_filename_component(source),
         )
     )
     if _web_report_owner(source.metadata) or _release_resource_role(source.metadata, source.source_branch):
@@ -590,22 +599,26 @@ def save_reports(result: ReviewResult, output_dir: Path, filename: str | None = 
     if filename:
         return [(result, save_report(result, output_dir, filename=filename, language=language))]
     saved: list[tuple[ReviewResult, Path]] = []
-    for report_result in split_result_by_responsible(result):
+    for report_result in split_result_by_review_scope(result):
         saved.append((report_result, save_report(report_result, output_dir, language=language)))
     return saved
 
 
 def split_result_by_responsible(result: ReviewResult) -> list[ReviewResult]:
+    """Backward-compatible name for Application/Release Line report splitting."""
+    return split_result_by_review_scope(result)
+
+
+def split_result_by_review_scope(result: ReviewResult) -> list[ReviewResult]:
     related_mrs = result.review_input.metadata.get("related_merge_requests") or []
     if not isinstance(related_mrs, list) or not related_mrs:
         return [result]
-    groups = _related_mr_groups_by_report_scope(related_mrs)
-    if len(groups) <= 1:
+    groups = group_merge_requests_by_review_scope(related_mrs)
+    if not groups:
         return [result]
 
     split_results: list[ReviewResult] = []
-    for group_key, items in groups.items():
-        responsible, project_type = group_key
+    for scope, items in groups.items():
         prefixes = [_related_mr_prefix(item) for item in items]
         prefixes = [prefix for prefix in prefixes if prefix]
         changed_files = [
@@ -621,17 +634,28 @@ def split_result_by_responsible(result: ReviewResult) -> list[ReviewResult]:
         ]
         metadata = copy.deepcopy(result.review_input.metadata)
         metadata["related_merge_requests"] = [copy.deepcopy(item) for item in items]
-        metadata["responsible_people"] = _unique_sorted_people(re.split(r"[+,;]+", responsible))
+        responsible_scope = _responsible_scope_from_related_mrs(items)
+        metadata["responsible_scope"] = responsible_scope
+        metadata["responsible_people"] = responsible_scope
         metadata["responsible"] = "+".join(metadata["responsible_people"])
         metadata["split_from_responsible"] = _canonical_responsible_name(result.review_input.metadata)
-        metadata["split_report_responsible"] = responsible
-        if project_type:
-            metadata["project_type"] = project_type
-            metadata["git_tools_project_type"] = project_type
-            metadata["split_report_project_type"] = project_type
+        metadata["split_report_responsible"] = metadata["responsible"]
+        metadata["application"] = scope.application
+        metadata["release_line"] = scope.release_line
+        metadata["split_report_application"] = scope.application
+        metadata["split_report_release_line"] = scope.release_line
+        metadata["split_report_scope_component"] = scope.filename_component
+        _set_split_project_type_metadata(metadata, items)
         metadata["split_report_count"] = len(groups)
         metadata["split_report_file_prefixes"] = prefixes
         metadata["multi_mr_file_links"] = _filter_file_links(metadata.get("multi_mr_file_links"), changed_paths)
+        deferred = metadata.get("deferred_release_gate_resources")
+        if isinstance(deferred, list):
+            metadata["deferred_release_gate_resources"] = [
+                copy.deepcopy(item)
+                for item in deferred
+                if isinstance(item, dict) and _deferred_resource_matches_scope(item, scope)
+            ]
         _set_split_project_metadata(metadata, items)
         split_input = replace(
             result.review_input,
@@ -652,6 +676,15 @@ def split_result_by_responsible(result: ReviewResult) -> list[ReviewResult]:
     return split_results
 
 
+def _deferred_resource_matches_scope(item: dict[str, object], scope: ReviewScope) -> bool:
+    resource_scope = review_scope_for_merge_request(item)
+    if resource_scope.application != scope.application:
+        return False
+    if resource_scope.release_line in {"", "Unmapped release line"}:
+        return scope.application == "Unmapped" or scope.release_line in {"", "Unmapped release line"}
+    return resource_scope.release_line == scope.release_line
+
+
 def render_handling_result_template(result: ReviewResult, language: str | None = None) -> str:
     language = _normalize_language(language or report_language())
     source = result.review_input
@@ -668,7 +701,7 @@ def render_handling_result_template(result: ReviewResult, language: str | None =
             result.severity_counts,
             responsible=responsible_prefix,
             simplified=bool(responsible_prefix) or bool(_web_report_owner(source.metadata)),
-            scope=str(source.metadata.get("split_report_project_type") or ""),
+            scope=_report_scope_filename_component(source),
         )
     title = _handling_title(report_name, language)
     return _render_handling_template(title, _findings_for_handling_template(result.findings), language)
@@ -777,20 +810,6 @@ def _render_handling_template(title: str, findings: list[tuple[str, str]], langu
     return "\n".join(lines).strip() + "\n"
 
 
-def _related_mr_groups_by_report_scope(related_mrs: list[object]) -> dict[tuple[str, str], list[dict[str, object]]]:
-    groups: dict[tuple[str, str], list[dict[str, object]]] = {}
-    for item in related_mrs:
-        if not isinstance(item, dict):
-            continue
-        owners = _responsible_people_for_split(str(item.get("responsible") or ""))
-        if not owners:
-            owners = ["unassigned"]
-        project_type = _normalize_report_project_type(item.get("project_type"))
-        for responsible in owners:
-            groups.setdefault((responsible, project_type), []).append(item)
-    return groups
-
-
 def _normalize_report_project_type(value: object) -> str:
     text = str(value or "").strip().lower().replace("_", "-")
     if text in {"frontend", "front-end", "web", "client"}:
@@ -804,8 +823,40 @@ def _canonical_responsible_text(value: str) -> str:
     return "+".join(_unique_sorted_people([item.strip() for item in re.split(r"[+,;]+", value or "") if item.strip()]))
 
 
-def _responsible_people_for_split(value: str) -> list[str]:
-    return _unique_sorted_people([item.strip() for item in re.split(r"[+,;]+", value or "") if item.strip()])
+def _responsible_scope_from_related_mrs(items: list[dict[str, object]]) -> list[str]:
+    people: list[str] = []
+    for item in items:
+        item_scope = item.get("responsible_scope")
+        if isinstance(item_scope, list):
+            people.extend(str(person).strip() for person in item_scope if str(person).strip())
+        people.extend(
+            person.strip()
+            for person in re.split(r"[+,;]+", str(item.get("responsible") or ""))
+            if person.strip()
+        )
+    return _unique_sorted_people(people)
+
+
+def _set_split_project_type_metadata(
+    metadata: dict[str, object],
+    items: list[dict[str, object]],
+) -> None:
+    project_types = _unique_sorted_people(
+        [
+            _normalize_report_project_type(item.get("project_type") or item.get("type"))
+            for item in items
+            if _normalize_report_project_type(item.get("project_type") or item.get("type"))
+        ]
+    )
+    metadata.pop("split_report_project_type", None)
+    if not project_types:
+        metadata.pop("project_types", None)
+        metadata.pop("project_type", None)
+        metadata.pop("git_tools_project_type", None)
+        return
+    metadata["project_types"] = project_types
+    metadata["project_type"] = project_types[0] if len(project_types) == 1 else "mixed"
+    metadata["git_tools_project_type"] = metadata["project_type"]
 
 
 def _related_mr_prefix(item: dict[str, object]) -> str:
@@ -939,6 +990,37 @@ def _report_project_prefix(default_project: str, metadata: dict[str, object]) ->
     if module:
         return module
     return default_project
+
+
+def _report_scope_filename_component(source: ReviewInput) -> str:
+    metadata = source.metadata or {}
+    explicit = str(metadata.get("split_report_scope_component") or "").strip()
+    if explicit:
+        return explicit
+    if not any(
+        metadata.get(key)
+        for key in (
+            "application",
+            "release_line",
+            "git_tools_group",
+            "git_tools_module",
+            "git_tools_project_path",
+            "gitlab_project_path",
+        )
+    ):
+        return ""
+    return review_scope_filename_component(
+        {
+            **metadata,
+            "project": source.project,
+            "project_path": metadata.get("gitlab_project_path") or metadata.get("git_tools_project_path"),
+            "project_name": metadata.get("project_name") or metadata.get("git_tools_project_name"),
+            "source_branch": source.source_branch,
+            "target_branch": source.target_branch,
+            "mr_id": source.mr_id,
+            "mr_url": source.mr_url,
+        }
+    )
 
 
 def _release_resource_report_filename(result: ReviewResult) -> str:

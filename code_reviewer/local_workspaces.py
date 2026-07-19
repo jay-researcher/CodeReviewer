@@ -36,6 +36,8 @@ class WorkspaceEntry:
     project_type: str = ""
     llm_model: str = ""
     application: str = ""
+    release_line: str = ""
+    release_lines: list[str] = field(default_factory=list)
     dev_branch: list[str] = field(default_factory=list)
     branches: list[str] = field(default_factory=list)
     source: str = ""
@@ -145,6 +147,12 @@ def load_workspace_entries(groups: str = "", projects: str = "") -> list[Workspa
                 entry.project_type = git_entry.project_type
             if not entry.llm_model:
                 entry.llm_model = git_entry.llm_model
+            if not entry.application:
+                entry.application = git_entry.application
+            if not entry.release_line:
+                entry.release_line = git_entry.release_line
+            if not entry.release_lines:
+                entry.release_lines = git_entry.release_lines
             if not entry.dev_branch:
                 entry.dev_branch = git_entry.dev_branch
             if not entry.branches:
@@ -172,6 +180,12 @@ def load_workspace_entries(groups: str = "", projects: str = "") -> list[Workspa
                 entry.project_type = git_entry.project_type
             if not entry.llm_model:
                 entry.llm_model = git_entry.llm_model
+            if not entry.application:
+                entry.application = git_entry.application
+            if not entry.release_line:
+                entry.release_line = git_entry.release_line
+            if not entry.release_lines:
+                entry.release_lines = git_entry.release_lines
             if not entry.dev_branch:
                 entry.dev_branch = git_entry.dev_branch
             if not entry.branches:
@@ -231,6 +245,9 @@ def _workspace_entries_from_payload(payload: dict[str, Any], base: Path) -> list
                         project_name=str(value.get("project_name") or ""),
                         project_type=str(value.get("type") or value.get("project_type") or ""),
                         llm_model=str(value.get("llm_model") or ""),
+                        application=str(value.get("application") or ""),
+                        release_line=str(value.get("release_line") or ""),
+                        release_lines=_string_list(value.get("release_lines")),
                         dev_branch=_string_list(value.get("dev_branch")),
                         branches=_string_list(value.get("branch") or value.get("branches")),
                         source="workspace-config",
@@ -253,6 +270,9 @@ def _workspace_entries_from_payload(payload: dict[str, Any], base: Path) -> list
                 project_name=str(value.get("project_name") or ""),
                 project_type=str(value.get("type") or value.get("project_type") or ""),
                 llm_model=str(value.get("llm_model") or ""),
+                application=str(value.get("application") or ""),
+                release_line=str(value.get("release_line") or ""),
+                release_lines=_string_list(value.get("release_lines")),
                 dev_branch=_string_list(value.get("dev_branch")),
                 branches=_string_list(value.get("branch") or value.get("branches")),
                 source="workspace-config",
@@ -280,6 +300,9 @@ def _workspace_entries_from_payload(payload: dict[str, Any], base: Path) -> list
                             project_name=str(value.get("project_name") or ""),
                             project_type=str(value.get("type") or value.get("project_type") or ""),
                             llm_model=str(value.get("llm_model") or ""),
+                            application=str(value.get("application") or ""),
+                            release_line=str(value.get("release_line") or ""),
+                            release_lines=_string_list(value.get("release_lines")),
                             dev_branch=_string_list(value.get("dev_branch")),
                             branches=_string_list(value.get("branch") or value.get("branches")),
                             source="workspace-config",
@@ -322,6 +345,9 @@ def _workspace_entry(
     project_name: str = "",
     project_type: str = "",
     llm_model: str = "",
+    application: str = "",
+    release_line: str = "",
+    release_lines: list[str] | None = None,
     dev_branch: list[str] | None = None,
     branches: list[str] | None = None,
     source: str = "",
@@ -340,6 +366,9 @@ def _workspace_entry(
         project_name=project_name,
         project_type=project_type,
         llm_model=llm_model,
+        application=application,
+        release_line=release_line,
+        release_lines=release_lines or ([release_line] if release_line else []),
         dev_branch=dev_branch or [],
         branches=branches or [],
         source=source,
@@ -378,7 +407,19 @@ def _collect_git_tools_payload_entries(
 ) -> None:
     """Read both flat git-tools config and JiraReviewer nested project config."""
     inherited = dict(inherited or {})
-    for key in ("responsible", "project_name", "llm_model", "application", "dev_branch", "branch", "branches", "type", "project_type"):
+    for key in (
+        "responsible",
+        "project_name",
+        "llm_model",
+        "application",
+        "release_line",
+        "release_lines",
+        "dev_branch",
+        "branch",
+        "branches",
+        "type",
+        "project_type",
+    ):
         if key in value and value.get(key) not in (None, "", []):
             inherited[key] = value.get(key)
 
@@ -388,6 +429,10 @@ def _collect_git_tools_payload_entries(
         responsible = _people_text(value.get("responsible", inherited.get("responsible", "")))
         project_type = _normalize_project_type(value.get("type") or value.get("project_type") or inherited.get("type") or inherited.get("project_type"))
         branches = _string_list(value.get("branch") or value.get("branches") or inherited.get("branch") or inherited.get("branches"))
+        release_line = str(value.get("release_line") or inherited.get("release_line") or "").strip()
+        release_lines = _string_list(value.get("release_lines") or inherited.get("release_lines"))
+        if release_line and release_line not in release_lines:
+            release_lines.insert(0, release_line)
         base = dict(
             project_path=project_path,
             group=group,
@@ -398,6 +443,8 @@ def _collect_git_tools_payload_entries(
             project_type=project_type,
             llm_model=str(value.get("llm_model") or inherited.get("llm_model") or ""),
             application=str(value.get("application") or inherited.get("application") or ""),
+            release_line=release_line,
+            release_lines=release_lines,
             dev_branch=_string_list(value.get("dev_branch") or inherited.get("dev_branch")),
             branches=branches,
             source="git-tools",
@@ -472,6 +519,9 @@ def _git_tools_entries_from_text(text: str, groups: set[str]) -> list[WorkspaceE
                     project_name=fields.get("project_name", ""),
                     project_type=_normalize_project_type(fields.get("type") or fields.get("project_type")),
                     llm_model=fields.get("llm_model", ""),
+                    application=fields.get("application", ""),
+                    release_line=fields.get("release_line", ""),
+                    release_lines=_string_list(fields.get("release_lines", "")),
                     dev_branch=_string_list(fields.get("dev_branch", "")),
                     branches=_string_list(fields.get("branch", "")),
                     source="git-tools",

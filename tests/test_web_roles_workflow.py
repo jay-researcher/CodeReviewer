@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from code_reviewer.web_app import (
+    _can_access_report,
     _application_review_progress,
     _aggregate_coverage_report_status,
     _coverage_report_summary,
@@ -13,6 +14,7 @@ from code_reviewer.web_app import (
     build_review_coverage,
     _manual_pass_readiness,
     _record_finding_handling,
+    _read_report_metadata,
     _web_user_responsibles,
     _web_user_permissions,
     _web_user_role,
@@ -35,6 +37,25 @@ REPORT = """# ECHNL-1001 Code Review Report
 
 
 class WebRolesWorkflowTests(unittest.TestCase):
+    def test_report_scope_metadata_grants_auditor_access_without_directory_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            report = base / "admin" / "ECHNL-1001_WVAdmin_has-issue-high.md"
+            report.parent.mkdir()
+            report.write_text(
+                '<!-- code_reviewer_metadata: {"responsible_scope":["wen.yi"],'
+                '"application":"WVAdmin","release_line":"1.0"} -->\n'
+                + ("x" * 200000),
+                encoding="utf-8",
+            )
+            metadata = _read_report_metadata(report)
+            self.assertEqual(["wen.yi"], metadata["responsible_scope"])
+            with patch(
+                "code_reviewer.web_app._web_user_responsibles",
+                return_value=["wen.yi"],
+            ), patch("code_reviewer.web_app._web_user_role", return_value="auditor"):
+                self.assertTrue(_can_access_report(base, report, "auditor", metadata=metadata))
+
     def test_default_roles_and_permissions(self) -> None:
         with patch("code_reviewer.web_app._load_web_users", return_value={}), patch(
             "code_reviewer.web_app._configured_web_user_profiles",

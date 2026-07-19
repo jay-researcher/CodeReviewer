@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+import inspect
 import unittest
+from pathlib import Path
 
+from code_reviewer import web_app
 from code_reviewer.web_app import render_login
 
 
@@ -27,6 +30,25 @@ class LoginRequiredMarkerUiTests(unittest.TestCase):
         self.assertIn('class="challenge-prompt"', page)
         self.assertIn('id="refreshChallengeBtn"', page)
         self.assertIn("flex-wrap: wrap;", page)
+
+    def test_login_uses_the_code_review_background_and_blue_glass_card(self) -> None:
+        page = render_login()
+
+        self.assertIn('url("/assets/login-code-review-bg.png")', page)
+        self.assertIn('class="brand-mark"', page)
+        self.assertIn('class="login-kicker"', page)
+        self.assertIn("backdrop-filter: blur(18px)", page)
+        self.assertIn("--accent-soft: #eaf4ff;", page)
+        self.assertIn("width: calc(100vw - 32px); max-width: 448px;", page)
+        self.assertTrue((Path(web_app.WEB_STATIC_DIR) / "login-code-review-bg.png").is_file())
+
+    def test_login_background_is_available_before_authentication(self) -> None:
+        route = inspect.getsource(web_app.CodeReviewerHandler.do_GET)
+        asset_position = route.index('parsed.path == "/assets/login-code-review-bg.png"')
+        auth_position = route.index("user = self._current_user()")
+
+        self.assertLess(asset_position, auth_position)
+        self.assertIn('self.send_header("Content-Type", "image/png")', route)
 
 
 if __name__ == "__main__":
