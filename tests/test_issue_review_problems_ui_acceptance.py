@@ -54,13 +54,16 @@ class IssueReviewProblemsUiAcceptanceTests(unittest.TestCase):
     def test_problem_details_are_clamped_to_two_lines_and_expandable(self) -> None:
         page = self.page
         renderer = self.finding_renderer
-        self.assertIn('class="finding-summary"', renderer)
+        self.assertIn('class="finding-evidence-preview"', renderer)
+        self.assertIn('class="finding-evidence-label">问题', renderer)
+        self.assertIn('class="finding-evidence-label">建议', renderer)
+        self.assertIn("details.recommendation", renderer)
         self.assertIn('data-expand-finding="${finding.id}"', renderer)
         self.assertIn('aria-expanded="false"', renderer)
         self.assertIn('View full details', renderer)
         self.assertIn('-webkit-line-clamp: 2;', page)
-        self.assertIn('.finding-summary.expanded { display: block; white-space: pre-wrap; }', page)
-        self.assertIn("button.textContent = expanded ? 'Collapse details' : 'View full details';", page)
+        self.assertIn('.finding-evidence-preview.expanded .finding-evidence-text { display: block; white-space: pre-wrap; }', page)
+        self.assertIn("button.textContent = expanded ? '收起' : '更多';", page)
 
     def test_problem_action_uses_the_short_submit_label(self) -> None:
         renderer = self.finding_renderer

@@ -4252,6 +4252,10 @@ def _configuration_app_fields(payload: dict[str, object]) -> list[dict[str, obje
     if not isinstance(app, dict):
         return result
 
+    def display_name(value: str) -> str:
+        words = value.replace("_", " ").split()
+        return " ".join("LLM" if word.lower() == "llm" else word.title() for word in words)
+
     def visit(value: object, path: list[str]) -> None:
         if isinstance(value, dict):
             for key, child in value.items():
@@ -4264,8 +4268,8 @@ def _configuration_app_fields(payload: dict[str, object]) -> list[dict[str, obje
             {
                 "path": path,
                 "key": ".".join(path[1:]),
-                "category": path[1].replace("_", " ").title() if len(path) > 1 else "Application",
-                "label": path[-1].replace("_", " ").title(),
+                "category": display_name(path[1]) if len(path) > 1 else "Application",
+                "label": display_name(path[-1]),
                 "type": field_type,
                 "value": value,
             }
@@ -4975,6 +4979,11 @@ def render_index(user: str = "") -> str:
       --danger: #b42318;
       --ok: #137333;
       --code: #111827;
+      --dialog-s: 560px;
+      --dialog-m: 760px;
+      --dialog-l: 1160px;
+      --dialog-xl: 1480px;
+      --dialog-full: 1680px;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -4991,6 +5000,11 @@ def render_index(user: str = "") -> str:
       }
     }
     * { box-sizing: border-box; }
+    .dialog-size-s { width: min(var(--dialog-s), calc(100vw - 32px)); }
+    .dialog-size-m { width: min(var(--dialog-m), calc(100vw - 32px)); }
+    .dialog-size-l { width: min(var(--dialog-l), calc(100vw - 32px)); }
+    .dialog-size-xl { width: min(var(--dialog-xl), calc(100vw - 32px)); }
+    .dialog-size-full { width: min(var(--dialog-full), calc(100vw - 32px)); }
     .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
     html {
       height: 100%;
@@ -5694,7 +5708,7 @@ def render_index(user: str = "") -> str:
     }
     #userResetConfirmModal, #temporaryPasswordModal { z-index: 1300; }
     .release-notes-dialog {
-      width: min(1040px, calc(100vw - 32px));
+      width: min(var(--dialog-l), calc(100vw - 32px));
       height: clamp(420px, 72vh, 720px);
       height: clamp(420px, 72dvh, 720px);
       max-height: calc(100vh - 32px);
@@ -5810,6 +5824,34 @@ def render_index(user: str = "") -> str:
       display: grid;
       grid-template-columns: minmax(300px, .9fr) minmax(420px, 1.1fr);
       gap: 10px;
+    }
+    .coverage-view-tabs {
+      display: flex;
+      gap: 6px;
+      margin: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .coverage-view-tab {
+      min-height: 38px;
+      padding: 7px 12px;
+      border: 0;
+      border-radius: 6px 6px 0 0;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .coverage-view-tab.active {
+      border-bottom: 2px solid var(--accent);
+      color: var(--accent-strong);
+    }
+    .coverage-view-panel {
+      min-height: 0;
+      overflow: auto;
+    }
+    .coverage-view-panel[hidden] { display: none; }
+    .coverage-overview-panel {
+      display: grid;
+      gap: 12px;
     }
     .coverage-report-totals,
     .coverage-report-lifecycle {
@@ -6270,7 +6312,7 @@ def render_index(user: str = "") -> str:
     .workflow-badge.failed { color: var(--danger); border-color: var(--danger); }
     .workflow-badge.running { color: var(--accent-strong); border-color: var(--accent); }
     .confirm-dialog {
-      width: min(680px, calc(100vw - 32px));
+      width: min(var(--dialog-m), calc(100vw - 32px));
       max-height: min(720px, calc(100vh - 48px));
       display: flex;
       flex-direction: column;
@@ -6367,16 +6409,16 @@ def render_index(user: str = "") -> str:
       z-index: 30;
       display: grid;
       place-items: center;
-      padding: 24px;
+      padding: 16px;
       background: rgba(17, 24, 39, 0.48);
     }
     .thread-modal-backdrop[hidden] {
       display: none;
     }
     .thread-modal-dialog {
-      width: min(1280px, calc(100vw - 48px));
-      height: min(840px, calc(100vh - 48px));
-      max-height: calc(100vh - 48px);
+      width: min(var(--dialog-xl), calc(100vw - 32px));
+      height: min(900px, calc(100vh - 32px));
+      max-height: calc(100vh - 32px);
       display: flex;
       flex-direction: column;
       min-height: 0;
@@ -6394,9 +6436,11 @@ def render_index(user: str = "") -> str:
       margin-bottom: 14px;
       flex: 0 0 auto;
     }
+    .thread-head h2 { font-size: 20px; line-height: 1.3; }
+    .thread-modal-dialog .meta { font-size: 13px; }
     .thread-layout {
       display: grid;
-      grid-template-columns: minmax(280px, 0.9fr) minmax(300px, 1fr) minmax(300px, 1fr);
+      grid-template-columns: minmax(300px, 0.9fr) minmax(360px, 1.08fr) minmax(380px, 1.02fr);
       grid-template-rows: minmax(0, 1fr);
       gap: 14px;
       min-height: 0;
@@ -6451,8 +6495,8 @@ def render_index(user: str = "") -> str:
     .thread-section-heading p { margin: 0; line-height: 1.45; }
     .thread-section-heading .information-hint-popover { right: 0; left: auto; width: min(380px, calc(100vw - 48px)); }
     .thread-reply-column .thread-form {
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-rows: repeat(2, minmax(250px, 1fr));
       gap: 12px;
       height: 100%;
       padding: 0 2px 2px;
@@ -6467,16 +6511,16 @@ def render_index(user: str = "") -> str:
     .thread-reply-actions button { min-width: min(148px, 100%); max-width: 100%; }
     .thread-card-action { min-height: 38px; border-color: var(--accent); background: var(--accent); color: white; font-weight: 700; }
     .thread-reply-card {
-      grid-template-rows: auto auto auto auto;
-      flex: 0 0 auto;
-      min-height: 0;
+      grid-template-rows: auto minmax(0, 1fr) auto auto;
+      min-height: 250px;
       padding: 15px;
       background: var(--panel);
       box-shadow: 0 4px 14px rgba(15, 23, 42, .045);
     }
     .thread-reply-card-head { display: grid; gap: 3px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
     .thread-reply-card-head strong { font-size: 13px; line-height: 1.35; }
-    .thread-reply-card textarea { height: auto; min-height: 132px; }
+    .thread-reply-card label { min-height: 0; }
+    .thread-reply-card textarea { height: 100%; min-height: 118px; max-height: none; }
     .thread-reply-actions { padding-top: 1px; }
     .thread-card-action { min-width: 118px; box-shadow: 0 2px 5px rgba(25, 113, 194, .16); }
     .thread-context {
@@ -6497,7 +6541,7 @@ def render_index(user: str = "") -> str:
       overflow: hidden;
     }
     .thread-context-metrics { display: flex; flex-wrap: wrap; gap: 6px; }
-    .thread-context-metric { padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; background: var(--panel); }
+    .thread-context-metric { padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 12px; background: var(--panel); }
     .thread-context-metric strong { color: var(--text); }
     .thread-column-heading {
       display: flex;
@@ -7255,7 +7299,7 @@ def render_index(user: str = "") -> str:
       display: none;
     }
     .preview-modal-dialog {
-      width: min(1160px, calc(100vw - 48px));
+      width: min(var(--dialog-l), calc(100vw - 48px));
       height: min(860px, calc(100vh - 48px));
       display: flex;
       flex-direction: column;
@@ -7442,7 +7486,7 @@ def render_index(user: str = "") -> str:
       background: color-mix(in srgb, #07111f 68%, transparent);
     }
     .workflow-dialog {
-      width: min(1680px, 100%); height: calc(100vh - 40px); margin: 0 auto;
+      width: min(var(--dialog-full), 100%); height: calc(100vh - 40px); margin: 0 auto;
       display: grid; grid-template-rows: auto 1fr; overflow: hidden;
       border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
       box-shadow: 0 24px 80px rgba(0,0,0,.28);
@@ -7461,9 +7505,10 @@ def render_index(user: str = "") -> str:
     .sprint-overview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
     .sprint-overview-head strong { overflow-wrap: anywhere; }
     .sprint-overview-metrics { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; }
-    .sprint-overview-metric { padding: 9px; border-radius: 8px; background: color-mix(in srgb, var(--bg) 65%, var(--panel)); }
-    .sprint-overview-metric strong { display: block; margin-top: 3px; font-size: 18px; }
-    .sprint-application-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+    .sprint-overview-metric { padding: 13px 14px; border: 1px solid color-mix(in srgb, var(--line) 72%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--bg) 65%, var(--panel)); }
+    .sprint-overview-metric .meta { font-size: 13px; }
+    .sprint-overview-metric strong { display: block; margin-top: 4px; font-size: 22px; line-height: 1.2; }
+    .sprint-application-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
     .sprint-application-card {
       min-width: 0; display: grid; gap: 9px; padding: 12px;
       border: 1px solid var(--line); border-radius: 8px;
@@ -7471,12 +7516,12 @@ def render_index(user: str = "") -> str:
     }
     .sprint-application-card:hover, .sprint-application-card:focus-visible { border-color: var(--accent); outline: 0; box-shadow: 0 4px 12px rgba(15,23,42,.08); }
     .sprint-application-head, .sprint-application-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-    .sprint-application-head strong { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
-    .sprint-application-percent { color: var(--accent-strong); font-size: 17px; font-weight: 800; }
+    .sprint-application-head strong { min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+    .sprint-application-percent { color: var(--accent-strong); font-size: 19px; font-weight: 800; }
     .sprint-application-progress { height: 5px; overflow: hidden; border-radius: 999px; background: var(--line); }
     .sprint-application-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #1971c2, #16845b); }
     .sprint-application-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 8px; }
-    .sprint-application-stat { min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
+    .sprint-application-stat { min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
     .sprint-application-stat strong { margin-left: 3px; color: var(--text); }
     .sprint-application-card[data-ready="true"] { border-color: color-mix(in srgb, var(--ok) 42%, var(--line)); background: color-mix(in srgb, var(--ok) 5%, var(--panel)); }
     .sprint-application-card[data-application="Unmapped"] { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); }
@@ -7602,6 +7647,23 @@ def render_index(user: str = "") -> str:
     .finding-head-main { min-width: 0; }
     .finding-summary { display: -webkit-box; margin: 10px 0 0; overflow: hidden; color: var(--muted); line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
     .finding-summary.expanded { display: block; white-space: pre-wrap; }
+    .finding-evidence-preview { display: grid; gap: 6px; margin-top: 11px; }
+    .finding-evidence-line {
+      display: grid;
+      grid-template-columns: 68px minmax(0, 1fr);
+      gap: 8px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .finding-evidence-label { color: var(--text); font-size: 12px; font-weight: 700; }
+    .finding-evidence-text {
+      display: -webkit-box;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      white-space: normal;
+    }
+    .finding-evidence-preview.expanded .finding-evidence-text { display: block; white-space: pre-wrap; }
     .finding-summary-toggle { min-height: 28px; margin-top: 4px; padding: 3px 7px; border: 0; background: transparent; color: var(--accent-strong); }
     .finding-head-action { flex: 0 0 auto; min-width: 132px; }
     .finding-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
@@ -7667,7 +7729,7 @@ def render_index(user: str = "") -> str:
     .user-admin-body {
       min-height: 0;
       display: grid;
-      grid-template-columns: minmax(320px, 38%) minmax(0, 1fr);
+      grid-template-columns: minmax(390px, 42%) minmax(0, 1fr);
     }
     .user-admin-list-pane {
       min-width: 0;
@@ -7701,8 +7763,8 @@ def render_index(user: str = "") -> str:
       grid-template-rows: auto auto;
       align-content: center;
       gap: 7px;
-      min-height: 76px;
-      padding: 12px;
+      min-height: 82px;
+      padding: 13px 14px;
       border-color: var(--line);
       background: var(--panel);
       color: var(--text);
@@ -7720,12 +7782,12 @@ def render_index(user: str = "") -> str:
       justify-content: space-between;
       gap: 10px;
     }
-    .user-admin-card-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .user-admin-card-head strong { min-width: 0; overflow: hidden; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
     .user-admin-card-head .status-chip { flex: 0 0 auto; }
     .user-admin-card-meta { justify-content: flex-start; flex-wrap: nowrap; min-width: 0; }
     .user-admin-card-meta .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .user-admin-scope-label { color: var(--muted); font-size: 11px; white-space: nowrap; }
-    .user-admin-scope-value { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+    .user-admin-scope-label { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .user-admin-scope-value { min-width: 0; overflow: hidden; color: var(--text); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
     .user-status-chip[data-status="active"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
     .user-status-chip[data-status="suspended"] { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
     .user-status-chip[data-status="password-change"] { color: #b54708; border-color: color-mix(in srgb, #b54708 45%, var(--line)); }
@@ -8028,7 +8090,7 @@ __ADMIN_TRACE_SECTION__
   </main>
 
   <div id="issueReviewModal" class="workflow-modal" hidden>
-    <div class="workflow-dialog issue-review-dialog" role="dialog" aria-modal="true" aria-labelledby="issueReviewTitle">
+    <div class="workflow-dialog dialog-size-full issue-review-dialog" role="dialog" aria-modal="true" aria-labelledby="issueReviewTitle">
       <div class="workflow-head">
         <div><h2 id="issueReviewTitle">Issues Review History</h2><p class="meta">ECHNL Issue lifecycle, handling, re-scan and Pass readiness.</p></div>
         <div class="actions"><button id="refreshIssueReviewsBtn" class="secondary small-action" type="button">Refresh</button><button id="closeIssueReviewsBtn" class="icon-action" type="button" aria-label="Close">&#x2715;</button></div>
@@ -8046,7 +8108,7 @@ __ADMIN_TRACE_SECTION__
   </div>
 
   <div id="configurationModal" class="workflow-modal" hidden>
-    <div class="workflow-dialog configuration-dialog" role="dialog" aria-modal="true" aria-labelledby="configurationTitle" aria-describedby="configurationDescription">
+    <div class="workflow-dialog dialog-size-full configuration-dialog" role="dialog" aria-modal="true" aria-labelledby="configurationTitle" aria-describedby="configurationDescription">
       <div class="workflow-head">
         <div><h2 id="configurationTitle">Configuration</h2><p id="configurationDescription" class="meta">Maintain safe application settings and GitLab project metadata without rewriting the deployment YAML.</p></div>
         <div class="actions"><span id="configurationRevision" class="count-pill">Not loaded</span><button id="refreshConfigurationBtn" class="secondary small-action" type="button">Refresh</button><button id="closeConfigurationBtn" class="icon-action" type="button" aria-label="Close configuration">&#x2715;</button></div>
@@ -8067,7 +8129,7 @@ __ADMIN_TRACE_SECTION__
   </div>
 
   <div id="userAdminModal" class="workflow-modal" hidden>
-    <div class="workflow-dialog user-admin-dialog" role="dialog" aria-modal="true" aria-labelledby="userAdminTitle" aria-describedby="userAdminDescription">
+    <div class="workflow-dialog dialog-size-full user-admin-dialog" role="dialog" aria-modal="true" aria-labelledby="userAdminTitle" aria-describedby="userAdminDescription">
       <div class="workflow-head">
         <div><h2 id="userAdminTitle">User Management</h2><p id="userAdminDescription" class="meta">Create accounts and manage role, access status, Responsible scope, and password recovery.</p></div>
         <div class="actions"><button id="createUserBtn" type="button">Create user</button><button id="refreshUsersBtn" class="secondary small-action" type="button">Refresh</button><button id="closeUserAdminBtn" class="icon-action" type="button" aria-label="Close user management">&#x2715;</button></div>
@@ -8203,7 +8265,7 @@ __ADMIN_TRACE_SECTION__
   </div>
 
   <div id="previewModal" class="preview-modal-backdrop" hidden>
-    <div class="preview-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
+    <div class="preview-modal-dialog dialog-size-l" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
       <div class="preview-modal-head">
         <div class="preview-title">
           <h2 id="previewModalTitle">Report Preview</h2>
@@ -8221,7 +8283,7 @@ __ADMIN_TRACE_SECTION__
   </div>
 
   <div id="coverageModal" class="confirm-backdrop" hidden>
-    <div class="coverage-dialog" role="dialog" aria-modal="true" aria-labelledby="coverageTitle">
+    <div class="coverage-dialog dialog-size-xl" role="dialog" aria-modal="true" aria-labelledby="coverageTitle">
       <div class="thread-head">
         <div>
           <h2 id="coverageTitle">Sprint Overview</h2>
@@ -8253,18 +8315,27 @@ __ADMIN_TRACE_SECTION__
         <div class="coverage-progress-track" aria-hidden="true"><span id="coverageProgressBar"></span></div>
       </div>
       <div id="coverageStatus" class="status"></div>
-      <div id="coverageSummary" class="coverage-summary"></div>
-      <div id="coverageApplications" class="coverage-applications"></div>
-      <div class="coverage-results">
-        <div id="coverageRows" class="coverage-card-grid">
-          <div class="coverage-empty">Select a scope and scan.</div>
+      <div class="coverage-view-tabs" role="tablist" aria-label="Sprint Review views">
+        <button id="coverageOverviewTab" class="coverage-view-tab active" type="button" role="tab" aria-selected="true" aria-controls="coverageOverviewPanel" data-coverage-view="overview">Overview</button>
+        <button id="coverageIssuesTab" class="coverage-view-tab" type="button" role="tab" aria-selected="false" aria-controls="coverageIssuesPanel" data-coverage-view="issues">Sprint issues</button>
+      </div>
+      <div id="coverageOverviewPanel" class="coverage-view-panel coverage-overview-panel" role="tabpanel" data-coverage-panel="overview">
+        <div id="coverageSummary" class="coverage-summary"></div>
+        <div id="coverageApplications" class="coverage-applications"></div>
+        <div id="coverageOverviewEmpty" class="coverage-empty">Select a scope and scan to view Sprint readiness.</div>
+      </div>
+      <div id="coverageIssuesPanel" class="coverage-view-panel" role="tabpanel" data-coverage-panel="issues" hidden>
+        <div class="coverage-results">
+          <div id="coverageRows" class="coverage-card-grid">
+            <div class="coverage-empty">Select a scope and scan.</div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
   <div id="threadModal" class="thread-modal-backdrop" hidden>
-    <div class="thread-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="threadModalTitle">
+    <div class="thread-modal-dialog dialog-size-xl" role="dialog" aria-modal="true" aria-labelledby="threadModalTitle">
       <div class="thread-head">
         <div class="preview-title">
           <h2 id="threadModalTitle">Review Communication</h2>
@@ -8400,7 +8471,7 @@ __ADMIN_TRACE_SECTION__
   </div>
 
   <div id="releaseNotesModal" class="confirm-backdrop release-notes-backdrop" hidden>
-    <div class="release-notes-dialog" role="dialog" aria-modal="true" aria-labelledby="releaseNotesTitle" aria-describedby="releaseNotesDescription">
+    <div class="release-notes-dialog" data-dialog-size="l" role="dialog" aria-modal="true" aria-labelledby="releaseNotesTitle" aria-describedby="releaseNotesDescription">
       <div class="release-notes-head">
         <div class="preview-title"><h2 id="releaseNotesTitle">CodeReviewer Release Notes</h2><div id="releaseNotesDescription" class="meta">Public summary of CodeReviewer 7.x updates.</div><time id="releaseNotesUpdated" class="meta" datetime=""></time></div>
         <button id="closeReleaseNotesBtn" class="icon-action" type="button" aria-label="Close release notes">&#x2715;</button>
@@ -8451,6 +8522,7 @@ __ADMIN_TRACE_SECTION__
     let coverageJobSnapshot = null;
     let coveragePollTimer = 0;
     let coverageTimingTimer = 0;
+    let coverageView = 'overview';
     const submissionFlights = new Map();
     const jobAutoScroll = new Map();
     const jobAutoScrollResumeTimers = new Map();
@@ -8873,6 +8945,8 @@ __ADMIN_TRACE_SECTION__
       if (selectedManagedUsername) {
         const selected = managedUserByName(selectedManagedUsername);
         if (selected) showManagedUserForm(selected);
+      } else if (managedUsers.length) {
+        showManagedUserForm(managedUsers[0], false);
       }
     }
 
@@ -9390,10 +9464,11 @@ __ADMIN_TRACE_SECTION__
     function openCoverage() {
       $('coverageModal').hidden = false;
       if (!coverageJobSnapshot || !coverageJobIsActive(coverageJobSnapshot)) {
-        $('coverageJira').value = ($('jira')?.value || '').trim();
+        $('coverageJira').value = '';
         $('coverageSprint').value = ($('sprint')?.value || '').trim();
         $('coverageFilter').value = ($('jiraFilter')?.value || '').trim();
       }
+      setCoverageView('overview');
       $('coverageRoleHint').textContent = currentUserRole === 'manager'
         ? 'Manager view: all configured responsible teams and Sprint issues.'
         : 'Auditor view: only GitLab projects and reports matching your responsible scope.';
@@ -9403,6 +9478,18 @@ __ADMIN_TRACE_SECTION__
 
     function closeCoverage() {
       $('coverageModal').hidden = true;
+    }
+
+    function setCoverageView(view) {
+      coverageView = view === 'issues' ? 'issues' : 'overview';
+      document.querySelectorAll('[data-coverage-view]').forEach(tab => {
+        const active = tab.dataset.coverageView === coverageView;
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      document.querySelectorAll('[data-coverage-panel]').forEach(panel => {
+        panel.hidden = panel.dataset.coveragePanel !== coverageView;
+      });
     }
 
     function coverageJobIsActive(job) {
@@ -9596,6 +9683,7 @@ __ADMIN_TRACE_SECTION__
       const withoutPercent = reportTotal ? 100 - withPercent : 0;
       const breakdown = reportCoverage.generated_breakdown || {};
       const applicationProgress = Array.isArray(data.application_progress) ? data.application_progress : [];
+      $('coverageOverviewEmpty').hidden = true;
       $('coverageSummary').innerHTML = `
         <section class="coverage-report-totals" aria-label="Issue report coverage">
           <div class="coverage-report-total"><span>Issues with reports</span><strong>${withReports}</strong><small>${withPercent}% of ${rows.length} Issue(s)</small></div>
@@ -9691,6 +9779,7 @@ __ADMIN_TRACE_SECTION__
       for (const button of document.querySelectorAll('[data-coverage-run-review]')) {
         button.addEventListener('click', () => runCoverageIssueReview(button.dataset.coverageRunReview || '', button));
       }
+      setCoverageView('overview');
     }
 
     async function runCoverageIssueReview(jiraKey, button) {
@@ -11932,7 +12021,8 @@ function jiraKeyFromReportPath(reportPath) {
         if (!summary) return;
         const expanded = summary.classList.toggle('expanded');
         button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-        button.textContent = expanded ? 'Collapse details' : 'View full details';
+        button.textContent = expanded ? '收起' : '更多';
+        button.setAttribute('aria-label', expanded ? 'Collapse details' : 'View full details');
       }));
       $('issueReviewDetail').querySelectorAll('[data-finding-disposition]').forEach(select => {
         const sync = () => {
@@ -11979,10 +12069,12 @@ function jiraKeyFromReportPath(reportPath) {
       const isManager = role === 'manager';
       const isPendingBlocker = pendingBlockerIds.has(String(finding.id || ''));
       const details = finding.details && typeof finding.details === 'object' ? finding.details : {};
-      const detailText = String(details.problem || details.description || details.detail || details.impact || finding.description || '').trim();
+      const problemText = String(details.problem || details.detail || details.description || details.impact || finding.description || '').trim();
+      const suggestionText = String(details.suggestion || details.recommendation || details.solution || details.workaround || '').trim();
+      const hasEvidence = Boolean(problemText || suggestionText);
       const lineage = ({new:'New in this run', persisting:`Still present${finding.first_seen_run ? ` since Run ${finding.first_seen_run}` : ''}`, resolved:'Resolved after re-scan'})[String(finding.lineage_state || '').toLowerCase()] || statusLabel(finding.lineage_state);
       const fileStatus = finding.file_path || 'Architecture / No specific file';
-      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div class="finding-head-main"><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta finding-context">${escapeHtml(fileStatus)} · ${escapeHtml(lineage)}</div>${detailText ? `<p class="finding-summary" id="finding-summary-${finding.id}">${escapeHtml(detailText)}</p><button class="finding-summary-toggle" type="button" data-expand-finding="${finding.id}" aria-expanded="false" aria-controls="finding-summary-${finding.id}">View full details</button>` : ''}</div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : `<button class="finding-head-action" data-handle-finding="${finding.id}" type="button">Submit</button>`}</div>
+      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div class="finding-head-main"><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta finding-context">${escapeHtml(fileStatus)} · ${escapeHtml(lineage)}</div>${hasEvidence ? `<div class="finding-evidence-preview" id="finding-summary-${finding.id}">${problemText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">问题</span><span class="finding-evidence-text">${escapeHtml(problemText)}</span></div>` : ''}${suggestionText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">建议</span><span class="finding-evidence-text">${escapeHtml(suggestionText)}</span></div>` : ''}</div><button class="finding-summary-toggle" type="button" data-expand-finding="${finding.id}" aria-label="View full details" aria-expanded="false" aria-controls="finding-summary-${finding.id}">更多</button>` : ''}</div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : `<button class="finding-head-action" data-handle-finding="${finding.id}" type="button">Submit</button>`}</div>
         ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-handling-form"><div class="finding-handling-primary"><label><span>处理结果 <span class="required-mark" aria-hidden="true">*</span></span><select id="disposition-${finding.id}" data-finding-disposition="${finding.id}" required><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select></label><label><span id="note-label-${finding.id}">处理说明 <span class="required-mark" aria-hidden="true">*</span></span><textarea id="note-${finding.id}" aria-labelledby="note-label-${finding.id}" aria-describedby="error-${finding.id}" placeholder="说明修改内容、判断依据及测试结果" required></textarea></label><div id="error-${finding.id}" class="field-message" role="alert"></div></div><div class="finding-handling-secondary"><div id="followup-${finding.id}" class="followup-fields" hidden><div class="followup-fields-head"><label><span>Issue Summary <span class="required-mark" aria-hidden="true">*</span></span><textarea class="summary-input" id="jira-summary-${finding.id}" maxlength="255" rows="2" placeholder="概括待跟进问题，建议 20–50 个字符"></textarea></label></div><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('')))}</textarea><div class="followup-card-head"><div class="followup-adf-state"><strong>Issue Description <span class="required-mark" aria-hidden="true">*</span></strong><div id="jira-adf-preview-${finding.id}" class="followup-adf-preview">Not provided yet.</div><div id="jira-adf-status-${finding.id}" class="meta">Open the editor and add the follow-up details.</div></div><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit issue</button></div></div></div></div>`}
       </article>`;
     }
@@ -12612,6 +12704,9 @@ function jiraKeyFromReportPath(reportPath) {
     $('coverageCloseBtn').addEventListener('click', closeCoverage);
     $('coverageScanBtn').addEventListener('click', () => {
       singleFlight('coverage-scan', $('coverageScanBtn'), scanCoverage).finally(syncCoverageControls);
+    });
+    document.querySelectorAll('[data-coverage-view]').forEach(button => {
+      button.addEventListener('click', () => setCoverageView(button.dataset.coverageView || 'overview'));
     });
     $('coverageModal').addEventListener('click', (event) => {
       if (event.target === $('coverageModal')) closeCoverage();

@@ -2,9 +2,11 @@
 
 > Language: English | [中文版](CodeReviewer-7.0-Issue-Workflow.zh-CN.md)
 
-Version: 7.2.11
+Version: 7.2.12
 Development branch: `20260714`  
 
+> 7.2.12 UI clarification: Sprint Overview does not inherit the home Jira field and separates readiness from issue cards with Overview / Sprint issues tabs. Issue Review application cards use a readable three-column desktop grid, Problems show distinct Problem and Suggestion previews, and dialogs follow shared S/M/L/XL/Full sizing.
+>
 > 7.2.11 clarification: single-Issue review shows the existing-report preflight in Progress; Problems includes problem/suggestion previews and identifies Company Config versus SCR from structured deferred-resource metadata. Branch configuration accepts exact values and version wildcards. Jira REST remains authoritative and the only Jira write boundary; Rovo is read-only candidate context and local jira-prd/RAG is disabled by default.
 >
 > 7.2.0 access clarification: Manager-only User Management maintains roles, active state and responsible scopes. Create/reset returns a one-time temporary password, while deactivation, role changes and password changes revoke existing sessions.

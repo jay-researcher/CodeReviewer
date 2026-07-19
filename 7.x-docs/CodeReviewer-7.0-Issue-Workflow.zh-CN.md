@@ -2,8 +2,10 @@
 
 > 语言：中文 | [English](CodeReviewer-7.0-Issue-Workflow.md)
 
-版本：7.2.11
+版本：7.2.12
 
+> 7.2.12 UI 补充：Sprint Overview 不继承主页 Jira 字段，并以 Overview / Sprint issues 分开准备度和 Issue 卡片；Issue Review 应用卡在桌面使用可读的三列网格，Problems 分别展示“问题”和“建议”，弹窗统一使用 S/M/L/XL/Full 尺寸规范。
+>
 > 7.2.11 补充：单 Issue Review 在 Progress 中展示已有报告检查；Problems 显示问题/建议摘要，并从结构化延后资源元数据明确区分 Company Config 与 SCR。分支配置支持精确值与版本通配符；Jira REST 保持权威数据和唯一写入边界，Rovo 仅用于只读候选上下文，本地 jira-prd/RAG 默认关闭。
 >
 > 7.2.0 权限补充：Manager-only 用户管理可维护角色、启用状态和 responsible 范围。创建/重置只返回一次临时密码；停用、角色变化及密码变化会撤销已有会话。

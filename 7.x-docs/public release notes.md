@@ -2,6 +2,15 @@
 
 本页面仅展示面向用户的版本摘要。详细技术变更、验证结果及部署状态请参阅内部 7.x Release Notes。
 
+## 7.2.12 — 2026-07-19 12:31:03 CST
+
+状态：仅更新本地验收环境；未部署到 192.168.3.78。
+
+- Sprint Overview 使用 Overview / Sprint issues 分区，打开时不再误带主页 Jira 输入。
+- Issue Review 卡片和 Problems 摘要提高可读性，问题与建议可分别预览和展开。
+- Review Communication、User Management 和全站弹窗规格完成一致性优化。
+- Application Settings 中 LLM 统一按标准缩写显示。
+
 ## 7.2.11 — 2026-07-19 01:14:17 CST
 
 状态：仅更新本地验收环境；未部署到 192.168.3.78。
