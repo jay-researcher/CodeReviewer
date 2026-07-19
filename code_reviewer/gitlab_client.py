@@ -361,6 +361,8 @@ class GitLabClient:
             generated_at=datetime.now(),
             metadata={
                 "gitlab_project_path": ref.project_path,
+                "diff_base_sha": str((mr.get("diff_refs") or {}).get("base_sha") or ""),
+                "diff_head_sha": str((mr.get("diff_refs") or {}).get("head_sha") or mr.get("sha") or ""),
                 "mr_state": str(mr.get("state") or ""),
                 "mr_status": str(mr.get("state") or ""),
                 "mr_created_at": str(mr.get("created_at") or ""),

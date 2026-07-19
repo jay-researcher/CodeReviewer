@@ -6,7 +6,7 @@ from typing import Any
 from .config import report_min_severity, severity_meets_minimum
 from .diff_parser import added_lines_with_numbers
 from .git_version_review import enrich_git_version_review
-from .jira_prd_context import attach_jira_prd_context
+from .knowledge_context import attach_knowledge_context
 from .llm_provider import llm_metadata, preview_llm_prompt_budget, run_llm_review
 from .models import Finding, ReviewInput, ReviewResult
 
@@ -39,7 +39,7 @@ PATH_LIKE_RE = re.compile(
 
 
 def analyze(review_input: ReviewInput, progress: Any = None) -> ReviewResult:
-    attach_jira_prd_context(review_input)
+    attach_knowledge_context(review_input)
     findings: list[Finding] = []
 
     for changed_file in review_input.changed_files:

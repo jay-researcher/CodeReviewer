@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import fnmatch
+import re
 import shutil
 import subprocess
 import threading
@@ -39,7 +41,17 @@ _INDEX_THREAD_LOCK = threading.Lock()
 
 
 def sync_workspace(entry: WorkspaceEntry, branch: str | None = None, *, index: bool = True, force: bool = False) -> RepositorySyncResult:
-    selected_branch = _select_branch(entry, branch)
+    configured_branch = _select_branch(entry, branch)
+    try:
+        selected_branch = resolve_branch_pattern(entry, configured_branch)
+    except Exception as exc:
+        return RepositorySyncResult(
+            project_path=entry.project_path,
+            local_path=str(entry.local_path),
+            branch=configured_branch,
+            action="failed",
+            error=str(exc),
+        )
     cache_key = (str(entry.local_path.resolve()), selected_branch.lower())
     if not force and cache_key in _SYNC_CACHE:
         return _SYNC_CACHE[cache_key]
@@ -68,7 +80,19 @@ def sync_all_workspaces(groups: str = "", *, index: bool = True, force: bool = F
     results: list[RepositorySyncResult] = []
     seen: set[tuple[str, str]] = set()
     for entry in git_tools_project_entries(groups=groups):
-        branches = entry.branches or [""]
+        try:
+            branches = resolve_configured_branches(entry)
+        except Exception as exc:
+            results.append(
+                RepositorySyncResult(
+                    project_path=entry.project_path,
+                    local_path=str(entry.local_path),
+                    branch=", ".join(entry.branches),
+                    action="failed",
+                    error=str(exc),
+                )
+            )
+            continue
         for branch in branches:
             key = (str(entry.local_path).lower(), branch.lower())
             if key in seen:
@@ -339,6 +363,95 @@ def _select_branch(entry: WorkspaceEntry, requested: str | None) -> str:
     if requested is not None:
         return requested.strip()
     return entry.branches[0].strip() if entry.branches else ""
+
+
+def resolve_configured_branches(entry: WorkspaceEntry) -> list[str]:
+    """Resolve exact branches and version wildcards to concrete remote refs.
+
+    Each wildcard selects the greatest matching version. Exact values remain
+    unchanged, which keeps existing config.yml files backward compatible.
+    """
+    configured = [item.strip() for item in (entry.branches or [""]) if item is not None]
+    if not any(_is_branch_pattern(item) for item in configured):
+        return _unique_branches(configured or [""])
+    remote = _remote_branch_names(entry)
+    resolved: list[str] = []
+    for item in configured:
+        if not _is_branch_pattern(item):
+            resolved.append(item)
+            continue
+        matches = [name for name in remote if fnmatch.fnmatchcase(name.casefold(), item.casefold())]
+        if not matches:
+            raise RuntimeError(
+                f"no remote branch matches configured pattern {item!r} for {entry.project_path}"
+            )
+        resolved.append(max(matches, key=_version_branch_sort_key))
+    return _unique_branches(resolved)
+
+
+def resolve_branch_pattern(entry: WorkspaceEntry, configured_branch: str) -> str:
+    """Return a concrete branch for one exact value or wildcard pattern."""
+    value = (configured_branch or "").strip()
+    if not _is_branch_pattern(value):
+        return value
+    matches = [
+        name
+        for name in _remote_branch_names(entry)
+        if fnmatch.fnmatchcase(name.casefold(), value.casefold())
+    ]
+    if not matches:
+        raise RuntimeError(
+            f"no remote branch matches configured pattern {value!r} for {entry.project_path}"
+        )
+    return max(matches, key=_version_branch_sort_key)
+
+
+def _remote_branch_names(entry: WorkspaceEntry) -> list[str]:
+    repo = entry.local_path
+    if (repo / ".git").is_dir():
+        command = ["git", "-C", str(repo), "ls-remote", "--heads", "origin"]
+    else:
+        command = ["git", "ls-remote", "--heads", entry.repository_url]
+    completed = _run(
+        command,
+        timeout=app_config_int(
+            "local_context.branch_resolution_timeout_seconds",
+            "BRANCH_RESOLUTION_TIMEOUT_SECONDS",
+            60,
+        ),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"cannot list remote branches for {entry.project_path}: {_command_error(completed)}"
+        )
+    names: list[str] = []
+    for line in completed.stdout.splitlines():
+        _sha, separator, ref = line.strip().partition("\t")
+        if separator and ref.startswith("refs/heads/"):
+            names.append(ref.removeprefix("refs/heads/"))
+    return _unique_branches(names)
+
+
+def _is_branch_pattern(value: str) -> bool:
+    return any(character in (value or "") for character in "*?[")
+
+
+def _version_branch_sort_key(value: str) -> tuple[tuple[int, ...], str]:
+    """Sort dotted version branches naturally, with a deterministic tie-break."""
+    numbers = tuple(int(item) for item in re.findall(r"\d+", value or ""))
+    return numbers, (value or "").casefold()
+
+
+def _unique_branches(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = (value or "").strip().casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append((value or "").strip())
+    return result or [""]
 
 
 def _ensure_clone(entry: WorkspaceEntry, branch: str) -> None:

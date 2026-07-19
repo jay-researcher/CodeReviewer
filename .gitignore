@@ -18,3 +18,5 @@ Jira Sprint issues.txt
 select
 *.log
 *.tmp
+.tmp-ui.html
+_bmad/

@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from urllib.parse import quote
 
-from .config import app_config_bool, app_config_int, report_language
+from .config import app_config_bool, app_config_int, app_config_list, report_language
 from .models import ChangedFile, Finding
 from .models import ReviewInput, ReviewResult
 
@@ -306,6 +306,7 @@ def _involved_file_mismatch_table(source: ReviewInput, language: str) -> list[st
     deferred_actual = _unique_text_lines([str(item) for item in check.get("deferred_actual") or []])
     effective_actual = _unique_text_lines([*actual, *deferred_actual])
     deferred_keys = {item.lower() for item in deferred_actual}
+    deferred_sources = _deferred_file_source_types(source)
     missing = {item.lower() for item in expected if not _first_matching_path(item, effective_actual)}
     unexpected = {item.lower() for item in effective_actual if not _first_matching_path(item, expected)}
     headers = (
@@ -323,10 +324,11 @@ def _involved_file_mismatch_table(source: ReviewInput, language: str) -> list[st
         if match:
             matched_actual.add(match.lower())
             if match.lower() in deferred_keys:
+                source_type = _deferred_source_type_for_path(match, deferred_sources)
                 remark = (
-                    "Matched in deferred Company Config/SCR MR; verify at the GIT_VERSION release gate"
+                    f"Matched in deferred {source_type} MR; verify at the GIT_VERSION release gate"
                     if language == "en"
-                    else "在延后处理的 Company Config/SCR MR 中匹配；由 GIT_VERSION 发布闸门校验"
+                    else f"在延后处理的 {source_type} MR 中匹配；由 GIT_VERSION 发布闸门校验"
                 )
             else:
                 remark = "Matched" if language == "en" else "匹配"
@@ -340,15 +342,48 @@ def _involved_file_mismatch_table(source: ReviewInput, language: str) -> list[st
             continue
         if actual_path.lower() in unexpected or not _first_matching_path(actual_path, expected):
             if actual_path.lower() in deferred_keys:
+                source_type = _deferred_source_type_for_path(actual_path, deferred_sources)
                 remark = (
-                    "Changed in deferred Company Config/SCR MR but not listed in Jira"
+                    f"Changed in deferred {source_type} MR but not listed in Jira"
                     if language == "en"
-                    else "延后处理的 Company Config/SCR MR 已提交，但 Jira 涉及文件清单未列出"
+                    else f"延后处理的 {source_type} MR 已提交，但 Jira 涉及文件清单未列出"
                 )
             else:
                 remark = "Changed in MR but not listed in Jira" if language == "en" else "MR 已提交，但 Jira 涉及文件清单未列出"
             lines.append(f"| - | `{_table_cell(actual_path)}` | {remark} |")
     return lines
+
+
+def _deferred_file_source_types(source: ReviewInput) -> dict[str, str]:
+    resources = source.metadata.get("deferred_release_gate_resources") if isinstance(source.metadata, dict) else None
+    if not isinstance(resources, list):
+        return {}
+    result: dict[str, str] = {}
+    labels = {"company_config": "Company Config", "scr": "SCR"}
+    for item in resources:
+        if not isinstance(item, dict):
+            continue
+        role = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(item.get("release_gate_role") or item.get("ignored_branch_type") or "").lower(),
+        ).strip("_")
+        label = labels.get(role)
+        if not label:
+            continue
+        for raw_path in item.get("changed_file_paths") or []:
+            path = _clean_report_path(str(raw_path)).lower()
+            if path:
+                result[path] = label
+    return result
+
+
+def _deferred_source_type_for_path(path: str, sources: dict[str, str]) -> str:
+    normalized = _clean_report_path(path).lower()
+    for candidate, label in sources.items():
+        if normalized == candidate or normalized.endswith("/" + candidate) or candidate.endswith("/" + normalized):
+            return label
+    return "Deferred resource (type unavailable)"
 
 
 def _fallback_involved_file_table(language: str) -> list[str]:
@@ -523,8 +558,10 @@ def save_report(result: ReviewResult, output_dir: Path, filename: str | None = N
     project_prefix = _report_project_prefix(source.project, source.metadata)
     responsible_prefix = _report_filename_responsible(source.metadata)
     simplified_name = bool(responsible_prefix) or bool(_web_report_owner(source.metadata))
+    release_resource_name = _release_resource_report_filename(result)
     target = output_dir / (
         filename
+        or release_resource_name
         or report_filename(
             project_prefix,
             source.mr_id,
@@ -535,7 +572,7 @@ def save_report(result: ReviewResult, output_dir: Path, filename: str | None = N
             scope=str(source.metadata.get("split_report_project_type") or ""),
         )
     )
-    if _web_report_owner(source.metadata):
+    if _web_report_owner(source.metadata) or _release_resource_role(source.metadata, source.source_branch):
         target = _avoid_overwrite_report_path(target)
     source.metadata["report_filename"] = target.name
     markdown = render_markdown(result, language=language)
@@ -619,6 +656,8 @@ def render_handling_result_template(result: ReviewResult, language: str | None =
     language = _normalize_language(language or report_language())
     source = result.review_input
     report_name = str(source.metadata.get("report_filename") or "").strip()
+    if not report_name:
+        report_name = _release_resource_report_filename(result)
     if not report_name:
         project_prefix = _report_project_prefix(source.project, source.metadata)
         responsible_prefix = _report_filename_responsible(source.metadata)
@@ -900,6 +939,75 @@ def _report_project_prefix(default_project: str, metadata: dict[str, object]) ->
     if module:
         return module
     return default_project
+
+
+def _release_resource_report_filename(result: ReviewResult) -> str:
+    """Use the release-resource naming contract without changing normal Jira reports."""
+    source = result.review_input
+    role = _release_resource_role(source.metadata, source.source_branch)
+    labels = {
+        "company_config": "Company Config",
+        "scr": "SCR",
+    }
+    label = labels.get(role)
+    if not label:
+        return ""
+    project = _release_project_display_name(source.project, source.metadata)
+    return f"{_safe_release_report_component(project)}-{label}_{_report_status_suffix(result.severity_counts)}.md"
+
+
+def _release_resource_role(metadata: dict[str, object], source_branch: str) -> str:
+    for value in (
+        metadata.get("release_gate_role"),
+        metadata.get("resource_type"),
+        metadata.get("mr_type"),
+    ):
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+        if normalized in {"company_config", "scr"}:
+            return normalized
+
+    branch = re.sub(r"[^a-z0-9]+", "_", (source_branch or "").strip().lower()).strip("_")
+    for role in ("company_config", "scr"):
+        prefixes = app_config_list(f"review.release_gate.branch_prefixes.{role}", "", [])
+        for prefix in prefixes:
+            normalized = re.sub(r"[^a-z0-9]+", "_", str(prefix or "").strip().lower()).strip("_")
+            if normalized and (branch == normalized or branch.startswith(normalized + "_")):
+                return role
+    return ""
+
+
+def _release_project_display_name(default_project: str, metadata: dict[str, object]) -> str:
+    explicit = str(metadata.get("release_gate_project") or metadata.get("release_project") or "").strip()
+    if explicit:
+        return explicit
+    candidate = str(
+        metadata.get("project_name")
+        or metadata.get("git_tools_project_name")
+        or metadata.get("git_tools_module")
+        or default_project
+        or "Project"
+    ).strip()
+    normalized = re.sub(r"[^a-z0-9]+", "-", candidate.lower()).strip("-")
+    aliases = {
+        "wvadmin": "WVAdmin",
+        "wvadmin-build": "WVAdmin",
+        "itrade-client": "iTrade Client",
+        "itrade-client-build": "iTrade Client",
+        "service-terminal": "Services Terminal",
+        "service-terminal-build": "Services Terminal",
+        "services-terminal": "Services Terminal",
+        "services-terminal-build": "Services Terminal",
+        "dps": "DPS",
+        "dps-build": "DPS",
+    }
+    return aliases.get(normalized, candidate)
+
+
+def _safe_release_report_component(value: str) -> str:
+    # Preserve readable spaces in the explicit release-resource filename contract.
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", value.strip())
+    text = re.sub(r"\s+", " ", text).strip(" ._-")
+    return text or "Project"
 
 
 def _responsible_output_dir(output_dir: Path, metadata: dict[str, object]) -> Path:

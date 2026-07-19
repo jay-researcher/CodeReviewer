@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import fnmatch
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -14,7 +15,13 @@ except ImportError:
     yaml = None
 
 from .gitlab_client import parse_repository_url
-from .config import app_config_bool, app_config_int, app_config_list, git_tools_config_path
+from .config import (
+    app_config_bool,
+    app_config_int,
+    app_config_list,
+    git_tools_config_path,
+    load_effective_config_payload,
+)
 
 
 @dataclass(slots=True)
@@ -28,6 +35,7 @@ class WorkspaceEntry:
     project_name: str = ""
     project_type: str = ""
     llm_model: str = ""
+    application: str = ""
     dev_branch: list[str] = field(default_factory=list)
     branches: list[str] = field(default_factory=list)
     source: str = ""
@@ -65,9 +73,20 @@ def resolve_workspace_for_project_path(project_path: str, branch: str = "") -> W
     ]
     branch_key = _normalize_branch(branch)
     if branch_key:
-        exact = [entry for entry in entries if branch_key in {_normalize_branch(item) for item in entry.branches}]
-        if exact:
-            entries = exact
+        matched = [
+            entry
+            for entry in entries
+            if any(
+                branch_key == _normalize_branch(item)
+                or (
+                    any(character in item for character in "*?[")
+                    and fnmatch.fnmatchcase(branch_key, _normalize_branch(item))
+                )
+                for item in entry.branches
+            )
+        ]
+        if matched:
+            entries = matched
     for entry in entries:
         if entry.local_path.is_dir():
             return entry
@@ -332,15 +351,10 @@ def _git_tools_entries(groups: str = "") -> list[WorkspaceEntry]:
     if not config_path.exists():
         return []
     selected_groups = set(_split_values(groups)) if groups else set(app_config_list("git_tools.groups", "GIT_TOOLS_GROUPS", []))
-    text = config_path.read_text(encoding="utf-8", errors="ignore")
-    if yaml is not None:
-        try:
-            payload = yaml.safe_load(text)
-            if isinstance(payload, dict):
-                return _git_tools_entries_from_payload(payload, selected_groups)
-        except Exception:
-            pass
-    return _git_tools_entries_from_text(text, selected_groups)
+    payload = load_effective_config_payload()
+    if isinstance(payload, dict):
+        return _git_tools_entries_from_payload(payload, selected_groups)
+    return []
 
 
 def _git_tools_entries_from_payload(payload: dict[str, Any], groups: set[str]) -> list[WorkspaceEntry]:
@@ -364,7 +378,7 @@ def _collect_git_tools_payload_entries(
 ) -> None:
     """Read both flat git-tools config and JiraReviewer nested project config."""
     inherited = dict(inherited or {})
-    for key in ("responsible", "project_name", "llm_model", "dev_branch", "branch", "branches", "type", "project_type"):
+    for key in ("responsible", "project_name", "llm_model", "application", "dev_branch", "branch", "branches", "type", "project_type"):
         if key in value and value.get(key) not in (None, "", []):
             inherited[key] = value.get(key)
 
@@ -383,6 +397,7 @@ def _collect_git_tools_payload_entries(
             project_name=str(value.get("project_name") or inherited.get("project_name") or ""),
             project_type=project_type,
             llm_model=str(value.get("llm_model") or inherited.get("llm_model") or ""),
+            application=str(value.get("application") or inherited.get("application") or ""),
             dev_branch=_string_list(value.get("dev_branch") or inherited.get("dev_branch")),
             branches=branches,
             source="git-tools",

@@ -16,7 +16,7 @@ from .adf import adf_json, adf_plain_text, empty_adf, validate_adf
 from .config import DATA_DIR, app_config_get
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DISPOSITIONS = {"fixed", "follow-up", "not-issue"}
 ISSUE_STATUSES = {
     "not-reviewed",
@@ -37,7 +37,16 @@ class WorkflowRepository(Protocol):
 
     def list_issues(self, *, responsibles: list[str] | None = None, view_all: bool = False) -> list[dict[str, Any]]: ...
     def issue_detail(self, jira_key: str) -> dict[str, Any] | None: ...
+    def cycle_detail(self, cycle_id: str) -> dict[str, Any] | None: ...
     def list_drafts(self, jira_key: str = "") -> list[dict[str, Any]]: ...
+    def list_cycles(self, jira_key: str) -> list[dict[str, Any]]: ...
+    def list_sprint_memberships(self, jira_key: str) -> list[dict[str, Any]]: ...
+    def upsert_sprint_membership(self, **kwargs: Any) -> dict[str, Any]: ...
+    def upsert_review_cycle(self, **kwargs: Any) -> dict[str, Any]: ...
+    def create_run_group(self, **kwargs: Any) -> dict[str, Any]: ...
+    def create_description_snapshot(self, **kwargs: Any) -> dict[str, Any]: ...
+    def create_review_snapshot(self, **kwargs: Any) -> dict[str, Any]: ...
+    def upsert_deferred_resource(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
 def utc_now() -> str:
@@ -53,6 +62,47 @@ def blocking_severities() -> set[str]:
     if not isinstance(value, list):
         value = ["Critical", "High"]
     return {str(item).strip().title() for item in value if str(item).strip()}
+
+
+APPLICATION_ORDER = ("WVAdmin", "iTrade Client", "Services Terminal", "DPS", "Unmapped")
+
+
+def review_application_from_scope(item: dict[str, Any]) -> str:
+    """Map persisted MR discovery metadata to a release application."""
+    explicit = str(item.get("application") or "").strip()
+    if explicit in APPLICATION_ORDER:
+        return explicit
+    group = str(item.get("git_tools_group") or "").strip().lower()
+    module = str(item.get("git_tools_module") or "").strip().lower()
+    project_name = str(item.get("project_name") or "").strip().lower()
+    project_path = str(
+        item.get("gitlab_project") or item.get("project_path") or item.get("project") or ""
+    ).strip().lower()
+    identity = " ".join((module, project_name, project_path))
+    if group in {"dps9-repository", "dps11-repository"}:
+        return "DPS"
+    if group == "wvadmin-repository":
+        return "WVAdmin"
+    if group == "itrade-client":
+        return "Services Terminal" if "service-terminal" in identity or "services-terminal" in identity else "iTrade Client"
+    if group == "build-repository":
+        if "wvadmin" in identity:
+            return "WVAdmin"
+        if "service-terminal" in identity or "services-terminal" in identity:
+            return "Services Terminal"
+        if "itrade-client" in identity:
+            return "iTrade Client"
+        if module == "dps" or "web-sv-build/dps" in project_path:
+            return "DPS"
+    if "/dps/" in project_path or "/dps11/" in project_path or project_path.endswith("/dps"):
+        return "DPS"
+    if "/wvadm/" in project_path or project_path.endswith("/wvadmin"):
+        return "WVAdmin"
+    if "itrade-sv/terminal/" in project_path or "services-terminal" in project_path:
+        return "Services Terminal"
+    if "itrade-sv/client/" in project_path or "itrade-client" in project_path:
+        return "iTrade Client"
+    return "Unmapped"
 
 
 def finding_fingerprint(jira_key: str, finding: dict[str, Any]) -> str:
@@ -104,7 +154,8 @@ class WorkflowStore:
 
     def ensure_schema(self) -> None:
         with self._lock, self.connect() as db:
-            db.executescript(
+            db.execute("BEGIN IMMEDIATE")
+            self._execute_script(db,
                 """
                 CREATE TABLE IF NOT EXISTS schema_meta (
                     key TEXT PRIMARY KEY,
@@ -215,10 +266,481 @@ class WorkflowStore:
                 );
                 """
             )
+            self._migrate_v2(db)
             db.execute(
                 "INSERT INTO schema_meta(key, value) VALUES('version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(SCHEMA_VERSION),),
             )
+
+    @staticmethod
+    def _column_names(db: sqlite3.Connection, table: str) -> set[str]:
+        return {str(row["name"]) for row in db.execute(f"PRAGMA table_info({table})")}
+
+    @staticmethod
+    def _execute_script(db: sqlite3.Connection, script: str) -> None:
+        """Execute simple DDL as one caller-owned transaction.
+
+        sqlite3.executescript() commits implicitly before running; executing the
+        statements individually preserves rollback semantics for migrations.
+        """
+        for statement in script.split(";"):
+            if statement.strip():
+                db.execute(statement)
+
+    def _add_column(self, db: sqlite3.Connection, table: str, definition: str) -> None:
+        name = definition.split()[0]
+        if name not in self._column_names(db, table):
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+    def _migrate_v2(self, db: sqlite3.Connection) -> None:
+        """Add cycle-oriented workflow tables and backfill legacy rows atomically.
+
+        Every statement is safe to execute again.  SQLite DDL participates in the
+        surrounding transaction, so a failed migration leaves the previous schema
+        and data intact.
+        """
+        self._add_column(db, "review_issues", "current_cycle_id TEXT")
+        for definition in (
+            "cycle_id TEXT",
+            "run_group_id TEXT",
+            "project_type TEXT NOT NULL DEFAULT ''",
+            "application TEXT NOT NULL DEFAULT ''",
+            "responsible_scope TEXT NOT NULL DEFAULT ''",
+            "mr_fingerprint TEXT NOT NULL DEFAULT ''",
+            "stable_fingerprint TEXT NOT NULL DEFAULT ''",
+        ):
+            self._add_column(db, "review_runs", definition)
+        self._add_column(db, "discussions", "cycle_id TEXT")
+        self._add_column(db, "pass_records", "cycle_id TEXT")
+        self._add_column(db, "pass_records", "run_group_id TEXT")
+
+        self._execute_script(db,
+            """
+            CREATE TABLE IF NOT EXISTS review_cycles (
+                cycle_id TEXT PRIMARY KEY,
+                jira_key TEXT NOT NULL REFERENCES review_issues(jira_key) ON DELETE CASCADE,
+                sprint_id TEXT NOT NULL DEFAULT '',
+                sprint_name TEXT NOT NULL DEFAULT '',
+                sprint_state TEXT NOT NULL DEFAULT 'unknown',
+                cycle_number INTEGER NOT NULL,
+                cycle_started_at TEXT NOT NULL,
+                cycle_closed_at TEXT,
+                status_transition_json TEXT NOT NULL DEFAULT '{}',
+                review_mode TEXT NOT NULL DEFAULT 'issue',
+                current_description_snapshot_id TEXT,
+                mr_scope_json TEXT NOT NULL DEFAULT '[]',
+                pass_status TEXT NOT NULL DEFAULT 'pending',
+                release_gate_status TEXT NOT NULL DEFAULT 'pending',
+                backfilled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(jira_key, sprint_id, cycle_number)
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_cycles_issue
+                ON review_cycles(jira_key, cycle_number DESC);
+            CREATE INDEX IF NOT EXISTS idx_review_cycles_sprint
+                ON review_cycles(sprint_id, sprint_state, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS sprint_memberships (
+                id TEXT PRIMARY KEY,
+                jira_key TEXT NOT NULL REFERENCES review_issues(jira_key) ON DELETE CASCADE,
+                sprint_id TEXT NOT NULL,
+                sprint_name TEXT NOT NULL DEFAULT '',
+                sprint_state TEXT NOT NULL DEFAULT 'unknown',
+                joined_at TEXT,
+                left_at TEXT,
+                source_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(jira_key, sprint_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sprint_memberships_sprint
+                ON sprint_memberships(sprint_id, sprint_state, jira_key);
+
+            CREATE TABLE IF NOT EXISTS review_run_groups (
+                id TEXT PRIMARY KEY,
+                cycle_id TEXT NOT NULL REFERENCES review_cycles(cycle_id) ON DELETE CASCADE,
+                jira_key TEXT NOT NULL REFERENCES review_issues(jira_key) ON DELETE CASCADE,
+                review_mode TEXT NOT NULL DEFAULT 'issue',
+                status TEXT NOT NULL DEFAULT 'completed',
+                stable_fingerprint TEXT NOT NULL DEFAULT '',
+                backfilled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_groups_cycle
+                ON review_run_groups(cycle_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS description_snapshots (
+                id TEXT PRIMARY KEY,
+                cycle_id TEXT NOT NULL REFERENCES review_cycles(cycle_id) ON DELETE CASCADE,
+                jira_key TEXT NOT NULL REFERENCES review_issues(jira_key) ON DELETE CASCADE,
+                sprint_id TEXT NOT NULL DEFAULT '',
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL DEFAULT '',
+                version INTEGER NOT NULL,
+                adf_json TEXT NOT NULL DEFAULT '{}',
+                rendered_html TEXT NOT NULL DEFAULT '',
+                plain_text TEXT NOT NULL DEFAULT '',
+                author TEXT NOT NULL DEFAULT '',
+                source_created_at TEXT,
+                source_updated_at TEXT,
+                template_language TEXT NOT NULL DEFAULT '',
+                issue_type TEXT NOT NULL DEFAULT '',
+                attachments_json TEXT NOT NULL DEFAULT '[]',
+                jira_status TEXT NOT NULL DEFAULT '',
+                code_mrs_json TEXT NOT NULL DEFAULT '[]',
+                deferred_mrs_json TEXT NOT NULL DEFAULT '[]',
+                reason TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                backfilled INTEGER NOT NULL DEFAULT 0,
+                captured_at TEXT NOT NULL,
+                UNIQUE(cycle_id, source_type, source_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_description_snapshots_cycle
+                ON description_snapshots(cycle_id, captured_at DESC);
+
+            CREATE TABLE IF NOT EXISTS review_snapshots (
+                id TEXT PRIMARY KEY,
+                cycle_id TEXT NOT NULL REFERENCES review_cycles(cycle_id) ON DELETE CASCADE,
+                jira_key TEXT NOT NULL REFERENCES review_issues(jira_key) ON DELETE CASCADE,
+                revision INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(cycle_id, revision)
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_snapshots_cycle
+                ON review_snapshots(cycle_id, revision DESC);
+
+            CREATE TABLE IF NOT EXISTS deferred_release_resources (
+                id TEXT PRIMARY KEY,
+                jira_key TEXT NOT NULL REFERENCES review_issues(jira_key) ON DELETE CASCADE,
+                sprint_id TEXT NOT NULL DEFAULT '',
+                cycle_id TEXT NOT NULL REFERENCES review_cycles(cycle_id) ON DELETE CASCADE,
+                gitlab_project TEXT NOT NULL,
+                mr_iid TEXT NOT NULL,
+                head_sha TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                mr_url TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                gate_run_id TEXT NOT NULL DEFAULT '',
+                locked_build_commit TEXT NOT NULL DEFAULT '',
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                verified_by TEXT NOT NULL DEFAULT '',
+                verified_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(jira_key, sprint_id, cycle_id, gitlab_project, mr_iid, head_sha)
+            );
+            CREATE INDEX IF NOT EXISTS idx_deferred_release_pending
+                ON deferred_release_resources(sprint_id, status, cycle_id, updated_at);
+
+            CREATE TABLE IF NOT EXISTS idempotency_records (
+                operation TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(operation, idempotency_key)
+            );
+            """
+        )
+        self._execute_script(db,
+            """
+            CREATE INDEX IF NOT EXISTS idx_review_runs_cycle ON review_runs(cycle_id, run_number DESC);
+            CREATE INDEX IF NOT EXISTS idx_review_runs_group ON review_runs(run_group_id, project_type);
+            CREATE INDEX IF NOT EXISTS idx_review_runs_application ON review_runs(cycle_id, application, run_number DESC);
+            CREATE INDEX IF NOT EXISTS idx_discussions_cycle ON discussions(cycle_id, created_at);
+            """
+        )
+        self._backfill_cycles(db)
+
+    def _backfill_cycles(self, db: sqlite3.Connection) -> None:
+        """Create deterministic legacy ownership without altering business records."""
+        for issue in db.execute("SELECT jira_key, created_at, updated_at, current_cycle_id FROM review_issues").fetchall():
+            jira_key = str(issue["jira_key"])
+            cycle = db.execute(
+                "SELECT cycle_id FROM review_cycles WHERE jira_key=? ORDER BY cycle_number LIMIT 1", (jira_key,)
+            ).fetchone()
+            if not cycle:
+                cycle_id = str(uuid.uuid4())
+                db.execute(
+                    """INSERT INTO review_cycles(cycle_id, jira_key, sprint_id, sprint_name, sprint_state,
+                       cycle_number, cycle_started_at, review_mode, backfilled, created_at, updated_at)
+                       VALUES(?, ?, 'legacy', 'Legacy / Unknown Sprint', 'unknown', 1, ?, 'issue', 1, ?, ?)""",
+                    (cycle_id, jira_key, issue["created_at"], issue["created_at"], issue["updated_at"]),
+                )
+            else:
+                cycle_id = str(cycle["cycle_id"])
+            if not issue["current_cycle_id"]:
+                db.execute("UPDATE review_issues SET current_cycle_id=? WHERE jira_key=?", (cycle_id, jira_key))
+
+            for run in db.execute(
+                "SELECT id, created_at, run_group_id FROM review_runs WHERE jira_key=? AND cycle_id IS NULL", (jira_key,)
+            ).fetchall():
+                group_id = str(run["run_group_id"] or uuid.uuid4())
+                if not run["run_group_id"]:
+                    db.execute(
+                        """INSERT OR IGNORE INTO review_run_groups
+                           (id, cycle_id, jira_key, review_mode, status, backfilled, created_at, completed_at)
+                           VALUES(?, ?, ?, 'issue', 'completed', 1, ?, ?)""",
+                        (group_id, cycle_id, jira_key, run["created_at"], run["created_at"]),
+                    )
+                db.execute(
+                    "UPDATE review_runs SET cycle_id=?, run_group_id=? WHERE id=?", (cycle_id, group_id, run["id"])
+                )
+            db.execute(
+                """UPDATE discussions SET cycle_id=COALESCE(
+                       (SELECT cycle_id FROM review_runs WHERE review_runs.id=discussions.run_id), ?)
+                   WHERE jira_key=? AND cycle_id IS NULL""",
+                (cycle_id, jira_key),
+            )
+            db.execute(
+                """UPDATE pass_records SET cycle_id=COALESCE(
+                       (SELECT cycle_id FROM review_runs WHERE review_runs.id=pass_records.run_id), ?)
+                   WHERE jira_key=? AND cycle_id IS NULL""",
+                (cycle_id, jira_key),
+            )
+            db.execute(
+                """UPDATE pass_records SET run_group_id=(
+                       SELECT run_group_id FROM review_runs WHERE review_runs.id=pass_records.run_id)
+                   WHERE jira_key=? AND run_group_id IS NULL""",
+                (jira_key,),
+            )
+
+    @staticmethod
+    def _idempotent_result(db: sqlite3.Connection, operation: str, key: str) -> Any | None:
+        if not key:
+            return None
+        row = db.execute(
+            "SELECT response_json FROM idempotency_records WHERE operation=? AND idempotency_key=?",
+            (operation, key),
+        ).fetchone()
+        return json.loads(str(row["response_json"])) if row else None
+
+    @staticmethod
+    def _remember_idempotent(
+        db: sqlite3.Connection, operation: str, key: str, response: Any, created_at: str
+    ) -> None:
+        if key:
+            db.execute(
+                """INSERT INTO idempotency_records(operation, idempotency_key, response_json, created_at)
+                   VALUES(?, ?, ?, ?)""",
+                (operation, key, json.dumps(response, ensure_ascii=False, sort_keys=True), created_at),
+            )
+
+    @staticmethod
+    def _json(value: Any, default: Any) -> str:
+        return json.dumps(default if value is None else value, ensure_ascii=False, sort_keys=True)
+
+    def upsert_sprint_membership(
+        self,
+        *,
+        jira_key: str,
+        sprint_id: str,
+        sprint_name: str = "",
+        sprint_state: str = "unknown",
+        joined_at: str = "",
+        left_at: str = "",
+        source: dict[str, Any] | None = None,
+        summary: str = "",
+        responsible: str = "",
+    ) -> dict[str, Any]:
+        jira_key = jira_key.strip().upper()
+        sprint_id = str(sprint_id).strip()
+        if not jira_key or not sprint_id:
+            raise ValueError("Jira key and Sprint ID are required.")
+        now = utc_now()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO review_issues(jira_key, summary, responsible, created_at, updated_at)
+                   VALUES(?, ?, ?, ?, ?)
+                   ON CONFLICT(jira_key) DO UPDATE SET
+                     summary=CASE WHEN excluded.summary<>'' THEN excluded.summary ELSE review_issues.summary END,
+                     responsible=CASE WHEN excluded.responsible<>'' THEN excluded.responsible ELSE review_issues.responsible END,
+                     updated_at=excluded.updated_at""",
+                (jira_key, summary.strip(), responsible.strip(), now, now),
+            )
+            membership_id = str(uuid.uuid4())
+            db.execute(
+                """INSERT INTO sprint_memberships(id, jira_key, sprint_id, sprint_name, sprint_state,
+                   joined_at, left_at, source_json, created_at, updated_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(jira_key, sprint_id) DO UPDATE SET
+                     sprint_name=CASE WHEN excluded.sprint_name<>'' THEN excluded.sprint_name ELSE sprint_memberships.sprint_name END,
+                     sprint_state=excluded.sprint_state,
+                     joined_at=COALESCE(sprint_memberships.joined_at, excluded.joined_at),
+                     left_at=COALESCE(excluded.left_at, sprint_memberships.left_at),
+                     source_json=excluded.source_json,
+                     updated_at=excluded.updated_at""",
+                (
+                    membership_id, jira_key, sprint_id, sprint_name.strip(), sprint_state.strip().lower() or "unknown",
+                    joined_at or None, left_at or None, self._json(source, {}), now, now,
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM sprint_memberships WHERE jira_key=? AND sprint_id=?", (jira_key, sprint_id)
+            ).fetchone()
+            return self._decoded_row(row, ("source_json",))
+
+    def upsert_review_cycle(
+        self,
+        *,
+        jira_key: str,
+        sprint_id: str = "",
+        sprint_name: str = "",
+        sprint_state: str = "unknown",
+        review_mode: str = "issue",
+        cycle_id: str = "",
+        cycle_started_at: str = "",
+        cycle_closed_at: str = "",
+        status_transition: dict[str, Any] | None = None,
+        mr_scope: list[dict[str, Any]] | None = None,
+        pass_status: str = "pending",
+        release_gate_status: str = "pending",
+        backfilled: bool = False,
+        summary: str = "",
+        responsible: str = "",
+    ) -> dict[str, Any]:
+        jira_key = jira_key.strip().upper()
+        sprint_id = str(sprint_id).strip() or "legacy"
+        if not jira_key:
+            raise ValueError("Jira key is required.")
+        if review_mode not in {"issue", "batch-preview", "final-sprint"}:
+            raise ValueError("Review mode must be issue, batch-preview, or final-sprint.")
+        now = utc_now()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO review_issues(jira_key, summary, responsible, created_at, updated_at)
+                   VALUES(?, ?, ?, ?, ?)
+                   ON CONFLICT(jira_key) DO UPDATE SET
+                     summary=CASE WHEN excluded.summary<>'' THEN excluded.summary ELSE review_issues.summary END,
+                     responsible=CASE WHEN excluded.responsible<>'' THEN excluded.responsible ELSE review_issues.responsible END,
+                     updated_at=excluded.updated_at""",
+                (jira_key, summary.strip(), responsible.strip(), now, now),
+            )
+            existing = None
+            if cycle_id:
+                existing = db.execute("SELECT * FROM review_cycles WHERE cycle_id=?", (cycle_id,)).fetchone()
+                if existing and str(existing["jira_key"]) != jira_key:
+                    raise ValueError("Review Cycle belongs to a different Jira issue.")
+            if not existing:
+                existing = db.execute(
+                    """SELECT * FROM review_cycles WHERE jira_key=? AND sprint_id=? AND cycle_closed_at IS NULL
+                       ORDER BY cycle_number DESC LIMIT 1""",
+                    (jira_key, sprint_id),
+                ).fetchone()
+            if existing:
+                cycle_id = str(existing["cycle_id"])
+                db.execute(
+                    """UPDATE review_cycles SET sprint_name=CASE WHEN ?<>'' THEN ? ELSE sprint_name END,
+                       sprint_state=?, cycle_closed_at=COALESCE(?, cycle_closed_at), status_transition_json=?,
+                       review_mode=?, mr_scope_json=?, pass_status=?, release_gate_status=?, updated_at=?
+                       WHERE cycle_id=?""",
+                    (
+                        sprint_name, sprint_name, sprint_state.lower() or "unknown", cycle_closed_at or None,
+                        self._json(status_transition, json.loads(str(existing["status_transition_json"]))), review_mode,
+                        self._json(mr_scope, json.loads(str(existing["mr_scope_json"]))), pass_status,
+                        release_gate_status, now, cycle_id,
+                    ),
+                )
+            else:
+                cycle_id = cycle_id or str(uuid.uuid4())
+                # A Jira issue has one active delivery cycle. Starting work in a
+                # different Sprint closes the previous cycle while preserving it
+                # as immutable history for later traceability.
+                db.execute(
+                    """UPDATE review_cycles SET cycle_closed_at=?, updated_at=?
+                       WHERE jira_key=? AND cycle_closed_at IS NULL""",
+                    (cycle_started_at or now, now, jira_key),
+                )
+                cycle_number = int(
+                    db.execute("SELECT COUNT(*) FROM review_cycles WHERE jira_key=?", (jira_key,)).fetchone()[0]
+                ) + 1
+                db.execute(
+                    """INSERT INTO review_cycles(cycle_id, jira_key, sprint_id, sprint_name, sprint_state,
+                       cycle_number, cycle_started_at, cycle_closed_at, status_transition_json, review_mode,
+                       mr_scope_json, pass_status, release_gate_status, backfilled, created_at, updated_at)
+                       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        cycle_id, jira_key, sprint_id, sprint_name.strip(), sprint_state.lower() or "unknown",
+                        cycle_number, cycle_started_at or now, cycle_closed_at or None,
+                        self._json(status_transition, {}), review_mode, self._json(mr_scope, []), pass_status,
+                        release_gate_status, int(backfilled), now, now,
+                    ),
+                )
+            db.execute(
+                "UPDATE review_issues SET current_cycle_id=?, updated_at=? WHERE jira_key=?", (cycle_id, now, jira_key)
+            )
+            if sprint_id != "legacy":
+                membership = db.execute(
+                    "SELECT id FROM sprint_memberships WHERE jira_key=? AND sprint_id=?", (jira_key, sprint_id)
+                ).fetchone()
+                if membership:
+                    db.execute(
+                        """UPDATE sprint_memberships SET sprint_name=?, sprint_state=?, updated_at=? WHERE id=?""",
+                        (sprint_name, sprint_state.lower() or "unknown", now, membership["id"]),
+                    )
+                else:
+                    db.execute(
+                        """INSERT INTO sprint_memberships(id, jira_key, sprint_id, sprint_name, sprint_state,
+                           joined_at, source_json, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, '{}', ?, ?)""",
+                        (str(uuid.uuid4()), jira_key, sprint_id, sprint_name, sprint_state.lower() or "unknown", cycle_started_at or now, now, now),
+                    )
+            row = db.execute("SELECT * FROM review_cycles WHERE cycle_id=?", (cycle_id,)).fetchone()
+            return self._decoded_row(row, ("status_transition_json", "mr_scope_json"))
+
+    def create_run_group(
+        self,
+        *,
+        cycle_id: str,
+        review_mode: str = "issue",
+        status: str = "running",
+        stable_fingerprint: str = "",
+        run_group_id: str = "",
+        created_at: str = "",
+    ) -> dict[str, Any]:
+        now = created_at or utc_now()
+        with self._lock, self.connect() as db:
+            cycle = db.execute("SELECT jira_key FROM review_cycles WHERE cycle_id=?", (cycle_id,)).fetchone()
+            if not cycle:
+                raise KeyError("Review Cycle was not found.")
+            if run_group_id:
+                existing = db.execute("SELECT * FROM review_run_groups WHERE id=?", (run_group_id,)).fetchone()
+                if existing:
+                    if str(existing["cycle_id"]) != cycle_id:
+                        raise ValueError("Run Group belongs to a different Review Cycle.")
+                    return self._row(existing)
+            run_group_id = run_group_id or str(uuid.uuid4())
+            db.execute(
+                """INSERT INTO review_run_groups(id, cycle_id, jira_key, review_mode, status,
+                   stable_fingerprint, created_at, completed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_group_id, cycle_id, cycle["jira_key"], review_mode, status, stable_fingerprint,
+                    now, now if status == "completed" else None,
+                ),
+            )
+            return self._row(db.execute("SELECT * FROM review_run_groups WHERE id=?", (run_group_id,)).fetchone())
+
+    def list_cycles(self, jira_key: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            return [
+                self._decoded_row(row, ("status_transition_json", "mr_scope_json"))
+                for row in db.execute(
+                    "SELECT * FROM review_cycles WHERE jira_key=? ORDER BY cycle_number DESC", (jira_key.upper(),)
+                )
+            ]
+
+    def list_sprint_memberships(self, jira_key: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            return [
+                self._decoded_row(row, ("source_json",))
+                for row in db.execute(
+                    "SELECT * FROM sprint_memberships WHERE jira_key=? ORDER BY joined_at, created_at", (jira_key.upper(),)
+                )
+            ]
 
     def register_run(
         self,
@@ -230,6 +752,13 @@ class WorkflowStore:
         responsible: str = "",
         conclusion: str = "",
         created_at: str = "",
+        cycle_id: str = "",
+        run_group_id: str = "",
+        project_type: str = "",
+        application: str = "",
+        responsible_scope: str = "",
+        mr_fingerprint: str = "",
+        stable_fingerprint: str = "",
     ) -> str:
         jira_key = jira_key.strip().upper()
         if not jira_key:
@@ -252,6 +781,45 @@ class WorkflowStore:
             ).fetchone()
             if existing:
                 return str(existing["id"])
+            cycle = db.execute(
+                "SELECT * FROM review_cycles WHERE cycle_id=?", (cycle_id,)
+            ).fetchone() if cycle_id else None
+            if cycle_id and not cycle:
+                raise KeyError("Review Cycle was not found.")
+            if cycle and str(cycle["jira_key"]) != jira_key:
+                raise ValueError("Review Cycle belongs to a different Jira issue.")
+            if not cycle:
+                cycle = db.execute(
+                    """SELECT * FROM review_cycles WHERE jira_key=? AND cycle_closed_at IS NULL
+                       ORDER BY cycle_number DESC LIMIT 1""",
+                    (jira_key,),
+                ).fetchone()
+            if not cycle:
+                cycle_id = str(uuid.uuid4())
+                db.execute(
+                    """INSERT INTO review_cycles(cycle_id, jira_key, sprint_id, sprint_name, sprint_state,
+                       cycle_number, cycle_started_at, review_mode, backfilled, created_at, updated_at)
+                       VALUES(?, ?, 'legacy', 'Legacy / Unknown Sprint', 'unknown', 1, ?, 'issue', 1, ?, ?)""",
+                    (cycle_id, jira_key, timestamp, timestamp, timestamp),
+                )
+            else:
+                cycle_id = str(cycle["cycle_id"])
+            if run_group_id:
+                group = db.execute("SELECT * FROM review_run_groups WHERE id=?", (run_group_id,)).fetchone()
+                if not group:
+                    raise KeyError("Review Run Group was not found.")
+                if str(group["cycle_id"]) != cycle_id:
+                    raise ValueError("Review Run Group belongs to a different Review Cycle.")
+            else:
+                run_group_id = str(uuid.uuid4())
+                db.execute(
+                    """INSERT INTO review_run_groups(id, cycle_id, jira_key, review_mode, status,
+                       stable_fingerprint, created_at, completed_at) VALUES(?, ?, ?, ?, 'completed', ?, ?, ?)""",
+                    (
+                        run_group_id, cycle_id, jira_key, str(cycle["review_mode"]) if cycle else "issue",
+                        stable_fingerprint, timestamp, timestamp,
+                    ),
+                )
             run_number = int(db.execute("SELECT COUNT(*) FROM review_runs WHERE jira_key=?", (jira_key,)).fetchone()[0]) + 1
             run_id = str(uuid.uuid4())
             severity_counts: dict[str, int] = {}
@@ -260,12 +828,18 @@ class WorkflowStore:
                 severity_counts[severity] = severity_counts.get(severity, 0) + 1
             db.execute(
                 """INSERT INTO review_runs(id, jira_key, report_path, report_fingerprint, run_number, conclusion,
-                   severity_counts_json, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
-                (run_id, jira_key, report_path, report_identity, run_number, conclusion, json.dumps(severity_counts), timestamp),
+                   severity_counts_json, created_at, cycle_id, run_group_id, project_type, application, responsible_scope,
+                   mr_fingerprint, stable_fingerprint) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id, jira_key, report_path, report_identity, run_number, conclusion,
+                    json.dumps(severity_counts), timestamp, cycle_id, run_group_id, project_type.strip().lower(),
+                    application.strip(), responsible_scope.strip(), mr_fingerprint.strip(), stable_fingerprint.strip(),
+                ),
             )
             previous = db.execute(
-                "SELECT id FROM review_runs WHERE jira_key=? AND id<>? ORDER BY run_number DESC LIMIT 1",
-                (jira_key, run_id),
+                """SELECT id FROM review_runs WHERE jira_key=? AND cycle_id=? AND project_type=? AND id<>?
+                   ORDER BY run_number DESC LIMIT 1""",
+                (jira_key, cycle_id, project_type.strip().lower(), run_id),
             ).fetchone()
             previous_fingerprints: set[str] = set()
             if previous:
@@ -294,9 +868,11 @@ class WorkflowStore:
                 unresolved_previous = previous_fingerprints & current_fingerprints
                 status = "handling" if unresolved_previous or blocking_count else "ready-for-pass"
             db.execute(
-                "UPDATE review_issues SET latest_run_id=?, passed_run_id=NULL, status=?, updated_at=? WHERE jira_key=?",
-                (run_id, status, timestamp, jira_key),
+                """UPDATE review_issues SET latest_run_id=?, passed_run_id=NULL, current_cycle_id=?,
+                   status=?, updated_at=? WHERE jira_key=?""",
+                (run_id, cycle_id, status, timestamp, jira_key),
             )
+            db.execute("UPDATE review_cycles SET pass_status='pending', updated_at=? WHERE cycle_id=?", (timestamp, cycle_id))
             self._audit(db, jira_key, "system", "review-run-registered", {"run_id": run_id, "run_number": run_number})
             return run_id
 
@@ -325,6 +901,7 @@ class WorkflowStore:
         actor_role: str,
         jira_summary: str = "",
         jira_description_adf: object | None = None,
+        idempotency_key: str = "",
     ) -> dict[str, Any]:
         disposition = disposition.strip().lower()
         if disposition not in DISPOSITIONS:
@@ -339,6 +916,10 @@ class WorkflowStore:
                 raise ValueError("Issue Description is required for a Jira follow-up.")
         now = utc_now()
         with self._lock, self.connect() as db:
+            operation = f"handling:{finding_id}"
+            repeated = self._idempotent_result(db, operation, idempotency_key)
+            if repeated is not None:
+                return dict(repeated)
             finding = db.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
             if not finding:
                 raise KeyError("Finding was not found.")
@@ -370,7 +951,9 @@ class WorkflowStore:
                 db, str(finding["jira_key"]), actor, "finding-handled",
                 {"finding_id": finding_id, "handling_id": handling_id, "disposition": disposition, "draft_id": draft_id},
             )
-            return {"handling_id": handling_id, "draft_id": draft_id, "approval_status": approval_status}
+            result = {"handling_id": handling_id, "draft_id": draft_id, "approval_status": approval_status}
+            self._remember_idempotent(db, operation, idempotency_key, result, now)
+            return result
 
     def approve_handling(self, handling_id: str, actor: str, actor_role: str, *, approved: bool, reason: str = "") -> None:
         if actor_role not in {"auditor", "manager"}:
@@ -421,36 +1004,335 @@ class WorkflowStore:
         with self.connect() as db:
             return self._pass_readiness(db, jira_key)
 
-    def manual_pass(self, jira_key: str, actor: str, actor_role: str, note: str) -> dict[str, Any]:
+    def manual_pass(
+        self,
+        jira_key: str,
+        actor: str,
+        actor_role: str,
+        note: str,
+        *,
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
         if actor_role not in {"auditor", "manager"}:
             raise PermissionError("Only Auditor or Manager can record Review Pass.")
+        operation = f"manual-pass:{jira_key.upper()}"
+        if idempotency_key:
+            with self._lock, self.connect() as db:
+                repeated = self._idempotent_result(db, operation, idempotency_key)
+                if repeated is not None:
+                    return dict(repeated)
         readiness = self.pass_readiness(jira_key)
         if not readiness["ready"]:
             raise ValueError(str(readiness["message"]))
         now = utc_now()
         pass_id = str(uuid.uuid4())
         with self._lock, self.connect() as db:
+            repeated = self._idempotent_result(db, operation, idempotency_key)
+            if repeated is not None:
+                return dict(repeated)
+            cycle_id = str(
+                db.execute("SELECT current_cycle_id FROM review_issues WHERE jira_key=?", (jira_key.upper(),)).fetchone()[0]
+                or ""
+            )
             db.execute(
-                "INSERT INTO pass_records(id, jira_key, run_id, actor, note, policy_json, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                (pass_id, jira_key.upper(), readiness["run_id"], actor, note.strip(), json.dumps(readiness, ensure_ascii=False), now),
+                """INSERT INTO pass_records(id, jira_key, run_id, actor, note, policy_json, created_at,
+                   cycle_id, run_group_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    pass_id, jira_key.upper(), readiness["run_id"], actor, note.strip(),
+                    json.dumps(readiness, ensure_ascii=False), now, cycle_id or None,
+                    readiness.get("run_group_id") or None,
+                ),
             )
             db.execute(
                 "UPDATE review_issues SET status='passed', passed_run_id=latest_run_id, updated_at=? WHERE jira_key=?",
                 (now, jira_key.upper()),
             )
+            if cycle_id:
+                db.execute("UPDATE review_cycles SET pass_status='passed', updated_at=? WHERE cycle_id=?", (now, cycle_id))
             self._audit(db, jira_key.upper(), actor, "manual-pass", {"pass_id": pass_id, "run_id": readiness["run_id"]})
-        return {"pass_id": pass_id, **readiness}
+            result = {"pass_id": pass_id, **readiness}
+            self._remember_idempotent(db, operation, idempotency_key, result, now)
+            return result
 
-    def add_discussion(self, jira_key: str, actor: str, message: str, *, run_id: str = "", finding_id: str = "", kind: str = "comment") -> str:
+    def add_discussion(
+        self,
+        jira_key: str,
+        actor: str,
+        message: str,
+        *,
+        cycle_id: str = "",
+        run_id: str = "",
+        finding_id: str = "",
+        kind: str = "comment",
+        idempotency_key: str = "",
+    ) -> str:
         if not message.strip():
             raise ValueError("Message is required.")
         discussion_id = str(uuid.uuid4())
         with self._lock, self.connect() as db:
+            operation = f"discussion:{jira_key.upper()}"
+            repeated = self._idempotent_result(db, operation, idempotency_key)
+            if repeated is not None:
+                return str(repeated)
+            if not cycle_id and run_id:
+                run = db.execute("SELECT cycle_id, jira_key FROM review_runs WHERE id=?", (run_id,)).fetchone()
+                if not run:
+                    raise KeyError("Review Run was not found.")
+                if str(run["jira_key"]) != jira_key.upper():
+                    raise ValueError("Review Run belongs to a different Jira issue.")
+                cycle_id = str(run["cycle_id"] or "")
+            if not cycle_id:
+                issue = db.execute(
+                    "SELECT current_cycle_id FROM review_issues WHERE jira_key=?", (jira_key.upper(),)
+                ).fetchone()
+                if not issue:
+                    raise KeyError("Jira issue was not found in Review Workflow.")
+                cycle_id = str(issue["current_cycle_id"] or "")
             db.execute(
-                "INSERT INTO discussions(id, jira_key, run_id, finding_id, author, kind, message, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                (discussion_id, jira_key.upper(), run_id or None, finding_id or None, actor, kind, message.strip(), utc_now()),
+                """INSERT INTO discussions(id, jira_key, run_id, finding_id, author, kind, message, created_at, cycle_id)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (discussion_id, jira_key.upper(), run_id or None, finding_id or None, actor, kind, message.strip(), utc_now(), cycle_id or None),
             )
+            self._remember_idempotent(db, operation, idempotency_key, discussion_id, utc_now())
         return discussion_id
+
+    def create_description_snapshot(
+        self,
+        *,
+        cycle_id: str,
+        source_type: str,
+        reason: str,
+        adf_document: object | None = None,
+        rendered_html: str = "",
+        plain_text: str = "",
+        source_id: str = "",
+        author: str = "",
+        source_created_at: str = "",
+        source_updated_at: str = "",
+        template_language: str = "",
+        issue_type: str = "",
+        attachments: list[dict[str, Any]] | None = None,
+        jira_status: str = "",
+        code_mrs: list[dict[str, Any]] | None = None,
+        deferred_mrs: list[dict[str, Any]] | None = None,
+        backfilled: bool = False,
+        captured_at: str = "",
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        if not source_type.strip() or not reason.strip():
+            raise ValueError("Description source type and snapshot reason are required.")
+        document = validate_adf(adf_document or empty_adf())
+        normalized_adf = json.loads(adf_json(document))
+        text_index = plain_text or adf_plain_text(document)
+        immutable = {
+            "adf": normalized_adf,
+            "rendered_html": rendered_html,
+            "plain_text": text_index,
+            "attachments": attachments or [],
+            "jira_status": jira_status,
+            "code_mrs": code_mrs or [],
+            "deferred_mrs": deferred_mrs or [],
+            "source_updated_at": source_updated_at,
+        }
+        content_hash = hashlib.sha256(self._json(immutable, {}).encode("utf-8")).hexdigest()
+        now = captured_at or utc_now()
+        operation = f"description-snapshot:{cycle_id}"
+        with self._lock, self.connect() as db:
+            repeated = self._idempotent_result(db, operation, idempotency_key)
+            if repeated is not None:
+                return dict(repeated)
+            cycle = db.execute("SELECT * FROM review_cycles WHERE cycle_id=?", (cycle_id,)).fetchone()
+            if not cycle:
+                raise KeyError("Review Cycle was not found.")
+            version = int(
+                db.execute(
+                    """SELECT COALESCE(MAX(version), 0) FROM description_snapshots
+                       WHERE cycle_id=? AND source_type=? AND source_id=?""",
+                    (cycle_id, source_type.strip(), source_id.strip()),
+                ).fetchone()[0]
+            ) + 1
+            snapshot_id = str(uuid.uuid4())
+            db.execute(
+                """INSERT INTO description_snapshots(id, cycle_id, jira_key, sprint_id, source_type,
+                   source_id, version, adf_json, rendered_html, plain_text, author, source_created_at,
+                   source_updated_at, template_language, issue_type, attachments_json, jira_status,
+                   code_mrs_json, deferred_mrs_json, reason, content_hash, backfilled, captured_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    snapshot_id, cycle_id, cycle["jira_key"], cycle["sprint_id"], source_type.strip(),
+                    source_id.strip(), version, self._json(normalized_adf, {}), rendered_html, text_index,
+                    author, source_created_at or None, source_updated_at or None, template_language,
+                    issue_type, self._json(attachments, []), jira_status, self._json(code_mrs, []),
+                    self._json(deferred_mrs, []), reason.strip(), content_hash, int(backfilled), now,
+                ),
+            )
+            db.execute(
+                """UPDATE review_cycles SET current_description_snapshot_id=?, updated_at=? WHERE cycle_id=?""",
+                (snapshot_id, now, cycle_id),
+            )
+            result = self._description_snapshot(db, snapshot_id)
+            self._remember_idempotent(db, operation, idempotency_key, result, now)
+            return result
+
+    def create_review_snapshot(
+        self,
+        *,
+        cycle_id: str,
+        reason: str,
+        actor: str,
+        payload: dict[str, Any] | None = None,
+        created_at: str = "",
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        if not reason.strip() or not actor.strip():
+            raise ValueError("Snapshot reason and actor are required.")
+        now = created_at or utc_now()
+        operation = f"review-snapshot:{cycle_id}"
+        with self._lock, self.connect() as db:
+            repeated = self._idempotent_result(db, operation, idempotency_key)
+            if repeated is not None:
+                return dict(repeated)
+            cycle = db.execute("SELECT * FROM review_cycles WHERE cycle_id=?", (cycle_id,)).fetchone()
+            if not cycle:
+                raise KeyError("Review Cycle was not found.")
+            snapshot_payload = payload if payload is not None else self._review_snapshot_payload(db, cycle)
+            encoded = self._json(snapshot_payload, {})
+            content_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            revision = int(
+                db.execute(
+                    "SELECT COALESCE(MAX(revision), 0) FROM review_snapshots WHERE cycle_id=?", (cycle_id,)
+                ).fetchone()[0]
+            ) + 1
+            snapshot_id = str(uuid.uuid4())
+            db.execute(
+                """INSERT INTO review_snapshots(id, cycle_id, jira_key, revision, reason, payload_json,
+                   content_hash, actor, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    snapshot_id, cycle_id, cycle["jira_key"], revision, reason.strip(), encoded,
+                    content_hash, actor.strip(), now,
+                ),
+            )
+            result = self._review_snapshot(db, snapshot_id)
+            self._remember_idempotent(db, operation, idempotency_key, result, now)
+            return result
+
+    def upsert_deferred_resource(
+        self,
+        *,
+        cycle_id: str,
+        gitlab_project: str,
+        mr_iid: str | int,
+        head_sha: str,
+        resource_type: str,
+        jira_key: str = "",
+        sprint_id: str = "",
+        mr_url: str = "",
+        status: str = "",
+        gate_run_id: str = "",
+        locked_build_commit: str = "",
+        evidence: dict[str, Any] | None = None,
+        verified_by: str = "",
+        verified_at: str = "",
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        project = gitlab_project.strip().rstrip("/")
+        iid = str(mr_iid).strip().lstrip("!")
+        sha = head_sha.strip().lower()
+        kind = resource_type.strip().lower().replace("-", "_")
+        if kind not in {"company_config", "scr"}:
+            raise ValueError("Deferred resource type must be company_config or scr.")
+        if not cycle_id or not project or not iid or not sha:
+            raise ValueError("Cycle, GitLab project, MR IID, and Head SHA are required.")
+        if status and status not in {"pending", "verified", "blocked", "superseded"}:
+            raise ValueError("Deferred resource status is invalid.")
+        now = utc_now()
+        operation = f"deferred-upsert:{cycle_id}:{project}:{iid}:{sha}"
+        with self._lock, self.connect() as db:
+            repeated = self._idempotent_result(db, operation, idempotency_key)
+            if repeated is not None:
+                return dict(repeated)
+            cycle = db.execute("SELECT * FROM review_cycles WHERE cycle_id=?", (cycle_id,)).fetchone()
+            if not cycle:
+                raise KeyError("Review Cycle was not found.")
+            effective_jira = jira_key.strip().upper() or str(cycle["jira_key"])
+            effective_sprint = str(sprint_id).strip() or str(cycle["sprint_id"])
+            if effective_jira != str(cycle["jira_key"]) or effective_sprint != str(cycle["sprint_id"]):
+                raise ValueError("Deferred resource scope does not match its Review Cycle.")
+            resource_id = str(uuid.uuid4())
+            db.execute(
+                """INSERT INTO deferred_release_resources(id, jira_key, sprint_id, cycle_id, gitlab_project,
+                   mr_iid, head_sha, resource_type, mr_url, status, gate_run_id, locked_build_commit,
+                   evidence_json, verified_by, verified_at, created_at, updated_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(jira_key, sprint_id, cycle_id, gitlab_project, mr_iid, head_sha) DO UPDATE SET
+                     resource_type=excluded.resource_type,
+                     mr_url=CASE WHEN excluded.mr_url<>'' THEN excluded.mr_url ELSE deferred_release_resources.mr_url END,
+                     status=CASE WHEN ?<>'' THEN excluded.status ELSE deferred_release_resources.status END,
+                     gate_run_id=CASE WHEN excluded.gate_run_id<>'' THEN excluded.gate_run_id ELSE deferred_release_resources.gate_run_id END,
+                     locked_build_commit=CASE WHEN excluded.locked_build_commit<>'' THEN excluded.locked_build_commit ELSE deferred_release_resources.locked_build_commit END,
+                     evidence_json=CASE WHEN ? IS NOT NULL THEN excluded.evidence_json ELSE deferred_release_resources.evidence_json END,
+                     verified_by=CASE WHEN excluded.verified_by<>'' THEN excluded.verified_by ELSE deferred_release_resources.verified_by END,
+                     verified_at=COALESCE(excluded.verified_at, deferred_release_resources.verified_at),
+                     updated_at=excluded.updated_at""",
+                (
+                    resource_id, effective_jira, effective_sprint, cycle_id, project, iid, sha, kind, mr_url,
+                    status or "pending", gate_run_id, locked_build_commit, self._json(evidence, {}), verified_by,
+                    verified_at or None, now, now, status, int(evidence is not None),
+                ),
+            )
+            row = db.execute(
+                """SELECT * FROM deferred_release_resources WHERE jira_key=? AND sprint_id=? AND cycle_id=?
+                   AND gitlab_project=? AND mr_iid=? AND head_sha=?""",
+                (effective_jira, effective_sprint, cycle_id, project, iid, sha),
+            ).fetchone()
+            self._refresh_release_gate_status(db, cycle_id, now)
+            result = self._decoded_row(row, ("evidence_json",))
+            self._remember_idempotent(db, operation, idempotency_key, result, now)
+            return result
+
+    def list_deferred_resources(
+        self,
+        *,
+        cycle_id: str = "",
+        sprint_id: str = "",
+        pending_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if cycle_id:
+            where.append("cycle_id=?")
+            params.append(cycle_id)
+        if sprint_id:
+            where.append("sprint_id=?")
+            params.append(str(sprint_id))
+        if pending_only:
+            where.append("status='pending'")
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        with self.connect() as db:
+            return [
+                self._decoded_row(row, ("evidence_json",))
+                for row in db.execute(
+                    f"SELECT * FROM deferred_release_resources {clause} ORDER BY created_at", params
+                )
+            ]
+
+    def list_description_snapshots(self, cycle_id: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            return [
+                self._description_snapshot(db, str(row["id"]))
+                for row in db.execute(
+                    "SELECT id FROM description_snapshots WHERE cycle_id=? ORDER BY captured_at, version", (cycle_id,)
+                )
+            ]
+
+    def list_review_snapshots(self, cycle_id: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            return [
+                self._review_snapshot(db, str(row["id"]))
+                for row in db.execute(
+                    "SELECT id FROM review_snapshots WHERE cycle_id=? ORDER BY revision", (cycle_id,)
+                )
+            ]
 
     def import_legacy_thread(self, report_suffix: str, thread: dict[str, Any]) -> dict[str, int]:
         suffix = report_suffix.replace("\\", "/").lstrip("/").lower()
@@ -460,7 +1342,9 @@ class WorkflowStore:
         with self._lock, self.connect() as db:
             run = next(
                 (
-                    row for row in db.execute("SELECT id, jira_key, report_path FROM review_runs ORDER BY created_at DESC")
+                    row for row in db.execute(
+                        "SELECT id, jira_key, report_path, cycle_id, run_group_id FROM review_runs ORDER BY created_at DESC"
+                    )
                     if str(row["report_path"]).replace("\\", "/").lower().endswith(suffix)
                 ),
                 None,
@@ -506,16 +1390,26 @@ class WorkflowStore:
                 ).fetchone()
                 if not exists:
                     db.execute(
-                        "INSERT INTO discussions(id, jira_key, run_id, author, kind, message, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                        (str(uuid.uuid4()), run["jira_key"], run["id"], str(message.get("user") or "legacy"), str(message.get("kind") or "comment"), text, created),
+                        """INSERT INTO discussions(id, jira_key, run_id, author, kind, message, created_at, cycle_id)
+                           VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            str(uuid.uuid4()), run["jira_key"], run["id"],
+                            str(message.get("user") or "legacy"), str(message.get("kind") or "comment"),
+                            text, created, run["cycle_id"],
+                        ),
                     )
                     imported["discussions"] += 1
                 if message.get("kind") == "manual-pass":
                     passed = db.execute("SELECT 1 FROM pass_records WHERE jira_key=? AND run_id=?", (run["jira_key"], run["id"])).fetchone()
                     if not passed:
                         db.execute(
-                            "INSERT INTO pass_records(id, jira_key, run_id, actor, note, policy_json, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                            (str(uuid.uuid4()), run["jira_key"], run["id"], str(message.get("user") or "legacy"), text, '{"legacy":true}', created),
+                            """INSERT INTO pass_records(id, jira_key, run_id, actor, note, policy_json, created_at,
+                               cycle_id, run_group_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                str(uuid.uuid4()), run["jira_key"], run["id"],
+                                str(message.get("user") or "legacy"), text, '{"legacy":true}', created,
+                                run["cycle_id"], run["run_group_id"],
+                            ),
                         )
                         db.execute(
                             "UPDATE review_issues SET status='passed', passed_run_id=?, updated_at=? WHERE jira_key=?",
@@ -563,7 +1457,56 @@ class WorkflowStore:
             discussions = [self._row(row) for row in db.execute("SELECT * FROM discussions WHERE jira_key=? ORDER BY created_at", (jira_key.upper(),))]
             drafts = self._drafts(db, jira_key.upper())
             passes = [self._row(row) for row in db.execute("SELECT * FROM pass_records WHERE jira_key=? ORDER BY created_at DESC", (jira_key.upper(),))]
-            return {"issue": self._row(issue), "runs": runs, "discussions": discussions, "drafts": drafts, "passes": passes, "pass_readiness": self._pass_readiness(db, jira_key)}
+            cycles = [
+                self._decoded_row(row, ("status_transition_json", "mr_scope_json"))
+                for row in db.execute(
+                    "SELECT * FROM review_cycles WHERE jira_key=? ORDER BY cycle_number DESC", (jira_key.upper(),)
+                )
+            ]
+            memberships = [
+                self._decoded_row(row, ("source_json",))
+                for row in db.execute(
+                    "SELECT * FROM sprint_memberships WHERE jira_key=? ORDER BY joined_at, created_at", (jira_key.upper(),)
+                )
+            ]
+            run_groups = [
+                self._row(row)
+                for row in db.execute(
+                    "SELECT * FROM review_run_groups WHERE jira_key=? ORDER BY created_at DESC", (jira_key.upper(),)
+                )
+            ]
+            description_snapshots = [
+                self._description_snapshot(db, str(row["id"]))
+                for row in db.execute(
+                    "SELECT id FROM description_snapshots WHERE jira_key=? ORDER BY captured_at DESC", (jira_key.upper(),)
+                )
+            ]
+            review_snapshots = [
+                self._review_snapshot(db, str(row["id"]))
+                for row in db.execute(
+                    "SELECT id FROM review_snapshots WHERE jira_key=? ORDER BY created_at DESC", (jira_key.upper(),)
+                )
+            ]
+            deferred_resources = [
+                self._decoded_row(row, ("evidence_json",))
+                for row in db.execute(
+                    "SELECT * FROM deferred_release_resources WHERE jira_key=? ORDER BY created_at", (jira_key.upper(),)
+                )
+            ]
+            return {
+                "issue": self._row(issue), "cycles": cycles, "sprint_memberships": memberships,
+                "run_groups": run_groups, "runs": runs, "description_snapshots": description_snapshots,
+                "review_snapshots": review_snapshots, "deferred_resources": deferred_resources,
+                "discussions": discussions, "drafts": drafts, "passes": passes,
+                "pass_readiness": self._pass_readiness(db, jira_key),
+            }
+
+    def cycle_detail(self, cycle_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            cycle = db.execute("SELECT * FROM review_cycles WHERE cycle_id=?", (cycle_id,)).fetchone()
+            if not cycle:
+                return None
+            return self._review_snapshot_payload(db, cycle)
 
     def list_drafts(self, jira_key: str = "") -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -687,15 +1630,119 @@ class WorkflowStore:
                 else:
                     handling_counts["pending"] += 1
         item["handling_counts"] = handling_counts
+        cycles = [
+            self._decoded_row(cycle_row, ("status_transition_json", "mr_scope_json"))
+            for cycle_row in db.execute(
+                "SELECT * FROM review_cycles WHERE jira_key=? ORDER BY cycle_number DESC", (row["jira_key"],)
+            )
+        ]
+        for cycle in cycles:
+            cycle["review_snapshot_count"] = int(db.execute(
+                "SELECT COUNT(*) FROM review_snapshots WHERE cycle_id=?", (cycle["cycle_id"],)
+            ).fetchone()[0])
+            cycle["application_progress"] = self._cycle_application_progress(db, cycle)
+        current_cycle = next(
+            (cycle for cycle in cycles if cycle.get("cycle_id") == item.get("current_cycle_id")), None
+        )
+        item["current_cycle"] = current_cycle
+        item["cycles"] = cycles
+        item["cycle_count"] = len(cycles)
+        item["review_snapshot_count"] = int(db.execute(
+            "SELECT COUNT(*) FROM review_snapshots WHERE jira_key=?", (row["jira_key"],)
+        ).fetchone()[0])
         item["pass_readiness"] = self._pass_readiness(db, str(row["jira_key"]))
         return item
+
+    def _cycle_application_progress(
+        self, db: sqlite3.Connection, cycle: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Return current-cycle state per application without mixing older Sprints."""
+        cycle_id = str(cycle.get("cycle_id") or "")
+        scope = cycle.get("mr_scope") if isinstance(cycle.get("mr_scope"), list) else []
+        expected = {
+            review_application_from_scope(item)
+            for item in scope
+            if isinstance(item, dict)
+        }
+        run_rows = db.execute(
+            "SELECT * FROM review_runs WHERE cycle_id=? ORDER BY run_number", (cycle_id,)
+        ).fetchall()
+        latest: dict[str, sqlite3.Row] = {}
+        report_counts: dict[str, int] = {}
+        for run in run_rows:
+            application = str(run["application"] or "").strip()
+            if application not in APPLICATION_ORDER:
+                application = next(iter(expected)) if len(expected) == 1 else "Unmapped"
+            expected.add(application)
+            report_counts[application] = report_counts.get(application, 0) + 1
+            latest[application] = run
+        group_running = bool(db.execute(
+            "SELECT 1 FROM review_run_groups WHERE cycle_id=? AND status IN ('queued','running') LIMIT 1",
+            (cycle_id,),
+        ).fetchone())
+        rows: list[dict[str, Any]] = []
+        blocking = blocking_severities()
+        for application in sorted(expected, key=lambda item: APPLICATION_ORDER.index(item) if item in APPLICATION_ORDER else 99):
+            run = latest.get(application)
+            finding_count = 0
+            handled_count = 0
+            pending_blockers = 0
+            if run:
+                findings = db.execute("SELECT * FROM findings WHERE run_id=?", (run["id"],)).fetchall()
+                finding_count = len(findings)
+                for finding in findings:
+                    handling = db.execute(
+                        "SELECT * FROM finding_handlings WHERE finding_id=? ORDER BY updated_at DESC LIMIT 1",
+                        (finding["id"],),
+                    ).fetchone()
+                    if handling:
+                        handled_count += 1
+                    if str(finding["severity"]).title() not in blocking:
+                        continue
+                    accepted = False
+                    if handling and str(handling["approval_status"] or "") in {"approved", "not-required"}:
+                        accepted = str(handling["disposition"] or "") == "not-issue" or bool(handling["manager_override"])
+                    if not accepted:
+                        pending_blockers += 1
+            if not run:
+                state = "generating" if group_running else "without-report"
+            elif str(run["status"] or "").lower() in {"failed", "generation-failed", "rescan-failed"}:
+                state = "failed"
+            elif str(cycle.get("pass_status") or "").lower() == "passed":
+                state = "review-pass"
+            elif pending_blockers:
+                state = "handling"
+            else:
+                state = "ready-for-pass"
+            rows.append(
+                {
+                    "application": application,
+                    "state": state,
+                    "report_count": report_counts.get(application, 0),
+                    "finding_count": finding_count,
+                    "handled_count": handled_count,
+                    "pending_blockers": pending_blockers,
+                }
+            )
+        return rows
 
     def _pass_readiness(self, db: sqlite3.Connection, jira_key: str) -> dict[str, Any]:
         issue = db.execute("SELECT * FROM review_issues WHERE jira_key=?", (jira_key.upper(),)).fetchone()
         if not issue or not issue["latest_run_id"]:
             return {"ready": False, "message": "No completed Review Run is available.", "pending_blockers": []}
         run_id = str(issue["latest_run_id"])
-        findings = db.execute("SELECT * FROM findings WHERE run_id=?", (run_id,)).fetchall()
+        latest_run = db.execute("SELECT run_group_id FROM review_runs WHERE id=?", (run_id,)).fetchone()
+        run_group_id = str(latest_run["run_group_id"] or "") if latest_run else ""
+        run_ids = [run_id]
+        if run_group_id:
+            run_ids = [
+                str(row["id"])
+                for row in db.execute(
+                    "SELECT id FROM review_runs WHERE run_group_id=? ORDER BY run_number", (run_group_id,)
+                )
+            ] or [run_id]
+        placeholders = ",".join("?" for _ in run_ids)
+        findings = db.execute(f"SELECT * FROM findings WHERE run_id IN ({placeholders})", run_ids).fetchall()
         pending: list[dict[str, Any]] = []
         manager_exceptions = 0
         for finding in findings:
@@ -720,6 +1767,8 @@ class WorkflowStore:
             "blocking_severities": sorted(blocking_severities()),
             "manager_exceptions": manager_exceptions,
             "run_id": run_id,
+            "run_ids": run_ids,
+            "run_group_id": run_group_id,
         }
 
     def _drafts(self, db: sqlite3.Connection, jira_key: str = "") -> list[dict[str, Any]]:
@@ -749,6 +1798,106 @@ class WorkflowStore:
         item["description_adf"] = json.loads(item.pop("description_adf_json"))
         return item
 
+    def _description_snapshot(self, db: sqlite3.Connection, snapshot_id: str) -> dict[str, Any]:
+        row = db.execute("SELECT * FROM description_snapshots WHERE id=?", (snapshot_id,)).fetchone()
+        if not row:
+            raise KeyError("Description Snapshot was not found.")
+        return self._decoded_row(
+            row, ("adf_json", "attachments_json", "code_mrs_json", "deferred_mrs_json")
+        )
+
+    def _review_snapshot(self, db: sqlite3.Connection, snapshot_id: str) -> dict[str, Any]:
+        row = db.execute("SELECT * FROM review_snapshots WHERE id=?", (snapshot_id,)).fetchone()
+        if not row:
+            raise KeyError("Review Snapshot was not found.")
+        return self._decoded_row(row, ("payload_json",))
+
+    def _review_snapshot_payload(self, db: sqlite3.Connection, cycle: sqlite3.Row) -> dict[str, Any]:
+        cycle_id = str(cycle["cycle_id"])
+        jira_key = str(cycle["jira_key"])
+        issue = self._row(db.execute("SELECT * FROM review_issues WHERE jira_key=?", (jira_key,)).fetchone())
+        groups: list[dict[str, Any]] = []
+        for group_row in db.execute(
+            "SELECT * FROM review_run_groups WHERE cycle_id=? ORDER BY created_at", (cycle_id,)
+        ):
+            group = self._row(group_row)
+            runs: list[dict[str, Any]] = []
+            for run_row in db.execute(
+                "SELECT * FROM review_runs WHERE run_group_id=? ORDER BY project_type, run_number", (group["id"],)
+            ):
+                run = self._decoded_row(run_row, ("severity_counts_json",))
+                findings: list[dict[str, Any]] = []
+                for finding_row in db.execute(
+                    "SELECT * FROM findings WHERE run_id=? ORDER BY CAST(report_index AS INTEGER), report_index",
+                    (run["id"],),
+                ):
+                    finding = self._decoded_row(finding_row, ("details_json",))
+                    handling = db.execute(
+                        "SELECT * FROM finding_handlings WHERE finding_id=? ORDER BY updated_at DESC LIMIT 1",
+                        (finding["id"],),
+                    ).fetchone()
+                    finding["handling"] = self._row(handling) if handling else None
+                    findings.append(finding)
+                run["findings"] = findings
+                runs.append(run)
+            group["runs"] = runs
+            groups.append(group)
+        descriptions = [
+            self._description_snapshot(db, str(row["id"]))
+            for row in db.execute(
+                "SELECT id FROM description_snapshots WHERE cycle_id=? ORDER BY captured_at, version", (cycle_id,)
+            )
+        ]
+        deferred = [
+            self._decoded_row(row, ("evidence_json",))
+            for row in db.execute(
+                "SELECT * FROM deferred_release_resources WHERE cycle_id=? ORDER BY created_at", (cycle_id,)
+            )
+        ]
+        discussions = [
+            self._row(row)
+            for row in db.execute(
+                """SELECT id, run_id, finding_id, author, kind, created_at FROM discussions
+                   WHERE cycle_id=? ORDER BY created_at""",
+                (cycle_id,),
+            )
+        ]
+        passes = [
+            self._decoded_row(row, ("policy_json",))
+            for row in db.execute(
+                "SELECT * FROM pass_records WHERE cycle_id=? ORDER BY created_at", (cycle_id,)
+            )
+        ]
+        return {
+            "issue": issue,
+            "cycle": self._decoded_row(cycle, ("status_transition_json", "mr_scope_json")),
+            "run_groups": groups,
+            "description_snapshots": descriptions,
+            "deferred_resources": deferred,
+            "discussion_references": discussions,
+            "pending_jira": self._drafts(db, jira_key),
+            "passes": passes,
+            "pass_readiness": self._pass_readiness(db, jira_key),
+        }
+
+    @staticmethod
+    def _refresh_release_gate_status(db: sqlite3.Connection, cycle_id: str, now: str) -> None:
+        statuses = [
+            str(row["status"])
+            for row in db.execute(
+                "SELECT status FROM deferred_release_resources WHERE cycle_id=? AND status<>'superseded'", (cycle_id,)
+            )
+        ]
+        gate_status = "pending"
+        if "blocked" in statuses:
+            gate_status = "blocked"
+        elif statuses and all(status == "verified" for status in statuses):
+            gate_status = "ready"
+        db.execute(
+            "UPDATE review_cycles SET release_gate_status=?, updated_at=? WHERE cycle_id=?",
+            (gate_status, now, cycle_id),
+        )
+
     def _audit(self, db: sqlite3.Connection, jira_key: str, actor: str, event_type: str, payload: dict[str, Any]) -> None:
         db.execute(
             "INSERT INTO audit_events(id, jira_key, actor, event_type, payload_json, created_at) VALUES(?, ?, ?, ?, ?, ?)",
@@ -758,6 +1907,18 @@ class WorkflowStore:
     @staticmethod
     def _row(row: sqlite3.Row | None) -> dict[str, Any]:
         return dict(row) if row is not None else {}
+
+    @classmethod
+    def _decoded_row(cls, row: sqlite3.Row | None, json_columns: tuple[str, ...]) -> dict[str, Any]:
+        item = cls._row(row)
+        for column in json_columns:
+            raw = item.pop(column, None)
+            target = column[:-5] if column.endswith("_json") else column
+            try:
+                item[target] = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, ValueError):
+                item[target] = {} if column.endswith("_json") else None
+        return item
 
 
 _STORE: WorkflowStore | None = None

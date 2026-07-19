@@ -31,7 +31,7 @@ from .config import (
 from .diff_parser import parse_unified_diff
 from .git_version_review import extract_git_version_lock_context, parse_build_summary, parse_git_version_repository_entries
 from .gitlab_client import GitLabClient, detect_jira_key, parse_mr_url, parse_repository_url
-from .jira_client import JiraClient, JiraIssue
+from .jira_client import JiraClient, JiraIssue, select_current_sprint
 from .local_workspaces import (
     WorkspaceEntry,
     git_tools_project_entries,
@@ -152,11 +152,24 @@ def _attach_git_tools_project_match(review_input: ReviewInput) -> None:
         review_input.metadata["git_tools_project_type"] = match["project_type"]
     if match.get("llm_model"):
         review_input.metadata["llm_model_config"] = match["llm_model"]
+    if match.get("application"):
+        review_input.metadata["application"] = match["application"]
     if match.get("dev_branch"):
         review_input.metadata["dev_branch"] = match["dev_branch"]
 
+    _attach_release_gate_project_scope(review_input)
+
     require_match = app_config_bool("git_tools.require_mr_match", "GIT_TOOLS_REQUIRE_MR_MATCH", False)
-    if require_match and match["status"] == "unmatched":
+    release_role = str(review_input.metadata.get("release_gate_role") or "").strip().lower()
+    require_release_match = (
+        release_role == "git_version"
+        and app_config_bool(
+            "review.release_gate.require_project_match",
+            "RELEASE_GATE_REQUIRE_PROJECT_MATCH",
+            True,
+        )
+    )
+    if (require_match or require_release_match) and match["status"] != "matched":
         raise ValueError(
             f"MR project {project_path} is not defined in {match['config']} "
             f"({match['configured_count']} configured GitLab project(s))."
@@ -200,6 +213,7 @@ def _git_tools_project_match(project_path: str) -> dict[str, Any]:
                 "project_name": entry.project_name,
                 "project_type": entry.project_type,
                 "llm_model": entry.llm_model,
+                "application": entry.application,
                 "dev_branch": entry.dev_branch,
             }
         )
@@ -207,6 +221,46 @@ def _git_tools_project_match(project_path: str) -> dict[str, Any]:
 
     result["status"] = "unmatched"
     return result
+
+
+def _attach_release_gate_project_scope(review_input: ReviewInput) -> None:
+    """Classify each release-resource MR by its configured GitLab project."""
+    role = _release_gate_branch_role(review_input.source_branch)
+    if not role and str(review_input.metadata.get("mr_type") or "").strip().upper() == "GIT_VERSION":
+        role = "git_version"
+    if not role:
+        return
+
+    metadata = review_input.metadata
+    candidate = str(
+        metadata.get("project_name")
+        or metadata.get("git_tools_project_name")
+        or metadata.get("git_tools_module")
+        or metadata.get("git_tools_project_path")
+        or review_input.project
+        or "Project"
+    ).strip()
+    normalized = re.sub(r"[^a-z0-9]+", "-", candidate.lower()).strip("-")
+    aliases = {
+        "wvadmin": "WVAdmin",
+        "wvadmin-build": "WVAdmin",
+        "itrade-client": "iTrade Client",
+        "itrade-client-build": "iTrade Client",
+        "service-terminal": "Services Terminal",
+        "service-terminal-build": "Services Terminal",
+        "services-terminal": "Services Terminal",
+        "services-terminal-build": "Services Terminal",
+        "dps": "DPS",
+        "dps-build": "DPS",
+    }
+    metadata.update(
+        {
+            "release_gate_role": role,
+            "release_gate_project": aliases.get(normalized, candidate),
+            "release_gate_project_path": metadata.get("git_tools_project_path") or metadata.get("gitlab_project_path") or "",
+            "release_gate_project_match": metadata.get("git_tools_project_match") or "unknown",
+        }
+    )
 
 
 def _configured_dev_branches(project_match: dict[str, Any]) -> list[str]:
@@ -352,6 +406,11 @@ def _branch_type_exclusion(item: dict[str, Any], branch_type: str) -> dict[str, 
         "project_path": item.get("project_path", ""),
         "source_branch": item.get("source_branch", ""),
         "target_branch": item.get("target_branch", ""),
+        "mr_id": item.get("mr_id") or item.get("iid", ""),
+        "head_sha": item.get("head_sha") or item.get("commit") or item.get("sha", ""),
+        "base_sha": item.get("base_sha", ""),
+        "merge_commit_sha": item.get("merge_commit_sha", ""),
+        "squash_commit_sha": item.get("squash_commit_sha", ""),
         "ignored_branch_type": branch_type,
         "release_gate_role": release_role,
         "required_review_mode": "mr" if release_role == "git_version" else "",
@@ -389,11 +448,22 @@ def _hydrate_deferred_release_gate_resources(
     resources: list[dict[str, Any]],
     jira_key: str,
     sprint: str = "",
+    cycle_id: str = "",
 ) -> list[dict[str, Any]]:
     """Fetch file paths for discovery-time Company Config/SCR exclusions."""
     hydrated: list[dict[str, Any]] = []
     for resource in resources:
-        item = dict(resource)
+        item = {
+            **resource,
+            **deferred_release_resource_identity(
+                {
+                    **resource,
+                    "jira_key": resource.get("jira_key") or jira_key,
+                    "sprint_id": resource.get("sprint_id") or sprint,
+                    "cycle_id": resource.get("cycle_id") or cycle_id,
+                }
+            ),
+        }
         if _normalize_branch_type(str(item.get("release_gate_role") or "")) not in {"company_config", "scr"}:
             hydrated.append(item)
             continue
@@ -413,6 +483,20 @@ def _hydrate_deferred_release_gate_resources(
                 attach_jira_metadata=False,
             )
             item["changed_file_paths"] = [changed.path for changed in review_input.changed_files if changed.path]
+            item.update(
+                deferred_release_resource_identity(
+                    {
+                        **item,
+                        "jira_key": jira_key,
+                        "sprint_id": item.get("sprint_id") or sprint,
+                        "cycle_id": item.get("cycle_id") or cycle_id,
+                        "project_path": review_input.metadata.get("gitlab_project_path", ""),
+                        "mr_id": review_input.mr_id,
+                        "head_sha": review_input.commit,
+                        "base_sha": review_input.metadata.get("diff_base_sha", ""),
+                    }
+                )
+            )
         except Exception as exc:
             item["changed_files_error"] = str(exc)[:500]
         hydrated.append(item)
@@ -635,17 +719,28 @@ def _review_fetched_inputs_for_issue(
     report_owner: str = "",
     deferred_release_gate_resources: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    run_group_seed = "|".join(
+        [
+            issue.key,
+            sprint or issue.sprint,
+            min((item.generated_at.isoformat() for item in fetched_inputs), default=""),
+        ]
+        + sorted(f"{item.metadata.get('gitlab_project_path', item.project)}!{item.mr_id}@{item.commit}" for item in fetched_inputs)
+    )
+    run_group_id = f"rg-{hashlib.sha256(run_group_seed.encode('utf-8')).hexdigest()[:20]}"
     combined_input = _combine_jira_issue_review_inputs(
         issue=issue,
         mr_inputs=fetched_inputs,
         discovered_items=discovered_items,
         configured_project_paths=configured_project_paths,
+        run_group_id=run_group_id,
     )
     if deferred_release_gate_resources:
         combined_input.metadata["deferred_release_gate_resources"] = deferred_release_gate_resources
     if report_owner:
         combined_input.metadata["web_report_owner"] = report_owner
     combined_input.sprint = sprint or combined_input.sprint
+    _attach_review_scope_metadata(combined_input, issue)
     if context_repo:
         _attach_project_context(combined_input, context_repo)
     _ensure_detailed_jira_review_runtime()
@@ -701,12 +796,14 @@ def _review_fetched_inputs_for_issue(
             mr_inputs=chunk_inputs,
             discovered_items=discovered_items,
             configured_project_paths=configured_project_paths,
+            run_group_id=run_group_id,
         )
         if deferred_release_gate_resources:
             chunk_input.metadata["deferred_release_gate_resources"] = deferred_release_gate_resources
         if report_owner:
             chunk_input.metadata["web_report_owner"] = report_owner
         chunk_input.sprint = sprint or chunk_input.sprint
+        _attach_review_scope_metadata(chunk_input, issue)
         chunk_input.mr_id = f"multi-mr-{len(chunk_inputs)}-chunk-{chunk_index}"
         chunk_input.metadata["chunked_review"] = True
         chunk_input.metadata["chunk_index"] = chunk_index
@@ -980,8 +1077,12 @@ def _mr_resume_key(mr_url: str) -> str:
 
 
 def _jira_group_resume_key(issue_key: str, items: list[dict[str, Any]]) -> str:
-    urls = sorted(str(item.get("mr_url") or "") for item in items if item.get("mr_url"))
-    return stable_resume_key("jira-consolidated-mrs", issue_key.upper(), urls)
+    revisions = sorted(
+        mr_revision_identity(item)["revision_key"] or str(item.get("mr_url") or "")
+        for item in items
+        if item.get("mr_url") or item.get("project_path")
+    )
+    return stable_resume_key("jira-consolidated-mrs", issue_key.upper(), revisions)
 
 
 def _issue_branch_resume_key(item: dict[str, Any], jira_key: str) -> str:
@@ -1010,6 +1111,64 @@ def review_from_mr_url(
     return analyze(review_input)
 
 
+def review_release_gate_from_mr_url(
+    mr_url: str,
+    jira_key: str = "",
+    sprint: str = "",
+    context_repo: Path | str | None = None,
+    progress: Any = None,
+) -> ReviewResult:
+    """Run the explicit GIT_VERSION release gate used by the Web workflow."""
+    _progress(progress, "release-gate-fetch", f"Loading GIT_VERSION MR {mr_url}", mr_url=mr_url, sprint=sprint)
+    review_input = _review_input_from_mr_url(
+        mr_url,
+        jira_key=jira_key,
+        sprint=sprint,
+        context_repo=context_repo,
+    )
+    if str(review_input.metadata.get("mr_type") or "").strip().upper() != "GIT_VERSION":
+        raise ValueError(
+            "Release Gate requires a GIT_VERSION MR containing versioned git_version.yml/build.yml resources."
+        )
+    gate = review_input.metadata.get("release_gate") or {}
+    _progress(
+        progress,
+        "release-gate-preflight",
+        f"Release Gate preflight {str(gate.get('status') or 'unknown').upper()}",
+        release_gate_status=str(gate.get("status") or "unknown"),
+        source_repository_count=int(gate.get("source_repository_count") or 0),
+        build_resource_count=int(gate.get("build_resource_count") or 0),
+        blocker_count=len(gate.get("errors") or []),
+    )
+    result = analyze(review_input)
+    configured_blockers = {
+        normalize_severity(value)
+        for value in app_config_list(
+            "review_workflow.blocking_severities",
+            "REVIEW_BLOCKING_SEVERITIES",
+            ["Critical", "High"],
+        )
+    }
+    finding_blockers = [
+        finding
+        for finding in result.findings
+        if normalize_severity(finding.severity) in configured_blockers
+    ]
+    gate["deterministic_status"] = str(gate.get("status") or "unknown").lower()
+    gate["finding_blocker_count"] = len(finding_blockers)
+    gate["status"] = "blocked" if gate.get("errors") or finding_blockers else "ready"
+    review_input.metadata["release_gate"] = gate
+    _progress(
+        progress,
+        "release-gate-analyzed",
+        f"Release Gate analysis completed: {str(gate.get('status') or 'unknown').upper()}",
+        release_gate_status=str(gate.get("status") or "unknown"),
+        finding_count=len(result.findings),
+        severity_counts=result.severity_counts,
+    )
+    return result
+
+
 def _review_input_from_mr_url(
     mr_url: str,
     jira_key: str = "",
@@ -1026,6 +1185,10 @@ def _review_input_from_mr_url(
         _attach_jira_issue_metadata(review_input)
     if attach_context:
         _attach_project_context(review_input, context_repo)
+        target_context = review_input.metadata.get("current_target_context")
+        if isinstance(target_context, dict):
+            target_context["project_context_source"] = review_input.metadata.get("project_context_source", "")
+            target_context["project_context_ref"] = review_input.metadata.get("project_context_ref", review_input.target_branch)
     attach_git_version_locked_repository_reviews(review_input, client)
     return review_input
 
@@ -1047,6 +1210,67 @@ def _attach_jira_issue_metadata(review_input: ReviewInput) -> None:
             'jira_description': issue.final_description,
             "jira_status": issue.status,
             "jira_issue_type": issue.issue_type,
+            "jira_sprint_memberships": [item.to_dict() for item in issue.sprint_memberships],
+            "jira_current_sprint_id": issue.current_sprint_id,
+            "jira_current_sprint_state": issue.current_sprint_state,
+        }
+    )
+    _attach_review_scope_metadata(review_input, issue)
+
+
+def _attach_review_scope_metadata(review_input: ReviewInput, issue: JiraIssue) -> None:
+    """Separate actionable revision scope from target and historical context."""
+    comments = [str(item).strip() for item in (issue.description_comments or []) if str(item).strip()]
+    current_follow_up = comments[-1] if comments else ""
+    historical_parts = [issue.description.strip()]
+    historical_parts.extend(comments[:-1])
+    related = review_input.metadata.get("related_merge_requests") or []
+    if not related and review_input.mr_url:
+        related = [
+            {
+                "project_path": review_input.metadata.get("gitlab_project_path") or review_input.project,
+                "mr_id": review_input.mr_id,
+                "head_sha": review_input.commit,
+                "base_sha": review_input.metadata.get("diff_base_sha", ""),
+                "source_branch": review_input.source_branch,
+                "target_branch": review_input.target_branch,
+            }
+        ]
+    cycle_id = str(review_input.metadata.get("cycle_id") or "").strip()
+    selected_sprint = select_current_sprint(
+        issue.sprint_memberships,
+        preferred_id=review_input.sprint,
+        preferred_name=review_input.sprint,
+    )
+    review_input.metadata.update(
+        {
+            "current_review_scope": {
+                "jira_key": issue.key,
+                "sprint": (selected_sprint.name if selected_sprint else "") or review_input.sprint or issue.sprint,
+                "sprint_id": (selected_sprint.id if selected_sprint else "") or issue.current_sprint_id,
+                "sprint_state": (selected_sprint.state if selected_sprint else "") or issue.current_sprint_state,
+                "cycle_id": cycle_id,
+                "current_follow_up_comment": current_follow_up,
+                "merge_requests": related,
+                "diff_policy": "Only base_sha to head_sha incremental diffs in this run are review targets.",
+            },
+            "current_target_context": {
+                "policy": "Target-branch latest related code is context only, not a review finding source by itself.",
+                "target_branches": sorted(
+                    {
+                        str(item.get("target_branch") or "").strip()
+                        for item in related
+                        if isinstance(item, dict) and str(item.get("target_branch") or "").strip()
+                    }
+                ),
+                "project_context_source": review_input.metadata.get("project_context_source", ""),
+            },
+            "historical_requirement_context": {
+                "original_description": issue.description.strip(),
+                "previous_formal_comments": comments[:-1],
+                "summary": "\n\n".join(part for part in historical_parts if part),
+                "excludes_previous_cycle_diffs": True,
+            },
         }
     )
 
@@ -1098,6 +1322,7 @@ def review_reviewer_merge_requests(
                 "responsible": review_input.metadata.get("responsible", ""),
                 "project_name": review_input.metadata.get("project_name", ""),
                 "project_type": review_input.metadata.get("project_type", ""),
+                "application": review_input.metadata.get("application", ""),
                 "llm_model_config": review_input.metadata.get("llm_model_config", ""),
             }
             _attach_project_context(review_input, None)
@@ -1189,6 +1414,7 @@ def review_sprint_merge_requests(
     progress: Any = None,
     report_owner: str = "",
     force_rerun: bool = False,
+    workflow_review_mode: str = "issue",
 ) -> dict[str, Any]:
     jira_project_key = jira_project_key or app_config_str("jira.project_key", "JIRA_PROJECT_KEY", "ECHNL")
     state = state or app_config_str("review.mr_states", "SPRINT_MR_STATE", "opened,merged")
@@ -1223,6 +1449,7 @@ def review_sprint_merge_requests(
             "sprint": sprint,
             "jira_project_key": jira_project_key,
             "skipped_status_issues": skipped_issues,
+            "workflow_review_mode": workflow_review_mode,
         },
         sprint=sprint,
     )
@@ -1298,7 +1525,15 @@ def _review_issue_collection_merge_requests(
 ) -> dict[str, Any]:
     jira = JiraClient()
     gitlab = GitLabClient(base_url=_gitlab_base_url())
-    discovered = _discover_sprint_merge_requests(jira, gitlab, issues, state=state, limit=limit)
+    discovered = _discover_sprint_merge_requests(
+        jira,
+        gitlab,
+        issues,
+        state=state,
+        limit=limit,
+        progress=progress,
+        source_label=source_label,
+    )
     _emit_discovery_progress(progress, source_label, discovered)
     if list_only:
         return {
@@ -1325,6 +1560,7 @@ def _review_issue_collection_merge_requests(
     excluded_dev_branch_mrs: list[dict[str, Any]] = list(discovered.get("excluded_dev_branch_mrs", []))
     excluded_branch_type_mrs: list[dict[str, Any]] = list(discovered.get("excluded_branch_type_mrs", []))
     excluded_state_mrs: list[dict[str, Any]] = list(discovered.get("excluded_state_mrs", []))
+    excluded_cycle_revision_mrs: list[dict[str, Any]] = []
     skipped_completed = 0
     project_paths = _sprint_branch_project_paths(gitlab)
     issues_by_key = {issue.key.upper(): issue for issue in issues}
@@ -1412,16 +1648,32 @@ def _review_issue_collection_merge_requests(
         except KeyboardInterrupt:
             tracker.mark_interrupted(resume_key, resume_item)
             raise
+        fetched_inputs, cycle_exclusions = _select_fetched_cycle_revisions(issue.key, fetched_inputs)
+        if cycle_exclusions:
+            excluded_cycle_revision_mrs.extend(cycle_exclusions)
+            issue_excluded_count += len(cycle_exclusions)
+            _progress(
+                progress,
+                "skip-cycle-revision",
+                f"SKIP {len(cycle_exclusions)} unchanged MR revision(s) already reviewed for {issue.key}",
+                index=issue_index,
+                total=len(grouped_items),
+                jira_key=issue.key,
+                excluded_revisions=cycle_exclusions,
+            )
         if not fetched_inputs:
             if issue_excluded_count:
+                cycle_only = bool(cycle_exclusions) and len(cycle_exclusions) == issue_excluded_count
                 excluded_item = {
                     "jira_key": issue.key,
                     "jira_summary": issue.summary,
                     "jira_status": issue.status,
-                    "review_mode": "excluded-dev-branch",
+                    "review_mode": "no-new-mr-revisions" if cycle_only else "excluded-mrs",
                     "mr_count": len(issue_items),
                     "excluded_dev_branch_count": issue_excluded_count,
-                    "resume_status": "excluded-dev-branch",
+                    "excluded_cycle_revision_count": len(cycle_exclusions),
+                    "resume_status": "no-new-mr-revisions" if cycle_only else "excluded-mrs",
+                    "conclusion": "No new MR revisions to review." if cycle_only else "All MR revisions were routed or excluded.",
                 }
                 reviewed.append(excluded_item)
                 tracker.mark_done(resume_key, excluded_item)
@@ -1433,6 +1685,8 @@ def _review_issue_collection_merge_requests(
             continue
 
         try:
+            for fetched in fetched_inputs:
+                fetched.metadata["workflow_review_mode"] = str(source_metadata.get("workflow_review_mode") or "issue")
             reviewed_item = _review_fetched_inputs_for_issue(
                 issue=issue,
                 fetched_inputs=fetched_inputs,
@@ -1482,6 +1736,42 @@ def _review_issue_collection_merge_requests(
             _print_failed(issue_index, len(grouped_items), issue.key, str(exc))
             _progress(progress, "failed", f"FAILED {issue.key}: {exc}", index=issue_index, total=len(grouped_items), jira_key=issue.key, error=str(exc))
 
+    reviewed_keys = {str(item.get("jira_key") or "").upper() for item in reviewed}
+    for deferred_issue in issues:
+        if deferred_issue.key.upper() in reviewed_keys:
+            continue
+        deferred = [
+            item
+            for item in excluded_branch_type_mrs
+            if str(item.get("jira_key") or "").upper() == deferred_issue.key.upper()
+            and _normalize_branch_type(str(item.get("release_gate_role") or "")) in {"company_config", "scr"}
+        ]
+        if not deferred:
+            continue
+        hydrated = _hydrate_deferred_release_gate_resources(
+            deferred,
+            deferred_issue.key,
+            sprint or deferred_issue.sprint,
+        )
+        reviewed.append(
+            {
+                "jira_key": deferred_issue.key,
+                "jira_summary": deferred_issue.summary,
+                "jira_status": deferred_issue.status,
+                "review_mode": "deferred-only",
+                "code_mr_count": 0,
+                "mr_count": 0,
+                "deferred_resource_count": len(hydrated),
+                "deferred_release_gate_resources": hydrated,
+                "issue_review_status": "no-code-changes-to-review",
+                "code_review_status": "complete",
+                "release_gate_status": "pending",
+                "conclusion": "No code changes to review; deferred resources await GIT_VERSION Release Gate.",
+                "severity_counts": {},
+                "finding_count": 0,
+            }
+        )
+
     return {
         **source_metadata,
         "source_kind": source_kind,
@@ -1496,6 +1786,7 @@ def _review_issue_collection_merge_requests(
         "excluded_dev_branch_mrs": excluded_dev_branch_mrs,
         "excluded_branch_type_mrs": excluded_branch_type_mrs,
         "excluded_state_mrs": excluded_state_mrs,
+        "excluded_cycle_revision_mrs": excluded_cycle_revision_mrs,
         "errors": errors,
         "items": reviewed,
         "discovered_mrs": discovered["mrs"],
@@ -1551,7 +1842,7 @@ def review_fingerprint_from_merge_requests(items: list[dict[str, Any]]) -> dict[
                 "state": str(item.get("state") or item.get("mr_state") or item.get("status") or "").strip(),
                 "source_branch": str(item.get("source_branch") or "").strip(),
                 "target_branch": str(item.get("target_branch") or "").strip(),
-                "commit": str(item.get("commit") or item.get("sha") or "").strip(),
+                "commit": str(item.get("head_sha") or item.get("commit") or item.get("sha") or "").strip(),
                 "updated_at": str(item.get("updated_at") or item.get("mr_updated_at") or "").strip(),
                 "merged_at": str(item.get("merged_at") or item.get("mr_merged_at") or "").strip(),
             }
@@ -1569,6 +1860,227 @@ def review_fingerprint_from_merge_requests(items: list[dict[str, Any]]) -> dict[
         "stable_items": stable_items,
         "mr_count": len(normalized),
     }
+
+
+def mr_revision_identity(item: dict[str, Any]) -> dict[str, str]:
+    """Return the cycle-safe GitLab project + IID + head SHA identity."""
+    mr_url = str(item.get("mr_url") or item.get("web_url") or "").strip()
+    project_path = str(item.get("project_path") or item.get("gitlab_project") or item.get("project") or "").strip("/")
+    iid = str(item.get("mr_id") or item.get("iid") or "").strip()
+    if mr_url and (not project_path or not iid):
+        try:
+            ref = parse_mr_url(mr_url)
+            project_path = project_path or ref.project_path
+            iid = iid or ref.iid
+        except Exception:
+            pass
+    head_sha = str(item.get("head_sha") or item.get("commit") or item.get("sha") or "").strip().lower()
+    stable_key = f"{project_path.casefold()}!{iid}"
+    revision_key = f"{stable_key}@{head_sha}" if head_sha else stable_key
+    return {
+        "project_path": project_path,
+        "mr_iid": iid,
+        "head_sha": head_sha,
+        "stable_key": stable_key,
+        "revision_key": revision_key,
+        "revision_fingerprint": hashlib.sha256(revision_key.encode("utf-8")).hexdigest(),
+    }
+
+
+def select_cycle_mr_revisions(
+    candidates: list[dict[str, Any]],
+    previously_reviewed: list[dict[str, Any]] | None = None,
+    decisions: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Select only new MR revisions while retaining auditable include/exclude rows.
+
+    Explicit decisions may be keyed by revision key, revision fingerprint, or
+    stable project!IID key. A changed head SHA is always a distinct revision.
+    Missing SHA candidates stay included because they cannot be safely proven old.
+    """
+    previous = {
+        mr_revision_identity(item)["revision_key"]
+        for item in (previously_reviewed or [])
+        if mr_revision_identity(item)["head_sha"]
+    }
+    normalized_decisions = {str(key): str(value).strip().casefold() for key, value in (decisions or {}).items()}
+    included: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    for candidate in candidates:
+        identity = mr_revision_identity(candidate)
+        decision = next(
+            (
+                normalized_decisions[key]
+                for key in (identity["revision_key"], identity["revision_fingerprint"], identity["stable_key"])
+                if key in normalized_decisions
+            ),
+            "",
+        )
+        unchanged = bool(identity["head_sha"] and identity["revision_key"] in previous)
+        selected = decision in {"include", "included", "yes", "true", "1"} or (
+            decision not in {"exclude", "excluded", "no", "false", "0"} and not unchanged
+        )
+        reason = "explicit-include" if selected and decision else "new-revision"
+        if not selected:
+            reason = "explicit-exclude" if decision else "reviewed-unchanged-revision"
+        row = {**candidate, **identity, "selected": selected, "selection_reason": reason}
+        rows.append(row)
+        (included if selected else excluded).append(row)
+    return {
+        "schema": "code_reviewer_cycle_mr_selection_v1",
+        "candidate_count": len(rows),
+        "included_count": len(included),
+        "excluded_count": len(excluded),
+        "included": included,
+        "excluded": excluded,
+        "items": rows,
+    }
+
+
+def previously_reviewed_cycle_revisions(jira_key: str) -> list[dict[str, Any]]:
+    """Load immutable MR revision identities already persisted for older/current Cycles.
+
+    The import stays local so the CLI review service remains usable without
+    initializing workflow storage until cycle-aware selection is required.
+    """
+    try:
+        from .workflow_store import workflow_store
+
+        cycles = workflow_store().list_cycles((jira_key or "").strip().upper())
+    except Exception:
+        return []
+    revisions: list[dict[str, Any]] = []
+    for cycle in cycles:
+        scope = cycle.get("mr_scope_json") or cycle.get("mr_scope") or []
+        if not isinstance(scope, list):
+            continue
+        for item in scope:
+            if not isinstance(item, dict):
+                continue
+            identity = mr_revision_identity(item)
+            if identity["project_path"] and identity["mr_iid"] and identity["head_sha"]:
+                revisions.append({**item, **identity, "cycle_id": cycle.get("cycle_id", "")})
+    return revisions
+
+
+def _select_fetched_cycle_revisions(
+    jira_key: str,
+    fetched_inputs: list[ReviewInput],
+    decisions: dict[str, str] | None = None,
+) -> tuple[list[ReviewInput], list[dict[str, Any]]]:
+    previous = previously_reviewed_cycle_revisions(jira_key)
+    candidates: list[dict[str, Any]] = []
+    by_key: dict[str, ReviewInput] = {}
+    for review_input in fetched_inputs:
+        row = {
+            "jira_key": jira_key,
+            "project_path": review_input.metadata.get("gitlab_project_path") or review_input.project,
+            "mr_id": review_input.mr_id,
+            "mr_url": review_input.mr_url,
+            "head_sha": review_input.commit,
+            "base_sha": review_input.metadata.get("diff_base_sha", ""),
+            "source_branch": review_input.source_branch,
+            "target_branch": review_input.target_branch,
+        }
+        identity = mr_revision_identity(row)
+        candidates.append({**row, **identity})
+        by_key[identity["revision_key"]] = review_input
+    selection = select_cycle_mr_revisions(
+        candidates,
+        previously_reviewed=previous,
+        decisions=decisions,
+    )
+    included = [by_key[item["revision_key"]] for item in selection["included"] if item["revision_key"] in by_key]
+    return included, selection["excluded"]
+
+
+def deferred_release_resource_identity(item: dict[str, Any]) -> dict[str, str]:
+    revision = mr_revision_identity(item)
+    jira_key = str(item.get("jira_key") or "").strip().upper()
+    sprint_id = str(item.get("sprint_id") or item.get("sprint") or "").strip()
+    cycle_id = str(item.get("cycle_id") or "").strip()
+    identity_key = "|".join(
+        [jira_key, sprint_id, cycle_id, revision["project_path"].casefold(), revision["mr_iid"], revision["head_sha"]]
+    )
+    return {
+        **revision,
+        "jira_key": jira_key,
+        "sprint_id": sprint_id,
+        "cycle_id": cycle_id,
+        "resource_key": identity_key,
+        "resource_fingerprint": hashlib.sha256(identity_key.encode("utf-8")).hexdigest(),
+    }
+
+
+def reconcile_deferred_release_resources(
+    resources: list[dict[str, Any]],
+    *,
+    sprint_id: str = "",
+    cycle_ids: list[str] | None = None,
+    verified_revisions: list[dict[str, Any]] | None = None,
+    contained_commit_shas: list[str] | None = None,
+) -> dict[str, Any]:
+    """Prepare deterministic deferred/GIT_VERSION reconciliation for persistence.
+
+    Commit ancestry/content verification remains the caller's GitLab/build-lock
+    responsibility; this helper consumes those verified/contained revision facts
+    and ensures only the current release scope and unseen head SHAs are pending.
+    """
+    cycle_set = {str(value) for value in (cycle_ids or []) if str(value)}
+    verified_keys = {deferred_release_resource_identity(item)["resource_key"] for item in (verified_revisions or [])}
+    contained = {str(value).strip().lower() for value in (contained_commit_shas or []) if str(value).strip()}
+    pending: list[dict[str, Any]] = []
+    verified: list[dict[str, Any]] = []
+    out_of_scope: list[dict[str, Any]] = []
+    for raw in resources:
+        identity = deferred_release_resource_identity(raw)
+        row = {**raw, **identity}
+        in_scope = (not sprint_id or identity["sprint_id"] == str(sprint_id)) and (
+            not cycle_set or identity["cycle_id"] in cycle_set
+        )
+        if not in_scope:
+            row.update({"reconciliation_status": "out-of-scope", "release_gate_pending": False})
+            out_of_scope.append(row)
+        elif identity["resource_key"] in verified_keys or identity["head_sha"] in contained:
+            row.update({"reconciliation_status": "verified", "release_gate_pending": False})
+            verified.append(row)
+        else:
+            row.update({"reconciliation_status": "pending", "release_gate_pending": True})
+            pending.append(row)
+    return {
+        "schema": "code_reviewer_deferred_reconciliation_v1",
+        "resource_count": len(resources),
+        "pending_count": len(pending),
+        "verified_count": len(verified),
+        "out_of_scope_count": len(out_of_scope),
+        "release_gate_status": "pending" if pending else "verified",
+        "pending": pending,
+        "verified": verified,
+        "out_of_scope": out_of_scope,
+    }
+
+
+def sprint_review_preflight(sprint: str, jira_project_key: str = "ECHNL") -> dict[str, Any]:
+    """Public service boundary for Web Sprint validation and mode selection."""
+    project = jira_project_key or app_config_str("jira.project_key", "JIRA_PROJECT_KEY", "ECHNL")
+    try:
+        return JiraClient().sprint_preflight(sprint, project_key=project)
+    except Exception as exc:
+        return {
+            "valid": False,
+            "accessible": False,
+            "sprint": str(sprint or "").strip(),
+            "project_key": project,
+            "issue_count": 0,
+            "all_development_done": False,
+            "review_mode": "batch-preview",
+            "requires_confirmation": False,
+            "empty": True,
+            "issues": [],
+            "not_development_done_issues": [],
+            "error": str(exc),
+        }
 
 
 def parse_jira_issue_keys(value: str) -> list[str]:
@@ -1778,7 +2290,15 @@ def review_jira_issue_merge_requests(
             "items": [],
             "discovered_mrs": [],
         }
-    discovered = _discover_sprint_merge_requests(jira, gitlab, [issue], state=state, limit=limit)
+    discovered = _discover_sprint_merge_requests(
+        jira,
+        gitlab,
+        [issue],
+        state=state,
+        limit=limit,
+        progress=progress,
+        source_label=issue.key,
+    )
     _emit_discovery_progress(progress, issue.key, discovered, jira_key=issue.key)
     if list_only:
         return {
@@ -1801,6 +2321,7 @@ def review_jira_issue_merge_requests(
     excluded_dev_branch_mrs: list[dict[str, Any]] = list(discovered.get("excluded_dev_branch_mrs", []))
     excluded_branch_type_mrs: list[dict[str, Any]] = list(discovered.get("excluded_branch_type_mrs", []))
     excluded_state_mrs: list[dict[str, Any]] = list(discovered.get("excluded_state_mrs", []))
+    excluded_cycle_revision_mrs: list[dict[str, Any]] = []
     target_output_dir = _batch_output_dir(output_dir)
     tracker = _resume_tracker(
         "jira-issue-mrs",
@@ -1869,16 +2390,31 @@ def review_jira_issue_merge_requests(
             tracker.mark_interrupted(resume_key, resume_item)
             raise
 
+    if not reviewed and fetched_inputs:
+        fetched_inputs, excluded_cycle_revision_mrs = _select_fetched_cycle_revisions(issue.key, fetched_inputs)
+        if excluded_cycle_revision_mrs:
+            issue_excluded_count += len(excluded_cycle_revision_mrs)
+            _progress(
+                progress,
+                "skip-cycle-revision",
+                f"SKIP {len(excluded_cycle_revision_mrs)} unchanged MR revision(s) already reviewed for {issue.key}",
+                jira_key=issue.key,
+                excluded_revisions=excluded_cycle_revision_mrs,
+            )
+
     if not reviewed and not fetched_inputs and discovered["mrs"]:
         if issue_excluded_count:
+            cycle_only = bool(excluded_cycle_revision_mrs) and len(excluded_cycle_revision_mrs) == issue_excluded_count
             excluded_item = {
                 "jira_key": issue.key,
                 "jira_summary": issue.summary,
                 "jira_status": issue.status,
-                "review_mode": "excluded-dev-branch",
+                "review_mode": "no-new-mr-revisions" if cycle_only else "excluded-mrs",
                 "mr_count": len(discovered["mrs"]),
                 "excluded_dev_branch_count": issue_excluded_count,
-                "resume_status": "excluded-dev-branch",
+                "excluded_cycle_revision_count": len(excluded_cycle_revision_mrs),
+                "resume_status": "no-new-mr-revisions" if cycle_only else "excluded-mrs",
+                "conclusion": "No new MR revisions to review." if cycle_only else "All MR revisions were routed or excluded.",
             }
             reviewed.append(excluded_item)
             tracker.mark_done(resume_key, excluded_item)
@@ -1939,6 +2475,34 @@ def review_jira_issue_merge_requests(
             _print_failed(1, 1, issue.key, str(exc))
             _progress(progress, "failed", f"FAILED {issue.key}: {exc}", jira_key=issue.key, error=str(exc))
 
+    if not reviewed:
+        deferred = [
+            item
+            for item in excluded_branch_type_mrs
+            if str(item.get("jira_key") or "").upper() == issue.key.upper()
+            and _normalize_branch_type(str(item.get("release_gate_role") or "")) in {"company_config", "scr"}
+        ]
+        if deferred:
+            hydrated = _hydrate_deferred_release_gate_resources(deferred, issue.key, issue.sprint)
+            reviewed.append(
+                {
+                    "jira_key": issue.key,
+                    "jira_summary": issue.summary,
+                    "jira_status": issue.status,
+                    "review_mode": "deferred-only",
+                    "code_mr_count": 0,
+                    "mr_count": 0,
+                    "deferred_resource_count": len(hydrated),
+                    "deferred_release_gate_resources": hydrated,
+                    "issue_review_status": "no-code-changes-to-review",
+                    "code_review_status": "complete",
+                    "release_gate_status": "pending",
+                    "conclusion": "No code changes to review; deferred resources await GIT_VERSION Release Gate.",
+                    "severity_counts": {},
+                    "finding_count": 0,
+                }
+            )
+
     return {
         "jira_key": issue.key,
         "jira_summary": issue.summary,
@@ -1955,6 +2519,7 @@ def review_jira_issue_merge_requests(
         "excluded_dev_branch_mrs": excluded_dev_branch_mrs,
         "excluded_branch_type_mrs": excluded_branch_type_mrs,
         "excluded_state_mrs": excluded_state_mrs,
+        "excluded_cycle_revision_mrs": excluded_cycle_revision_mrs,
         "errors": errors,
         "items": reviewed,
         "discovered_mrs": discovered["mrs"],
@@ -1966,6 +2531,7 @@ def _combine_jira_issue_review_inputs(
     mr_inputs: list[ReviewInput],
     discovered_items: list[dict[str, Any]],
     configured_project_paths: list[str],
+    run_group_id: str = "",
 ) -> ReviewInput:
     changed_files: list[ChangedFile] = []
     raw_diff_parts: list[str] = []
@@ -2002,6 +2568,15 @@ def _combine_jira_issue_review_inputs(
             "source_branch": review_input.source_branch,
             "target_branch": review_input.target_branch,
             "commit": review_input.commit,
+            "head_sha": review_input.commit,
+            "base_sha": review_input.metadata.get("diff_base_sha", ""),
+            "revision_key": mr_revision_identity(
+                {
+                    "project_path": project_path,
+                    "mr_id": review_input.mr_id,
+                    "head_sha": review_input.commit,
+                }
+            )["revision_key"],
             "updated_at": review_input.metadata.get("mr_updated_at", ""),
             "merged_at": review_input.metadata.get("mr_merged_at", ""),
             "created_at": review_input.metadata.get("mr_created_at", ""),
@@ -2013,6 +2588,7 @@ def _combine_jira_issue_review_inputs(
             "responsible": review_input.metadata.get("responsible") or review_input.metadata.get("git_tools_responsible", ""),
             "project_name": review_input.metadata.get("project_name") or review_input.metadata.get("git_tools_project_name", ""),
             "project_type": review_input.metadata.get("project_type") or review_input.metadata.get("git_tools_project_type", ""),
+            "application": review_input.metadata.get("application", ""),
             "llm_model_config": review_input.metadata.get("llm_model_config", ""),
             "discovery_source": discovered_by_url.get(review_input.mr_url, {}).get("source", ""),
         }
@@ -2123,6 +2699,11 @@ def _combine_jira_issue_review_inputs(
             "unmatched": len(mr_inputs) - matched_count,
         },
         "issue_links": issue_links,
+        "run_group_id": run_group_id,
+        "responsible_scope": [],
+        "jira_sprint_memberships": [item.to_dict() for item in issue.sprint_memberships],
+        "jira_current_sprint_id": issue.current_sprint_id,
+        "jira_current_sprint_state": issue.current_sprint_state,
     }
     fingerprint = review_fingerprint_from_merge_requests(related_mrs)
     metadata["review_fingerprint"] = fingerprint["fingerprint"]
@@ -2133,6 +2714,7 @@ def _combine_jira_issue_review_inputs(
     if responsible_people:
         metadata["responsible_people"] = responsible_people
         metadata["responsible"] = "+".join(responsible_people)
+        metadata["responsible_scope"] = responsible_people
     project_names = _distinct_values_from_related_mrs(related_mrs, "project_name")
     if not project_names:
         project_names = _distinct_values_from_related_mrs(related_mrs, "git_tools_module")
@@ -2159,7 +2741,7 @@ def _combine_jira_issue_review_inputs(
     if deduplicated_changed_files:
         metadata["deduplicated_changed_files"] = deduplicated_changed_files
 
-    return ReviewInput(
+    combined = ReviewInput(
         project="jira-issue",
         mr_url="",
         mr_id=f"multi-mr-{len(mr_inputs)}",
@@ -2173,6 +2755,8 @@ def _combine_jira_issue_review_inputs(
         raw_diff="\n\n".join(raw_diff_parts),
         metadata=metadata,
     )
+    _attach_review_scope_metadata(combined, issue)
+    return combined
 
 
 def _ensure_detailed_jira_review_runtime() -> None:
@@ -2257,6 +2841,7 @@ def list_reviewer_merge_requests(
                 "responsible": project_match.get("responsible", ""),
                 "project_name": project_match.get("project_name", ""),
                 "project_type": project_match.get("project_type", ""),
+                "application": project_match.get("application", ""),
                 "llm_model_config": project_match.get("llm_model", ""),
             }
         )
@@ -2275,6 +2860,8 @@ def _discover_sprint_merge_requests(
     issues: list[JiraIssue],
     state: str = "opened,merged",
     limit: int = 200,
+    progress: Any = None,
+    source_label: str = "",
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
@@ -2292,9 +2879,19 @@ def _discover_sprint_merge_requests(
     allowed_project_paths = _sprint_branch_project_paths(gitlab) if (branch_discovery or filter_to_projects) else []
     branch_project_paths = allowed_project_paths if branch_discovery else []
 
-    for issue in issues:
+    issue_total = len(issues)
+    for issue_index, issue in enumerate(issues, 1):
         if len(items) >= limit:
             break
+        _progress(
+            progress,
+            "discovery-issue",
+            f"Discovering merge requests for {issue.key} ({issue_index}/{issue_total})",
+            index=issue_index,
+            total=issue_total,
+            jira_key=issue.key,
+            source=source_label,
+        )
         records, issue_errors, issue_state_excluded = _merge_request_records_for_issue(jira, gitlab, issue, state=state)
         errors.extend(issue_errors)
         excluded_state_mrs.extend(issue_state_excluded)
@@ -2400,12 +2997,18 @@ def _discover_sprint_merge_requests(
                     "mr_state": record.get("state", ""),
                     "source_branch": record.get("source_branch", ""),
                     "target_branch": record.get("target_branch", ""),
+                    "mr_id": record.get("mr_id") or record.get("iid", ""),
+                    "head_sha": record.get("head_sha") or record.get("commit") or record.get("sha", ""),
+                    "base_sha": record.get("base_sha", ""),
+                    "merge_commit_sha": record.get("merge_commit_sha", ""),
+                    "squash_commit_sha": record.get("squash_commit_sha", ""),
                     "git_tools_project_match": project_match.get("status", ""),
                     "git_tools_group": project_match.get("group", ""),
                     "git_tools_module": project_match.get("module", ""),
                     "responsible": project_match.get("responsible", ""),
                     "project_name": project_match.get("project_name", ""),
                     "project_type": project_match.get("project_type", ""),
+                    "application": project_match.get("application", ""),
                     "llm_model_config": project_match.get("llm_model", ""),
                     "dev_branch": _configured_dev_branches(project_match),
                 }
@@ -2457,6 +3060,9 @@ def _mr_record_from_gitlab_search(issue_key: str, mr: dict[str, Any]) -> dict[st
         "source_branch": str(mr.get("source_branch") or ""),
         "target_branch": str(mr.get("target_branch") or ""),
         "state": str(mr.get("state") or ""),
+        "mr_id": str(mr.get("iid") or ""),
+        "head_sha": str(mr.get("sha") or ""),
+        "base_sha": str((mr.get("diff_refs") or {}).get("base_sha") or ""),
     }
 
 
@@ -2749,7 +3355,7 @@ def _mr_state_matches(
         return True, ""
 
 
-def _hydrate_mr_record_for_routing(gitlab: GitLabClient, record: dict[str, str]) -> dict[str, str]:
+def _hydrate_mr_record_for_routing(gitlab: GitLabClient, record: dict[str, Any]) -> dict[str, Any]:
     """Fill source/target branch metadata before fetching a potentially huge diff.
 
     Jira remote links often only retain the MR URL.  Release-resource routing
@@ -2757,7 +3363,12 @@ def _hydrate_mr_record_for_routing(gitlab: GitLabClient, record: dict[str, str])
     complete diff and local context.  Hydrating the small MR payload first
     keeps Company Config/SCR resources out of ordinary Jira review promptly.
     """
-    if str(record.get("source_branch") or "").strip() and str(record.get("target_branch") or "").strip():
+    if (
+        str(record.get("source_branch") or "").strip()
+        and str(record.get("target_branch") or "").strip()
+        and str(record.get("head_sha") or record.get("commit") or "").strip()
+        and str(record.get("mr_id") or record.get("iid") or "").strip()
+    ):
         return record
     mr_url = str(record.get("mr_url") or "").strip()
     if not mr_url:
@@ -2771,6 +3382,11 @@ def _hydrate_mr_record_for_routing(gitlab: GitLabClient, record: dict[str, str])
         "source_branch": str(payload.get("source_branch") or record.get("source_branch") or ""),
         "target_branch": str(payload.get("target_branch") or record.get("target_branch") or ""),
         "state": str(payload.get("state") or record.get("state") or ""),
+        "mr_id": str(payload.get("iid") or record.get("mr_id") or ref.iid),
+        "head_sha": str(payload.get("sha") or record.get("head_sha") or record.get("commit") or ""),
+        "base_sha": str((payload.get("diff_refs") or {}).get("base_sha") or record.get("base_sha") or ""),
+        "merge_commit_sha": str(payload.get("merge_commit_sha") or record.get("merge_commit_sha") or ""),
+        "squash_commit_sha": str(payload.get("squash_commit_sha") or record.get("squash_commit_sha") or ""),
     }
 
 
@@ -2964,6 +3580,20 @@ def run_review_from_payload(payload: dict[str, Any], progress: Any = None) -> di
     configured_limit = app_config_int("review.mr_limit", "SPRINT_MR_LIMIT", 200)
     _progress(progress, "request", f"Received {mode} review request", mode=mode)
 
+    if mode == "sprint-preflight":
+        preflight = sprint_review_preflight(
+            _text(payload.get("sprint")),
+            _text(payload.get("jira_project_key")) or app_config_str("jira.project_key", "JIRA_PROJECT_KEY", "ECHNL"),
+        )
+        return {
+            "ok": bool(preflight.get("valid") and preflight.get("accessible")),
+            "mode": "sprint-preflight",
+            "preflight": preflight,
+            "markdown": json.dumps(preflight, ensure_ascii=False, indent=2),
+            "conclusion": "Sprint preflight ready" if preflight.get("valid") else "Sprint preflight failed",
+            "finding_count": 0,
+            "severity_counts": {},
+        }
     if mode == "jira-filter":
         summary = review_jira_filter_merge_requests(
             filter_id=_text(payload.get("jira_filter")),
@@ -2985,9 +3615,19 @@ def run_review_from_payload(payload: dict[str, Any], progress: Any = None) -> di
             "severity_counts": _sum_summary_severity_counts(summary),
         }
     if mode == "sprint":
+        project_key = _text(payload.get("jira_project_key")) or app_config_str("jira.project_key", "JIRA_PROJECT_KEY", "ECHNL")
+        preflight = sprint_review_preflight(_text(payload.get("sprint")), project_key)
+        if not preflight.get("valid") or not preflight.get("accessible") or preflight.get("empty"):
+            raise ValueError(str(preflight.get("error") or "Sprint is invalid, empty, or inaccessible."))
+        effective_review_mode = str(preflight.get("review_mode") or "batch-preview")
+        requested_review_mode = _text(payload.get("review_mode"))
+        if requested_review_mode and requested_review_mode != effective_review_mode:
+            raise ValueError("Sprint readiness changed after preflight. Refresh the Sprint and confirm again.")
+        if effective_review_mode == "batch-preview" and not bool(payload.get("batch_preview_confirmed")):
+            raise ValueError("Batch Issue Preview confirmation is required for a Sprint that is not Development Done.")
         summary = review_sprint_merge_requests(
             sprint=_text(payload.get("sprint")),
-            jira_project_key=_text(payload.get("jira_project_key")) or app_config_str("jira.project_key", "JIRA_PROJECT_KEY", "ECHNL"),
+            jira_project_key=project_key,
             state=_text(payload.get("state")) or configured_state,
             limit=int(payload.get("limit") or configured_limit),
             output_dir=output_dir,
@@ -2995,11 +3635,14 @@ def run_review_from_payload(payload: dict[str, Any], progress: Any = None) -> di
             progress=progress,
             report_owner=report_owner,
             force_rerun=force_rerun,
+            workflow_review_mode=effective_review_mode,
         )
         return {
             "ok": not bool(summary.get("errors")),
             "mode": "sprint",
             "summary": summary,
+            "review_mode": effective_review_mode,
+            "sprint_preflight": preflight,
             "markdown": json.dumps(summary, ensure_ascii=False, indent=2),
             "conclusion": "Sprint review completed" if not summary.get("errors") else "Sprint review completed with errors",
             "finding_count": sum(int(item.get("finding_count", 0) or 0) for item in summary.get("items", []) if isinstance(item, dict)),
@@ -3025,7 +3668,18 @@ def run_review_from_payload(payload: dict[str, Any], progress: Any = None) -> di
             "finding_count": sum(int(item.get("finding_count", 0) or 0) for item in summary.get("items", []) if isinstance(item, dict)),
             "severity_counts": _sum_summary_severity_counts(summary),
         }
-    if mode == "mr":
+    if mode == "release-gate":
+        mr_url = _text(payload.get("mr_url")).strip()
+        if not mr_url:
+            raise ValueError("GIT_VERSION MR URL is required for Release Gate.")
+        result = review_release_gate_from_mr_url(
+            mr_url=mr_url,
+            jira_key=_text(payload.get("jira_key")),
+            sprint=_text(payload.get("sprint")),
+            context_repo=context_repo,
+            progress=progress,
+        )
+    elif mode == "mr":
         _progress(progress, "fetch-mr", f"Fetching MR {_text(payload.get('mr_url'))}", mr_url=_text(payload.get("mr_url")))
         result = review_from_mr_url(
             mr_url=_text(payload.get("mr_url")),
@@ -3062,15 +3716,22 @@ def run_review_from_payload(payload: dict[str, Any], progress: Any = None) -> di
     gitnexus = save_to_gitnexus(result, report_path)
     append_review_history(result, report_path)
     _progress(progress, "done", f"DONE {result.review_input.jira_key or result.review_input.project}", report=str(report_path), severity_counts=result.severity_counts, finding_count=len(result.findings))
+    release_gate = result.review_input.metadata.get("release_gate") or {}
+    gate_status = str(release_gate.get("status") or "").strip().upper()
+    conclusion = result.conclusion
+    if mode == "release-gate":
+        conclusion = f"Release Gate {gate_status or 'UNKNOWN'}"
     return {
         "ok": True,
+        "mode": mode,
         "report": str(report_path),
         "report_name": report_path.name,
         "gitnexus": gitnexus,
         "markdown": render_markdown(result, language=language),
-        "conclusion": result.conclusion,
+        "conclusion": conclusion,
         "finding_count": len(result.findings),
         "severity_counts": result.severity_counts,
+        "release_gate": release_gate if isinstance(release_gate, dict) else {},
     }
 
 
@@ -3103,6 +3764,7 @@ def attach_git_version_locked_repository_reviews(review_input: ReviewInput, clie
     # This must be available before analyzer enriches the final report so the
     # deep-lock fetch failures can be rendered as release-gate findings.
     review_input.metadata["mr_type"] = "GIT_VERSION"
+    _attach_release_gate_project_scope(review_input)
 
     max_repos = app_config_int("git_version.source_review_max_repos", "GIT_VERSION_SOURCE_REVIEW_MAX_REPOS", 30)
     max_files_per_repo = app_config_int("git_version.source_review_max_files_per_repo", "GIT_VERSION_SOURCE_REVIEW_MAX_FILES_PER_REPO", 80)
@@ -3298,6 +3960,9 @@ def attach_git_version_locked_repository_reviews(review_input: ReviewInput, clie
     review_input.metadata["source_repository_diff_context"] = "\n\n".join(context_parts)[:max_context_chars]
     review_input.metadata["release_gate"] = {
         "status": "blocked" if release_gate_errors else "ready",
+        "project": review_input.metadata.get("release_gate_project", ""),
+        "project_path": review_input.metadata.get("release_gate_project_path", ""),
+        "project_match": review_input.metadata.get("release_gate_project_match", "unknown"),
         "resources": release_gate_resources,
         "errors": release_gate_errors,
         "source_repository_count": len([item for item in reviews if item.get("kind") == "source"]),

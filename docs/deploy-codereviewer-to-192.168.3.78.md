@@ -1,6 +1,6 @@
 # 部署 CodeReviewer 到 192.168.3.78
 
-更新日期：2026-07-16
+更新日期：2026-07-17
 
 本文记录本次真实部署结果。通用部署原则和完整生产建议参见 [CodeReviewer-RHEL9-Deployment-Guide.md](CodeReviewer-RHEL9-Deployment-Guide.md)。
 
@@ -9,17 +9,45 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `7.0.3` |
-| 部署提交 | `c66e767064915bd8664ad1af2a10fa7c135a56c2` |
+| CodeReviewer 版本 | `7.2.0` |
+| 部署制品 | `codereviewer-7.2.0-20260717-203354.tgz`，SHA-256 `0cc4db69a3f3f0b08de828bc394dd853a92b82641bca4a0e89c3c686d844968a` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `GET /api/version` 返回 `{"ok": true, "version": "7.0.3"}` |
+| 健康检查 | `GET /api/version` 返回 `{"ok": true, "version": "7.2.0"}` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 98 passed |
+| RHEL9 测试 | 182 passed |
+
+## 7.2.0 升级与回滚记录
+
+2026-07-17 将生产环境从 7.0.3 升级到 7.2.0。发布前停止服务并备份应用、EnvironmentFile、systemd Unit、用户及工作流数据、报告、Jira/PRD 缓存；制品解压后按字段合并 7.2.0 业务策略与生产 `config.yml`，保留全部 Linux working copy 路径。
+
+验证结果：
+
+- RHEL9 完整自动化测试 `182/182` 通过；
+- 线上 10 个账户的用户名与 Credential Hash 在发布前后逐一比对一致；
+- `/api/version`、`/login`、Robot Challenge 和未认证 Manager API 保护通过；
+- GitLab 443、Codex CLI 可执行文件和生产 DIRECT 网络路径检查通过；
+- `web_users.json` 保持 `0600 codereviewer:codereviewer`；
+- 旧的明文初始凭据文件未被制品覆盖，权限已收紧至 `0600 codereviewer:codereviewer`，后续应在完成相关账户密码轮换后安全移除。
+
+一致性备份：
+
+```text
+/var/backups/codereviewer/7.0.3-to-7.2.0-20260717-203915/system-backup.tgz
+/var/backups/codereviewer/7.0.3-to-7.2.0-20260717-203915/system-backup.tgz.sha256
+```
+
+一键还原：
+
+```bash
+sudo /usr/local/sbin/codereviewer-rollback-latest
+```
+
+固定回滚入口为 `/usr/local/sbin/codereviewer-rollback-20260717-203915`。脚本会先验证备份 SHA-256 和 tar 可读性，停止服务，保留失败版本目录，恢复 7.0.3 应用、配置和数据，再启动服务并验证版本。首次发布尝试因生产配置契约测试失败触发了同一回滚流程，实际验证已成功恢复 7.0.3；随后完成字段级配置合并并成功发布 7.2.0。
 
 ## 7.0.3 升级记录
 

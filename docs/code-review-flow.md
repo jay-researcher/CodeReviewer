@@ -109,7 +109,8 @@ app:
 | `report` | 默认输出语言、最小报告优先级、按 responsible 分目录、历史记录默认时间范围 |
 | `review` | MR state、Jira 状态、忽略分支类型、chunk 分片、GitLab/Jira discovery 开关 |
 | `jira` | Jira project key、Sprint/Filter 最大 issue 数 |
-| `jira_prd` | 本地 Jira/PRD 文档路径、缺失时自动抓取、fetch depth |
+| `knowledge` | Jira REST 权威边界、Rovo 只读检索、本地 jira-prd 是否作为兼容回退 |
+| `jira_prd` | 旧版本地 Jira/PRD 回退；当前默认关闭 |
 | `llm` | Provider、model、timeout、retry、reasoning、speed、context/prompt budget |
 | `local_context` | 是否自动匹配本地仓库、是否强制同步、上下文预算、workspace roots |
 | `git_tools` | 需要扫描的 config group、MR 是否必须匹配项目清单 |
@@ -123,7 +124,7 @@ app:
 dps11-repository:
   ttl_access_control:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_acl.git
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_access_control
     responsible: kevin.tan
     project_name: dps11#acl
@@ -137,7 +138,7 @@ dps11-repository:
 | 字段 | 用途 |
 | --- | --- |
 | `repository_url` | 匹配 GitLab project path，也用于 clone/fetch |
-| `branch` / `branches` | 需要同步和读取的版本分支 |
+| `branch` / `branches` | 需要同步和读取的版本分支；支持精确值与 `11.2.*` 通配符，通配符选择远端最高数字版本 |
 | `local_working_copy` | 本地完整代码仓库，用于广角 Review |
 | `responsible` | Web 授权、报告目录分组、Teams @ 对象 |
 | `project_name` | 报告命名、Web 项目展示 |
@@ -177,7 +178,7 @@ Web 入口：
 2. Sprint：按 `app.jira.project_key` 和 Sprint ID 查询 issue。
 3. Jira Filter：按 Filter ID 查询 issue。
 4. 默认只 Review `app.review.jira_allowed_statuses` 中的状态，例如 `Development Done`。
-5. 如果本地缺少 `ECHNL` 或 `SVREQ` 文档，且 `app.jira_prd.auto_fetch=true`，会调用 `D:\TTL\jira-prd\fetch_jira.py --depth 2` 抓取上下文。
+5. Jira REST 数据为权威数据；Rovo 只读检索 Jira、Confluence 和 Teamwork Graph 候选上下文。当前默认不读取 `D:\TTL\jira-prd`，Rovo 不可用时继续使用 Jira REST 与 GitLab 证据。
 
 ### 3.3 MR 发现
 

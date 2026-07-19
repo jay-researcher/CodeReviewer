@@ -584,6 +584,21 @@ curl -s http://127.0.0.1:8765/api/version
 
 ## 15. 回滚流程
 
+推荐每次发布生成固定回滚脚本，并维护稳定入口：
+
+```bash
+sudo /usr/local/sbin/codereviewer-rollback-latest
+```
+
+一键脚本至少必须：
+
+1. 校验备份 SHA-256 和 tar 可读性；
+2. 停止 CodeReviewer；
+3. 将当前失败版本移动到 `/opt/codereviewer/releases/failed-*`；
+4. 恢复应用目录、EnvironmentFile、systemd Unit、用户/工作流数据和报告；
+5. 执行 `systemctl daemon-reload` 并启动服务；
+6. 验证 `/api/version` 返回备份版本，否则保留日志并以非零状态退出。
+
 1. 停止服务：
 
 ```bash

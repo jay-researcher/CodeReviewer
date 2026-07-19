@@ -28,8 +28,14 @@ app:
         role: developer
         responsible: [kevin.tan]
       kelvinh.wu:
+        role: auditor
+        responsible: [kelvinh.wu]
+      benyq.feng:
         role: developer
-        responsible: [kevin.tan]
+        responsible: [kelvinh.wu]
+      luckxh.chen:
+        role: auditor
+        responsible: [luckxh.chen]
   review_workflow:
     blocking_severities: [Critical, High]
     require_rescan_for_fixed: true
@@ -61,6 +67,9 @@ app:
       # GIT_VERSION is a release-level MR and must be reviewed as one explicit
       # MR, never folded into an ordinary Jira/Sprint consolidated review.
       git_version_review_mode: mr
+      # A release gate must belong to one project declared in this config.
+      # Locked source/build dependencies inside that product are still reviewed.
+      require_project_match: true
       deferred_roles:
         - company_config
         - scr
@@ -76,6 +85,10 @@ app:
           - DPS9_SCR
         git_version:
           - GIT_VERSION
+          - WVADMIN_GIT_VERSION
+          - ITRADE_CLIENT_GIT_VERSION
+          - SERVICES_TERMINAL_GIT_VERSION
+          - DPS_GIT_VERSION
           - DPS11_GIT_VERSION
           - DPS9_GIT_VERSION
       dps_build_script_path: company/SV/script/DPSBuild.php
@@ -114,9 +127,27 @@ app:
       ECHNL: e-Channel Sprint
       CORE: Core Sprint
     filter_max_issues: 500
+  knowledge:
+    # Jira REST is authoritative for issue fields and is the only Jira write
+    # provider. Rovo is read-only candidate-context retrieval.
+    authoritative_issue_provider: jira_rest
+    jira_write_provider: jira_rest
+    primary_context_provider: rovo_mcp
+    local_jira_prd_enabled: false
+    rovo:
+      enabled: true
+      read_only: true
+      adapter_home: D:/TTL/vibe-coding/JiraReviewer
+      endpoint: https://mcp.atlassian.com/v1/mcp
+      auth_mode: basic
+      timeout_seconds: 60
+      max_results: 8
+      context_max_chars: 12000
   jira_prd:
-    context: auto
-    auto_fetch: true
+    # Legacy opt-in fallback only. The active knowledge policy above does not
+    # scan D:/TTL/jira-prd and does not build a local PRD/RAG context.
+    context: "off"
+    auto_fetch: false
     fetch_depth: 2
     fetch_timeout_seconds: 240
     context_max_chars: 20000
@@ -232,112 +263,112 @@ dps9-repository:
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#common"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_contrib_common
   ttl_cms_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_cms.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#cms"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_cms_api
   ttl_admin_console:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_console.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#console"    
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_admin_console
   ttl_message_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_message.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#message"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_message_api
   ttl_access_control:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_acl.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#acl"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_access_control
   ttl_file_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_file.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#file"    
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_file_api
   ttl_user_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_user.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#user"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_user_api
   ttl_search_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_search.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#search"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_search_api
   wvmo_core:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_wvmo.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#wvmo"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/wvmo_core
   paper_trading:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_papertrading.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#papertrading"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/paper_trading
   base:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/microsrvs/base.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#wvadmin"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/base
   amo:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/microsrvs/amo.git
     responsible: "sunny.cheng"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#amo"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/amo
   tmo:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/microsrvs/tmo.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#tmo"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/tmo
   lca:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/microsrvs/lca.git
     responsible: "sunny.cheng"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#lca"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/lca
   ttl_contrib_base:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_base.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#ttlcontribbase"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_contrib_base
   ttl_contrib_services:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps/micromod/mod_services.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps9#ttlcontribservices"
-    branch: 9.3.78
+    branch: "9.3.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps9-repository/ttl_contrib_services
 dps11-repository:
   type: backend
@@ -346,130 +377,131 @@ dps11-repository:
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#common"
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_contrib_common
   ttl_cms_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_cms.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#cms"
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_cms_api
   ttl_admin_console:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/ttl_admin_console.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#console"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_admin_console
   ttl_message_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_message.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#message"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_message_api
   ttl_access_control:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_acl.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#acl"
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_access_control
   ttl_file_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_file.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#file"
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_file_api
   ttl_user_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_user.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#user"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_user_api
   ttl_search_api:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_search.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#search"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_search_api
   wvmo_core:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_wvmo.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#wvmo"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/wvmo_core
   paper_trading:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_papertrading.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#papertrading"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/paper_trading
   base:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/wvadmin.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#wvadmin"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/base
   amo:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/amo.git
     responsible: "sunny.cheng"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#amo"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/amo
   tmo:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/tmo.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#tmo"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/tmo
   lca:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/lca.git
     responsible: "sunny.cheng"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#lca"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/lca
   ttl_contrib_base:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_base.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#ttlcontribbase"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_contrib_base
   ttl_contrib_services:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/micromod/mod_services.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#ttlcontribservices"    
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/ttl_contrib_services
   momd:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/dps11/microsrvs/momd.git
     responsible: "kevin.tan"
     llm_model: "gpt-5.6-sol"
     project_name: "dps11#momd"
-    branch: 11.2.83
+    branch: "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/dps11-repository/momd
 build-repository:
   itrade-client:
     type: frontend
     repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/itrade-client.git
-    responsible: "wen.yi"
+    # MO Client Config release resources are owned by luckxh.chen.
+    responsible: "luckxh.chen"
     llm_model: "gpt-5.6-sol"
     project_name: "itrade-client#build"    
     branch:
-      - 7.5.0.56
-      - 7.5.1.38
+      - "7.5.0.*"
+      - "7.5.1.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/build-repository/itrade-client
   services-terminal:
     type: frontend
@@ -477,7 +509,7 @@ build-repository:
     responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     project_name: "service-terminal#build"    
-    branch: 5.0.62
+    branch: "5.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/build-repository/services-terminal
   wvadmin:
     type: frontend
@@ -485,17 +517,18 @@ build-repository:
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
     project_name: "wvadmin#build"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/build-repository/wvadmin
   dps:
     type: backend
     repository_url: https://gitlab.tx-tech.com/web-sv-build/dps.git
-    responsible: "kevin.tan"
+    # DPS Config release resources are owned by luckxh.chen.
+    responsible: "luckxh.chen"
     llm_model: "gpt-5.6-sol"
     project_name: "dps#build"    
     branch:
-      - 9.3.78
-      - 11.2.83
+      - "9.3.*"
+      - "11.2.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/build-repository/dps
 itrade-client:
   type: frontend
@@ -507,7 +540,7 @@ itrade-client:
     dev_branch:
       - "ITRADE_CLIENT_7.5.0"
       - "ITRADE_CLIENT_7.5.1"
-    branch: 7.5.0.56
+    branch: "7.5.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/itrade-client/itrade-client-7.5.0
   itrade-client:
     repository_url: https://gitlab.tx-tech.com/itrade-sv/client/web.git
@@ -517,14 +550,14 @@ itrade-client:
     dev_branch: 
       - "ITRADE_CLIENT_7.5.0"
       - "ITRADE_CLIENT_7.5.1"
-    branch: 7.5.1.38
+    branch: "7.5.1.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/itrade-client/itrade-client
   services-terminal:
     repository_url: https://gitlab.tx-tech.com/itrade-sv/terminal/web.git
     responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     project_name: "services-terminal"
-    branch: 5.0.62
+    branch: "5.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/itrade-client/services-terminal
 wvadmin-repository:
   type: frontend
@@ -532,65 +565,65 @@ wvadmin-repository:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/momd.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/momd
   low_code_designable:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/low-code-designable.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/low_code_designable
   low_code_renderable:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/low-code-renderable.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/low_code_renderable
   coms:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/coms.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/coms
   workflow_app:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/workflow-app.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/workflow_app
   low_code_application:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/low-code-application.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/low_code_application
   trade_middle_office:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/trade-middle-office.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/trade_middle_office
   account_middle_office:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/account-middle-office.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/account_middle_office
   base:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/base.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/base
   common:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/common.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/common
   form_designable:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/form-app-designable.git
     responsible: "wen.yi"
     llm_model: "gpt-5.6-sol"
-    branch: 1.0.83
+    branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/form_designable

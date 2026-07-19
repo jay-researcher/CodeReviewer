@@ -315,12 +315,20 @@ python review.py --mr-url "<gitlab-mr-url>"
 Use this when each GitLab project has a local working copy. This is the preferred path for detailed reviews because CodeReviewer can combine:
 
 - GitLab MR or local branch diff
-- Jira issue description and linked SVREQ docs from `D:\TTL\jira-prd\data`
+- Jira REST authoritative issue data plus optional Rovo Jira/Confluence/Teamwork Graph candidate context
 - Local full-project context from the matching working copy
 - Drupal/DPS review rules where applicable
 - The detailed `ECHNL-5539.md` report style guide
 
 Define `repository_url`, `branch`, and `local_working_copy` for every repository in `D:\TTL\vibe-coding\CodeReviewer\config.yml`. This is the primary mapping for iTrade Client, Services Terminal, WVAdmin, DPS9, DPS11, and build repositories.
+
+`branch` and `branches` accept both exact values and version wildcards. Exact
+values such as `7.5.1.38` remain compatible. A wildcard such as `7.5.1.*` is
+resolved against remote heads and only the greatest numeric version is used.
+When multiple version lines are configured, each pattern selects one branch;
+for example `[7.5.0.*, 7.5.1.*]` synchronizes the latest 7.5.0 and 7.5.1
+branches. A missing match is reported as a configuration error instead of
+silently selecting an unrelated branch.
 
 Useful defaults:
 
@@ -343,6 +351,14 @@ For fetch-only maintenance:
 ```powershell
 python review.py --sync-repositories --sync-no-index
 ```
+
+The checked-in provider boundary is Rovo-first and read-only for knowledge:
+Jira REST remains authoritative for issue fields and the only Jira write
+provider; Rovo retrieves candidate Jira, Confluence, and Teamwork Graph
+context. `app.knowledge.local_jira_prd_enabled` is `false`, so CodeReviewer
+does not scan `D:\TTL\jira-prd` or build local PRD/RAG context. If Rovo
+credentials or the JiraReviewer adapter are unavailable, enrichment is skipped
+and the code review continues with Jira REST and GitLab evidence.
 
 Review-time synchronization is strict for the MR target branch. If GitLab has deleted that branch but the MR still provides an immutable `diff_refs.base_sha`, CodeReviewer records the missing branch as a synchronization warning and builds project context from the exact base commit instead of failing the review. Bulk synchronization records a fallback and fetches all remote refs when a product version branch is not present in one split repository. Local modifications are never reset or overwritten; only a clean working tree already checked out on the configured branch is fast-forwarded.
 
@@ -715,6 +731,16 @@ Auto mode behavior:
 - If Codex fails, times out, or returns unusable output, Claude code opus from CC Switch is tried.
 - If the GitLab project is DPS/DPS9/DPS11, `DPS_REVIEW_REQUIRE_CODEX=1` forces `codex-cli`; after the configured retries fail, CodeReviewer exits and does not fallback to CC Switch.
 - If all configured LLM attempts fail, fix Codex/CC Switch/network settings and rerun. Do not approve from a rule-only report.
+- If you use `CLIProxyAPI` or another local AI proxy, ensure it is started from a terminal session with the proxy environment variables already injected. For PowerShell:
+
+```powershell
+$env:HTTP_PROXY="socks5://127.0.0.1:10809"
+$env:HTTPS_PROXY="socks5://127.0.0.1:10809"
+$env:ALL_PROXY="socks5://127.0.0.1:10809"
+```
+
+- The `CLIProxyAPI` management UI may show the OAuth callback page, but backend token exchange can still fail with `unsupported_country_region_territory` if the request exits through an unsupported region or bypasses the proxy. In that case, the fix is to use a supported proxy/VPN exit and make sure the CLI backend process also uses it.
+- If `cli-proxy-api.exe` is launched from a service/systemd unit, inject `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` into the service environment instead of relying only on the browser or a separate shell.
 
 The prompt is tuned for deep review in the style of `ECHNL-5539.md`: business-scope validation, exact migration target selection, DB/file update ordering, idempotency, rollback safety, compatibility with old and new data, DPS API/DAO/BIZ/CLI layer impact, and concrete SQL/Mongo/UAT verification.
 
@@ -889,4 +915,3 @@ python review.py --mr-url "<gitlab-mr-url>" --output reports\latest-review.md
 - Do not post GitLab comments without reading the report first.
 - Use `--post-gitlab-comment --yes` only after manual confirmation.
 - Prefer direct `--jira`, `--sprint`, or `--mr-url` review with local context configured.
-

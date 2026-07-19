@@ -14,6 +14,8 @@ try:
 except ImportError:
     yaml = None
 
+from .config_store import effective_config_payload
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -245,7 +247,7 @@ def _parse_simple_yaml(text: str) -> dict[str, Any]:
 
 
 @lru_cache(maxsize=8)
-def _config_payload(config_path: str) -> dict[str, Any]:
+def _base_config_payload(config_path: str) -> dict[str, Any]:
     path = Path(config_path).expanduser()
     if not path.exists():
         return {}
@@ -265,9 +267,39 @@ def _config_payload(config_path: str) -> dict[str, Any]:
         return {}
 
 
+@lru_cache(maxsize=8)
+def _config_payload(config_path: str) -> dict[str, Any]:
+    base = _base_config_payload(config_path)
+    try:
+        configured_path = git_tools_config_path().resolve()
+        requested_path = Path(config_path).expanduser().resolve()
+    except OSError:
+        configured_path = git_tools_config_path().absolute()
+        requested_path = Path(config_path).expanduser().absolute()
+    if requested_path != configured_path:
+        return base
+    return effective_config_payload(base)
+
+
+def load_base_config_payload() -> dict[str, Any]:
+    """Return the deployment-owned config.yml payload without Web overrides."""
+    return _base_config_payload(str(git_tools_config_path()))
+
+
+def load_effective_config_payload() -> dict[str, Any]:
+    """Return the effective config.yml payload including Web-owned overrides."""
+    return _config_payload(str(git_tools_config_path()))
+
+
+def clear_config_cache() -> None:
+    """Make a committed configuration override visible to subsequent reads."""
+    _config_payload.cache_clear()
+    _base_config_payload.cache_clear()
+
+
 def load_app_config() -> dict[str, Any]:
     """Load application policy defaults from config.yml top-level `app` section."""
-    payload = _config_payload(str(git_tools_config_path()))
+    payload = load_effective_config_payload()
     app = payload.get("app") if isinstance(payload, dict) else None
     return app if isinstance(app, dict) else {}
 

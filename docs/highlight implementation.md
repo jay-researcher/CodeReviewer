@@ -4,6 +4,29 @@
 - Auditor：单 Issue Review；按 responsible 查看项目、报告和 Coverage；支持 AI Chat、Re-scan、Manual Pass。
 - Developer：查看分配的报告、Diff 和修复建议，逐条填写 Handling；不能发起 Review 或手动 Pass。
 处理闭环
+| 功能 | Developer | Auditor / Leader | Manager | Remarks |
+| --- | --- | --- | --- | --- |
+| 登录并查看工作台 | Yes | Yes | Yes | 不同角色展示不同首页 |
+| 查看分配给自己的 Issue | Yes | Yes | Yes | Developer/Auditor 按 responsible 或明确分配过滤 |
+| 查看全部 Issue | - | - | Yes | Manager 全局权限 |
+| 查看 Review Report | Yes | Yes | Yes | 必须满足数据范围权限 |
+| 查看问题清单和修复建议 | Yes | Yes | Yes | 允许按严重级别、状态筛选 |
+| Run Issue Review | - | Yes | Yes | Developer 页面不显示入口，API 同样拒绝 |
+| Run Sprint / Filter Review | - | - | Yes | Manager 用于发布前检查 |
+| Re-scan 单个 Issue | - | Yes | Yes | Auditor 仅限负责范围 |
+| Re-scan Sprint | - | - | Yes | Manager 权限 |
+| 扫描 Review Coverage | - | Yes | Yes | Auditor 仅能看到 responsible 范围 |
+| 提交问题处理结果 | Yes | Yes | Yes | Developer 可提交三种处理结果 |
+| 确认“不是问题” | 提交建议 | Yes | Yes | 需要 Auditor/Manager 确认 |
+| 创建“另报 Jira”草稿 | Yes | Yes | Yes | 保存到“待创建” |
+| 编辑自己的 Jira 草稿 | Yes | Yes | Yes | Auditor/Manager 可编辑其负责范围 |
+| Report Preview / Discuss | Yes | Yes | Yes | Developer 只能访问授权报告 |
+| AI Chat | - | Yes | Yes | 延续当前权限 |
+| Manual Pass | - | Yes | Yes | 必须满足门禁；Auditor 限负责范围 |
+| Teams Delivery | - | Yes | Yes | 延续当前权限 |
+| 管理用户和角色 | - | - | Yes | 后续可增加账户管理页面 |
+| 查看审计日志 | 个人操作 | 负责范围 | 全部 | 包括 Pass、处理和状态变更 |
+
 #### Review Communication 新增 Handling Tab，每个问题可填写：
 - 已整改，Pass通过
 - 不是阻碍，另报 Jira issue 跟进
@@ -83,3 +106,14 @@ Failed
 - 自定义 Codex provider 支持通过 `codex_http_api_key_env` 指定 API key 环境变量，无需在服务器执行交互式 OAuth 登录。
 - 未配置 API key provider 时继续使用原有 OpenAI 登录方式，保持现有 Windows/ChatGPT 调用兼容。
 - 缺少指定 API key 时立即给出配置错误，避免 Codex CLI 静默等待直至超时。
+
+
+
+### 7.1.0
+![alt text](image.png)
+![alt text](image-1.png)
+
+- 完整闭环 ![alt text](image-2.png)
+- 目前Jira Review的MR发现顺序 ![alt text](image-3.png)，![alt text](image-4.png)
+- 使用多Agent开发epic ![alt text](image-5.png)
+- 整合Jira Rovo ![alt text](image-6.png)![alt text](image-7.png)![alt text](image-8.png)

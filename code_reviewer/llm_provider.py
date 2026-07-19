@@ -745,6 +745,23 @@ def _review_prompt(review_input: ReviewInput) -> str:
         f"- {item.path}: +{item.additions}/-{item.deletions}" for item in review_input.changed_files[:200]
     )
     related_mrs = _related_mrs_context(review_input)
+    current_scope_value = review_input.metadata.get("current_review_scope") or {
+        "jira_key": review_input.jira_key,
+        "sprint": review_input.sprint,
+        "merge_requests": review_input.metadata.get("related_merge_requests") or [],
+        "diff_policy": "The supplied diff is the current revision review target.",
+    }
+    target_context_value = review_input.metadata.get("current_target_context") or {
+        "target_branch": review_input.target_branch,
+        "policy": "Target code is compatibility context only.",
+    }
+    historical_context_value = review_input.metadata.get("historical_requirement_context") or {
+        "summary": jira_description,
+        "excludes_previous_cycle_diffs": True,
+    }
+    current_review_scope = json.dumps(current_scope_value, ensure_ascii=False, indent=2, default=str)
+    current_target_context = json.dumps(target_context_value, ensure_ascii=False, indent=2, default=str)
+    historical_requirement_context = json.dumps(historical_context_value, ensure_ascii=False, indent=2, default=str)
     minimum_severity = report_min_severity()
     prompt = f"""Review this GitLab MR or consolidated Jira issue diff as a release-blocking senior reviewer.
 
@@ -784,6 +801,7 @@ Focus areas:
 - Business compatibility: old and new config keys, allowlist changes, gray release/rollback compatibility, cached or historical data, duplicate business keys, and app/module scoping.
 - Jira/PRD alignment: study the local Jira/PRD issue context when provided, including ECHNL action issues and linked SVREQ requirement references. Check whether the code actually implements the intended behavior, misses described cases, or changes behavior outside the issue scope.
 - Consolidated Jira issue review: when multiple MRs are provided, review them as one end-to-end change set for the Jira issue. Check cross-project compatibility, missing paired changes, inconsistent API/DAO/BIZ/CLI/frontend behavior, branch/target mismatch, duplicate or contradictory logic, and whether all MRs together satisfy the Jira/SVREQ requirement.
+- Scope boundary: Current Review Scope and its incremental diff are actionable; Current Target Context is compatibility evidence only; Historical Requirement Context is background only. The former Final Jira issue description is intentionally separated across current follow-up and historical requirement context. Never attribute an old-cycle diff to this run.
 - Detailed developer-facing report style: when you find an issue, write enough detail for a developer to reproduce the failure mode, locate the affected code, understand business impact, apply a concrete fix, and verify it with SQL/Mongo/API/UI checks.
 - DPS layering: API/DAO/BIZ/CLI callers, changed query shape, error handling, auth, and whether all impacted layers changed together.
 - DPS database-change policy: for DPS9/DPS11 backend projects, database update work is extracted into `db_change.scr`, normally through GIT_VERSION MR build resources. Do not review this as a Drupal update-hook/install-schema mechanism. Instead, review `db_change.scr` self-consistency: command ordering, referenced SQL/shell/resource files, missing command inputs, idempotency/rerun safety, rollback/backup expectations, environment scope, and whether the commands match the previous database version or prior `db_change.scr` definitions when context is available.
@@ -802,23 +820,29 @@ Source branch: {review_input.source_branch or "-"}
 Target branch: {review_input.target_branch or "-"}
 Commit: {review_input.commit or "-"}
 
-Related MRs:
+Current Review Scope (the only actionable review target):
+{current_review_scope}
+
+Current revision MRs:
 {related_mrs or "-"}
 
 Cross-MR implementation contracts:
 {cross_mr_contract_context or "-"}
 
-Changed files:
+Current revision changed files:
 {file_summary or "-"}
 
-Final Jira issue description (original description plus formal template comments, in chronological order):
-{jira_description or "-"}
+Current Target Context (compatibility/impact context only; do not report it as a change by itself):
+{current_target_context}
+
+Target-branch related project context:
+{project_context or "-"}
+
+Historical Requirement Context (background only; never treat previous-cycle diffs as current changes):
+{historical_requirement_context}
 
 Local Jira/PRD issue context:
 {jira_prd_context or "-"}
-
-Local project context:
-{project_context or "-"}
 
 GIT_VERSION MR context:
 {git_version_context or "-"}
@@ -829,7 +853,7 @@ Framework review context:
 Review report template/style guide:
 {review_template_context or "-"}
 
-Diff:
+Current Review Scope incremental diff (base SHA to current head SHA only):
 ```diff
 {diff}
 ```
@@ -879,15 +903,16 @@ def _enforce_prompt_budget(review_input: ReviewInput, prompt: str) -> str:
         return prompt
 
     trim_plan = [
-        ('jira_description', 'Final Jira issue description (original description plus formal template comments, in chronological order):\n', '\n\nLocal Jira/PRD issue context:', 4000),
-        ("review_template_context", "Review report template/style guide:\n", "\n\nDiff:", 2500),
-        ("project_context", "Local project context:\n", "\n\nGIT_VERSION MR context:", 4000 if is_git_version else app_config_int("llm.prompt_min_project_context_chars", "LLM_PROMPT_MIN_PROJECT_CONTEXT_CHARS", 12000)),
-        ("jira_prd_context", "Local Jira/PRD issue context:\n", "\n\nLocal project context:", 3000 if is_git_version else app_config_int("llm.prompt_min_jira_prd_context_chars", "LLM_PROMPT_MIN_JIRA_PRD_CONTEXT_CHARS", 8000)),
+        ('historical_requirement_context', 'Historical Requirement Context (background only; never treat previous-cycle diffs as current changes):\n', '\n\nLocal Jira/PRD issue context:', 4000),
+        ("review_template_context", "Review report template/style guide:\n", "\n\nCurrent Review Scope incremental diff", 2500),
+        ("project_context", "Target-branch related project context:\n", "\n\nHistorical Requirement Context", 4000 if is_git_version else app_config_int("llm.prompt_min_project_context_chars", "LLM_PROMPT_MIN_PROJECT_CONTEXT_CHARS", 12000)),
+        ("jira_prd_context", "Local Jira/PRD issue context:\n", "\n\nGIT_VERSION MR context:", 3000 if is_git_version else app_config_int("llm.prompt_min_jira_prd_context_chars", "LLM_PROMPT_MIN_JIRA_PRD_CONTEXT_CHARS", 8000)),
         ("git_version_context", "GIT_VERSION MR context:\n", "\n\nFramework review context:", app_config_int("llm.git_version_prompt_min_context_chars", "LLM_GIT_VERSION_PROMPT_MIN_CONTEXT_CHARS", 16000) if is_git_version else app_config_int("llm.prompt_min_git_version_context_chars", "LLM_PROMPT_MIN_GIT_VERSION_CONTEXT_CHARS", 12000)),
         ("framework_context", "Framework review context:\n", "\n\nReview report template/style guide:", 3000),
-        ("related_mrs_context", "Related MRs:\n", "\n\nCross-MR implementation contracts:", 4000),
-        ("cross_mr_contract_context", "Cross-MR implementation contracts:\n", "\n\nChanged files:", 2500),
-        ("diff", "Diff:\n```diff\n", "\n```", app_config_int("llm.git_version_prompt_min_diff_chars", "LLM_GIT_VERSION_PROMPT_MIN_DIFF_CHARS", 8000) if is_git_version else app_config_int("llm.prompt_min_diff_chars", "LLM_PROMPT_MIN_DIFF_CHARS", 30000)),
+        ("current_review_scope", "Current Review Scope (the only actionable review target):\n", "\n\nCurrent revision MRs:", 2500),
+        ("related_mrs_context", "Current revision MRs:\n", "\n\nCross-MR implementation contracts:", 4000),
+        ("cross_mr_contract_context", "Cross-MR implementation contracts:\n", "\n\nCurrent revision changed files:", 2500),
+        ("diff", "Current Review Scope incremental diff (base SHA to current head SHA only):\n```diff\n", "\n```", app_config_int("llm.git_version_prompt_min_diff_chars", "LLM_GIT_VERSION_PROMPT_MIN_DIFF_CHARS", 8000) if is_git_version else app_config_int("llm.prompt_min_diff_chars", "LLM_PROMPT_MIN_DIFF_CHARS", 30000)),
     ]
     for name, start_marker, end_marker, _min_chars in trim_plan:
         content = _section_content(prompt, start_marker, end_marker)

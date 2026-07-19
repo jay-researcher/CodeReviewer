@@ -6,7 +6,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 from base64 import b64encode
 
@@ -52,6 +52,9 @@ class JiraIssue:
     epic_link: str | None = None
     id: str = ""
     description_comments: list[str] | None = None
+    sprint_memberships: list["SprintMembership"] = field(default_factory=list)
+    current_sprint_id: str = ""
+    current_sprint_state: str = ""
 
     @property
     def final_description(self) -> str:
@@ -59,6 +62,23 @@ class JiraIssue:
         parts = [self.description.strip()]
         parts.extend(item.strip() for item in (self.description_comments or []) if item.strip())
         return "\n\n".join(part for part in parts if part)
+
+
+@dataclass(slots=True)
+class SprintMembership:
+    """A normalized Jira Software Sprint membership retained for cycle history."""
+
+    id: str = ""
+    name: str = ""
+    state: str = "unknown"
+    start_date: str = ""
+    end_date: str = ""
+    complete_date: str = ""
+    board_id: str = ""
+    joined_at: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
 
 
 @dataclass(slots=True)
@@ -88,11 +108,11 @@ class JiraClient:
         """Fetch a Jira issue by key (e.g., ECHNL-5552)."""
         encoded_key = urllib.parse.quote(issue_key)
         try:
-            response = self._request_json(f"/rest/api/3/issue/{encoded_key}")
+            response = self._request_json(f"/rest/api/3/issue/{encoded_key}?expand=changelog")
         except RuntimeError as exc:
             if "404" not in str(exc):
                 raise
-            response = self._request_json(f"/rest/api/3/issues/{encoded_key}")
+            response = self._request_json(f"/rest/api/3/issues/{encoded_key}?expand=changelog")
 
         issue = _jira_issue_from_item(response)
         issue.description_comments = self.fetch_description_template_comments(issue.key, issue.issue_type)
@@ -134,6 +154,65 @@ class JiraClient:
         for issue in issues:
             issue.description_comments = self.fetch_description_template_comments(issue.key, issue.issue_type)
         return issues
+
+    def sprint_preflight(self, sprint: str, project_key: str = "") -> dict[str, Any]:
+        """Return Web-safe Sprint validity and Development Done readiness data.
+
+        A successful JQL query proves that the authenticated user can query the
+        Sprint, including valid empty Sprints. Jira returns an authorization or
+        invalid-Sprint error before this method can incorrectly mark it valid.
+        """
+        value = (sprint or "").strip()
+        if not value:
+            raise ValueError("Sprint ID or name is required.")
+        sprint_record: dict[str, Any] = {}
+        if value.isdigit() and hasattr(self, "username") and hasattr(self, "api_token"):
+            sprint_record = self._request_json(f"/rest/agile/1.0/sprint/{urllib.parse.quote(value)}")
+            if not isinstance(sprint_record, dict) or not sprint_record.get("id"):
+                raise ValueError(f"Sprint {value} was not found or is not accessible.")
+        issues = self.search_issues_by_sprint(value, project_key=project_key)
+        configured_done = os.getenv("JIRA_DEVELOPMENT_DONE_STATUS", "Development Done").strip() or "Development Done"
+        not_done = [
+            {"jira_key": issue.key, "summary": issue.summary, "status": issue.status, "assignee": issue.assignee}
+            for issue in issues
+            if issue.status.strip().casefold() != configured_done.casefold()
+        ]
+        issue_rows = [
+            {
+                "jira_key": issue.key,
+                "summary": issue.summary,
+                "status": issue.status,
+                "assignee": issue.assignee,
+                "development_done": issue.status.strip().casefold() == configured_done.casefold(),
+                "sprints": [membership.to_dict() for membership in issue.sprint_memberships],
+                "current_sprint_id": issue.current_sprint_id,
+            }
+            for issue in issues
+        ]
+        ready = bool(issue_rows) and not not_done
+        if not issue_rows:
+            raise ValueError(
+                f"Sprint {value} has no accessible Issues. Verify the Sprint ID, project scope, and Jira permissions."
+            )
+        return {
+            "valid": True,
+            "accessible": True,
+            "sprint": value,
+            "sprint_id": str(sprint_record.get("id") or value),
+            "sprint_name": str(sprint_record.get("name") or value),
+            "sprint_state": str(sprint_record.get("state") or ""),
+            "project_key": project_key,
+            "issue_count": len(issue_rows),
+            "development_done_status": configured_done,
+            "development_done_count": len(issue_rows) - len(not_done),
+            "not_development_done_count": len(not_done),
+            "all_development_done": ready,
+            "review_mode": "final-sprint" if ready else "batch-preview",
+            "requires_confirmation": bool(not_done),
+            "empty": not issue_rows,
+            "issues": issue_rows,
+            "not_development_done_issues": not_done,
+        }
 
     def fetch_description_template_comments(self, issue_key: str, issue_type: str = "") -> list[str]:
         """Fetch all chronological comments containing the formal issue-description table."""
@@ -327,13 +406,8 @@ class JiraClient:
         """Extract sprint name from Jira custom field."""
         if not sprint_field:
             return ""
-        # Sprint field can be a list or a string with format: "com.atlassian.greenhopper.service.sprint.Sprint@xxx[id=123,...]"
-        if isinstance(sprint_field, list) and sprint_field:
-            sprint_field = sprint_field[0]
-        if isinstance(sprint_field, str):
-            match = re.search(r"name=([^,\]]+)", sprint_field)
-            return match.group(1) if match else sprint_field
-        return ""
+        selected = select_current_sprint(parse_sprint_memberships(sprint_field))
+        return selected.name if selected else ""
 
 
 def _plain_text(value: Any) -> str:
@@ -381,6 +455,127 @@ def is_description_template_comment(body: Any, text: str, issue_type: str = '') 
     return any(all(label in normalized for label in labels) for labels in required_rows)
 
 
+def normalize_sprint_state(value: Any) -> str:
+    state = str(value or "").strip().casefold()
+    if state in {"closed", "complete", "completed", "done"}:
+        return "complete"
+    if state in {"active", "started", "open"}:
+        return "active"
+    if state in {"future", "planned", "pending"}:
+        return "future"
+    return state or "unknown"
+
+
+def parse_sprint_memberships(value: Any, changelog: Any = None) -> list[SprintMembership]:
+    """Normalize every Sprint representation returned by Jira Cloud/Server."""
+    values = value if isinstance(value, list) else ([value] if value not in (None, "") else [])
+    memberships: list[SprintMembership] = []
+    for item in values:
+        parsed = _parse_sprint_membership(item)
+        if parsed and (parsed.id or parsed.name):
+            memberships.append(parsed)
+
+    joined_by_key = _sprint_joined_at_from_changelog(changelog)
+    by_identity: dict[tuple[str, str], SprintMembership] = {}
+    for item in memberships:
+        key = (item.id, item.name.casefold())
+        item.joined_at = joined_by_key.get(item.id) or joined_by_key.get(item.name.casefold()) or item.joined_at
+        previous = by_identity.get(key)
+        if previous is None or _sprint_recency_key(item) >= _sprint_recency_key(previous):
+            by_identity[key] = item
+    return sorted(by_identity.values(), key=_sprint_sort_key)
+
+
+def select_current_sprint(
+    memberships: list[SprintMembership],
+    preferred_id: str = "",
+    preferred_name: str = "",
+) -> SprintMembership | None:
+    """Choose the current review cycle Sprint without discarding old memberships."""
+    preferred_id = str(preferred_id or "").strip()
+    preferred_name = str(preferred_name or "").strip().casefold()
+    for membership in memberships:
+        if preferred_id and membership.id == preferred_id:
+            return membership
+        if preferred_name and membership.name.casefold() == preferred_name:
+            return membership
+    if not memberships:
+        return None
+    priority = {"active": 3, "future": 2, "complete": 1, "unknown": 0}
+    return max(
+        memberships,
+        key=lambda item: (priority.get(item.state, 0), _sprint_recency_key(item), _numeric_sort(item.id)),
+    )
+
+
+def _parse_sprint_membership(value: Any) -> SprintMembership | None:
+    if isinstance(value, dict):
+        return SprintMembership(
+            id=str(value.get("id") or ""),
+            name=str(value.get("name") or ""),
+            state=normalize_sprint_state(value.get("state")),
+            start_date=str(value.get("startDate") or value.get("start_date") or ""),
+            end_date=str(value.get("endDate") or value.get("end_date") or ""),
+            complete_date=str(value.get("completeDate") or value.get("complete_date") or ""),
+            board_id=str(value.get("originBoardId") or value.get("rapidViewId") or value.get("board_id") or ""),
+            joined_at=str(value.get("joinedAt") or value.get("joined_at") or ""),
+        )
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                return _parse_sprint_membership(payload)
+        except json.JSONDecodeError:
+            pass
+    # Legacy GreenHopper values use a comma-delimited Java toString format.
+    content_match = re.search(r"\[(.*)\]\s*$", text)
+    content = content_match.group(1) if content_match else text
+    pairs = {
+        match.group(1): match.group(2).strip()
+        for match in re.finditer(r"(?:^|,)([A-Za-z][A-Za-z0-9_]*)=([^,\]]*)", content)
+    }
+    if pairs:
+        return _parse_sprint_membership(pairs)
+    # Some Jira instances return only the Sprint name.
+    return SprintMembership(name=text)
+
+
+def _sprint_joined_at_from_changelog(changelog: Any) -> dict[str, str]:
+    histories = changelog.get("histories", []) if isinstance(changelog, dict) else []
+    result: dict[str, str] = {}
+    for history in histories if isinstance(histories, list) else []:
+        if not isinstance(history, dict):
+            continue
+        created = str(history.get("created") or "")
+        for item in history.get("items") or []:
+            if not isinstance(item, dict) or str(item.get("field") or "").casefold() != "sprint":
+                continue
+            for raw in (item.get("toString"), item.get("to")):
+                for membership in parse_sprint_memberships(raw):
+                    for key in (membership.id, membership.name.casefold()):
+                        if key:
+                            result[key] = max(result.get(key, ""), created)
+    return result
+
+
+def _numeric_sort(value: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _sprint_recency_key(item: SprintMembership) -> str:
+    return item.joined_at or item.start_date or item.complete_date or item.end_date or ""
+
+
+def _sprint_sort_key(item: SprintMembership) -> tuple[str, int, str]:
+    return (_sprint_recency_key(item), _numeric_sort(item.id), item.name.casefold())
+
+
 def _jira_issue_from_item(item: dict[str, Any]) -> JiraIssue:
 
     fields = item.get("fields") or {}
@@ -388,17 +583,22 @@ def _jira_issue_from_item(item: dict[str, Any]) -> JiraIssue:
     status = fields.get("status") or {}
     issue_type = fields.get("issuetype") or {}
     labels = fields.get("labels") or []
+    memberships = parse_sprint_memberships(fields.get("customfield_10005"), item.get("changelog"))
+    current_sprint = select_current_sprint(memberships)
     return JiraIssue(
         key=str(item.get("key") or ""),
         summary=str(fields.get("summary") or ""),
         description=_plain_text(fields.get("description")),
         assignee=str(assignee.get("displayName") or "Unassigned"),
         status=str(status.get("name") or "Unknown"),
-        sprint=JiraClient._extract_sprint_name(fields.get("customfield_10005")),
+        sprint=current_sprint.name if current_sprint else "",
         issue_type=str(issue_type.get("name") or ""),
         labels=labels if isinstance(labels, list) else [],
         epic_link=fields.get("customfield_10006") or None,
         id=str(item.get("id") or ""),
+        sprint_memberships=memberships,
+        current_sprint_id=current_sprint.id if current_sprint else "",
+        current_sprint_state=current_sprint.state if current_sprint else "",
     )
 
 

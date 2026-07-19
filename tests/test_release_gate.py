@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from code_reviewer.models import ChangedFile, ReviewInput, ReviewResult
+from code_reviewer.models import ChangedFile, Finding, ReviewInput, ReviewResult
 from code_reviewer.analyzer import _jira_involved_file_findings
 from code_reviewer.report import render_markdown
 from code_reviewer.resource_optimizer import optimize_prompt_diff
@@ -12,6 +13,7 @@ from code_reviewer.review_service import (
     _jira_sprint_branch_type_exclusion,
     _review_input_ignored_branch_type_exclusion,
     _release_gate_build_resource,
+    review_release_gate_from_mr_url,
 )
 
 
@@ -37,6 +39,81 @@ class _RoutingClient:
 
 
 class ReleaseGateTests(unittest.TestCase):
+    def test_web_release_gate_rejects_an_ordinary_mr_before_llm_analysis(self) -> None:
+        review_input = ReviewInput(
+            mr_url="https://gitlab.example.com/team/project/-/merge_requests/8",
+            source_branch="feature/ECHNL-6000",
+            metadata={"mr_type": "CODE"},
+        )
+        with patch("code_reviewer.review_service._review_input_from_mr_url", return_value=review_input), patch(
+            "code_reviewer.review_service.analyze"
+        ) as analyze:
+            with self.assertRaisesRegex(ValueError, "Release Gate requires a GIT_VERSION MR"):
+                review_release_gate_from_mr_url(review_input.mr_url)
+        analyze.assert_not_called()
+
+    def test_web_release_gate_returns_git_version_analysis_and_progress(self) -> None:
+        review_input = ReviewInput(
+            mr_url="https://gitlab.example.com/build/dps/-/merge_requests/88",
+            source_branch="DPS11_GIT_VERSION-1.4.75",
+            metadata={
+                "mr_type": "GIT_VERSION",
+                "release_gate": {
+                    "status": "ready",
+                    "source_repository_count": 3,
+                    "build_resource_count": 1,
+                    "errors": [],
+                },
+            },
+        )
+        expected = ReviewResult(review_input, [], "Pass", [], [])
+        events: list[dict[str, object]] = []
+        with patch("code_reviewer.review_service._review_input_from_mr_url", return_value=review_input), patch(
+            "code_reviewer.review_service.analyze", return_value=expected
+        ):
+            actual = review_release_gate_from_mr_url(
+                review_input.mr_url,
+                sprint="10085",
+                progress=events.append,
+            )
+
+        self.assertIs(actual, expected)
+        self.assertEqual([event["event"] for event in events], ["release-gate-fetch", "release-gate-preflight", "release-gate-analyzed"])
+        self.assertEqual(events[1]["release_gate_status"], "ready")
+        self.assertEqual(review_input.metadata["release_gate"]["status"], "ready")
+        self.assertEqual(review_input.metadata["release_gate"]["finding_blocker_count"], 0)
+
+    def test_web_release_gate_is_blocked_by_a_high_llm_finding(self) -> None:
+        review_input = ReviewInput(
+            mr_url="https://gitlab.example.com/build/dps/-/merge_requests/89",
+            metadata={"mr_type": "GIT_VERSION", "release_gate": {"status": "ready", "errors": []}},
+        )
+        expected = ReviewResult(
+            review_input,
+            [
+                Finding(
+                    severity="High",
+                    file_path="release/build.yml",
+                    line=None,
+                    title="Locked resource mismatch",
+                    detail="Mismatch",
+                    recommendation="Fix the lock",
+                )
+            ],
+            "Has issues",
+            [],
+            [],
+        )
+        with patch("code_reviewer.review_service._review_input_from_mr_url", return_value=review_input), patch(
+            "code_reviewer.review_service.analyze", return_value=expected
+        ):
+            review_release_gate_from_mr_url(review_input.mr_url)
+
+        gate = review_input.metadata["release_gate"]
+        self.assertEqual(gate["deterministic_status"], "ready")
+        self.assertEqual(gate["status"], "blocked")
+        self.assertEqual(gate["finding_blocker_count"], 1)
+
     def test_deferred_company_config_file_satisfies_jira_involved_file_list(self) -> None:
         review_input = ReviewInput(
             jira_key="ECHNL-6000",
@@ -77,8 +154,28 @@ class ReleaseGateTests(unittest.TestCase):
 
         markdown = render_markdown(result, language="en")
 
-        self.assertIn("Changed in deferred Company Config/SCR MR but not listed in Jira", markdown)
+        self.assertIn("Changed in deferred Company Config MR but not listed in Jira", markdown)
         self.assertIn("company/SV/config/actual.yml", markdown)
+
+    def test_deferred_scr_file_is_identified_with_exact_source_type(self) -> None:
+        review_input = ReviewInput(
+            jira_key="ECHNL-6001",
+            metadata={
+                "jira_description": "Involved File Lists\nrelease/expected.sql\nAcceptance Criteria",
+                "deferred_release_gate_resources": [
+                    {
+                        "release_gate_role": "scr",
+                        "mr_url": "https://gitlab.example.com/build/repo/-/merge_requests/22",
+                        "changed_file_paths": ["release/db_change.scr"],
+                    }
+                ],
+            },
+        )
+        findings = _jira_involved_file_findings(review_input)
+        markdown = render_markdown(ReviewResult(review_input, findings, "Has issues", [], []), language="en")
+
+        self.assertIn("Changed in deferred SCR MR but not listed in Jira", markdown)
+        self.assertNotIn("Changed in deferred Company Config MR", markdown)
 
     def test_branch_type_exclusion_keeps_changed_file_paths(self) -> None:
         review_input = ReviewInput(
