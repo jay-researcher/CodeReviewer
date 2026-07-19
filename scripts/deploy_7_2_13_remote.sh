@@ -10,6 +10,7 @@ STAMP="${DEPLOYMENT_STAMP:-$(date +%Y%m%d-%H%M%S)}"
 ARTIFACT="/tmp/codereviewer-7.2.13.tgz"
 CONFIG_TEMPLATE="/tmp/config-7.2.13-template.yml"
 CONFIG_MERGER="/tmp/merge_release_scope_config.py"
+BRANCH_SYNC="/tmp/sync_repository_branch_patterns.py"
 CURRENT="/opt/codereviewer/current"
 STAGING="/opt/codereviewer/staging/${TARGET_VERSION}-${STAMP}"
 PREVIOUS_DIR="/opt/codereviewer/releases/pre-${TARGET_VERSION}-${STAMP}"
@@ -75,6 +76,7 @@ verify_artifact() {
   [[ -f "${ARTIFACT}" ]]
   [[ -f "${CONFIG_TEMPLATE}" ]]
   [[ -f "${CONFIG_MERGER}" ]]
+  [[ -f "${BRANCH_SYNC}" ]]
   echo "${ARTIFACT_SHA256}  ${ARTIFACT}" | sha256sum -c -
   tar -tzf "${ARTIFACT}" >/dev/null
   [[ "$(current_version)" == "${PREVIOUS_VERSION}" ]]
@@ -189,6 +191,9 @@ prepare_and_test_staging() {
   tar -xzf "${ARTIFACT}" -C "${STAGING}"
   "${PYTHON}" "${CONFIG_MERGER}" \
     "${CURRENT}/config.yml" "${CONFIG_TEMPLATE}" "${STAGING}/config.yml"
+  "${PYTHON}" "${BRANCH_SYNC}" \
+    "${STAGING}/config.yml" "${CONFIG_TEMPLATE}" "${STAGING}/config.yml" \
+    --changes "${BACKUP_ROOT}/repository-branch-changes.json"
   if grep -Eq '(^|[[:space:]])[A-Za-z]:[/\\]' "${STAGING}/config.yml"; then
     echo "Merged production config contains a Windows path." >&2
     exit 1

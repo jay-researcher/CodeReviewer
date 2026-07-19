@@ -52,6 +52,26 @@ sudo /usr/local/sbin/codereviewer-rollback-latest
 
 固定回滚入口为 `/usr/local/sbin/codereviewer-rollback-20260720-001524`。脚本会校验备份、停止服务、保留失败版本、恢复 7.2.0 应用/配置/用户/数据库/报告/缓存，并验证版本、账户投影及 SQLite 完整性。
 
+### 生产分支模式修正
+
+部署后复核发现，生产 `config.yml` 仍保留 7.2.0 的具体补丁分支，例如 WVAdmin `1.0.83`、iTrade Client `7.5.0.56`/`7.5.1.38`、DPS `9.3.78`/`11.2.83`。2026-07-20 完成配置级修正：
+
+- 对全部 51 个包含 `repository_url` 的源码及构建仓库校验仓库 URL 后，只同步 `branch` 字段；
+- WVAdmin 使用 `1.0.*`，Services Terminal 使用 `5.0.*`；
+- iTrade Client 使用 `7.5.0.*` 和 `7.5.1.*`；
+- DPS9/DPS11 使用 `9.3.*` 和 `11.2.*`；
+- `dev_branch`、生产 Linux 路径、运行端点、超时及 `jira_prd.auto_fetch=true` 未改变；
+- 重启后 `/api/health=healthy`，用户文件哈希、SQLite schema v3 和历史数据保持一致。
+
+配置备份与独立回滚：
+
+```text
+/var/backups/codereviewer/config-branch-patterns-20260720-065957
+/usr/local/sbin/codereviewer-rollback-config-latest
+```
+
+该配置级回滚不会替换现有 `/usr/local/sbin/codereviewer-rollback-latest`；后者仍用于完整恢复到 7.2.0。
+
 ## 7.2.0 升级与回滚记录
 
 2026-07-17 将生产环境从 7.0.3 升级到 7.2.0。发布前停止服务并备份应用、EnvironmentFile、systemd Unit、用户及工作流数据、报告、Jira/PRD 缓存；制品解压后按字段合并 7.2.0 业务策略与生产 `config.yml`，保留全部 Linux working copy 路径。

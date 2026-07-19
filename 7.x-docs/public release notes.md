@@ -10,6 +10,7 @@
 - Sprint Overview 可分别查看 iTrade Client 7.5.0/7.5.1、DPS9/DPS11 等范围的发布准备度。
 - Issues Review History 汇总同一次 Review 的全部应用报告，并在 Problem 上标明所属范围。
 - 多人协作的报告访问与跟进改为使用完整 Responsible Scope。
+- 生产仓库分支配置统一使用版本线通配符，例如 `1.0.*`、`7.5.0.*`、`9.3.*`，后续补丁版本无需逐次修改配置。
 
 ## 7.2.12 — 2026-07-19 12:31:03 CST
 
