@@ -1,6 +1,6 @@
 # 部署 CodeReviewer 到 192.168.3.78
 
-更新日期：2026-07-17
+更新日期：2026-07-20
 
 本文记录本次真实部署结果。通用部署原则和完整生产建议参见 [CodeReviewer-RHEL9-Deployment-Guide.md](CodeReviewer-RHEL9-Deployment-Guide.md)。
 
@@ -9,17 +9,48 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `7.2.0` |
-| 部署制品 | `codereviewer-7.2.0-20260717-203354.tgz`，SHA-256 `0cc4db69a3f3f0b08de828bc394dd853a92b82641bca4a0e89c3c686d844968a` |
+| CodeReviewer 版本 | `7.2.13` |
+| 部署制品 | `codereviewer-7.2.13-27d7e4c.tgz`，SHA-256 `f8442696e3cd2fc0a1e50e8d33f0ab74fb4cb8e15a7f1f051e1b9f375da9b162` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `GET /api/version` 返回 `{"ok": true, "version": "7.2.0"}` |
+| 健康检查 | `/api/version` 返回 `7.2.13`，`/api/health` 返回 `healthy` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 182 passed |
+| RHEL9 测试 | 252 passed |
+
+## 7.2.13 升级与回滚记录
+
+2026-07-20 将生产环境从 7.2.0 升级到 7.2.13。部署使用 GitHub `20260714` 分支固定提交 `27d7e4cbcaa8617a7b1108367276977d3475f61f` 的 `git archive` 制品，不包含本地未跟踪文件。
+
+生产发布采用以下保护措施：
+
+- 在停止服务后对应用、EnvironmentFile、systemd Unit、`current/data`、`/var/lib/codereviewer/data`、报告及 Jira/PRD 缓存创建一致性归档，并验证 SHA-256 和 tar 可读性；
+- 不覆盖生产 `config.yml`，只从 7.2.13 模版合并 `application`、`release_line` 和 `release_lines`；生产 `jira_prd.auto_fetch=true`、Linux working copy、端点、超时及运行策略保持不变；
+- `requirements.txt` 依赖集合没有变化，因此生产虚拟环境未修改；
+- 首次启动临时关闭账户清理，并在启动前后比对全部 10 个账户的凭据指纹、角色及启停状态；
+- SQLite 在事务内从 schema v2 幂等升级至 v3；`integrity_check=ok`，新增 `review_runs.release_line`，旧工作流表记录数量未下降；
+- `/api/version`、`/api/health`、登录页、Robot Challenge、登录背景资源及未认证 Manager API 保护均通过；
+- 服务保持 `codereviewer:codereviewer` 运行，监听既有生产地址 `0.0.0.0:8765`；`web_users.json` 保持 `0600 codereviewer:codereviewer`。
+
+首次切换后的业务与数据校验已经通过，但最终收集日志时，RHEL 9 的 `journalctl --since` 拒绝带时区偏移的 ISO 时间格式，发布脚本因此自动执行回滚。回滚成功恢复 7.2.0、SQLite schema v2、全部账户与数据；修正为 RHEL 接受的本地时间格式后，第二次发布及独立验收全部通过。
+
+一致性备份：
+
+```text
+/var/backups/codereviewer/7.2.0-to-7.2.13-20260720-001524/system-backup.tgz
+/var/backups/codereviewer/7.2.0-to-7.2.13-20260720-001524/system-backup.tgz.sha256
+```
+
+一键还原：
+
+```bash
+sudo /usr/local/sbin/codereviewer-rollback-latest
+```
+
+固定回滚入口为 `/usr/local/sbin/codereviewer-rollback-20260720-001524`。脚本会校验备份、停止服务、保留失败版本、恢复 7.2.0 应用/配置/用户/数据库/报告/缓存，并验证版本、账户投影及 SQLite 完整性。
 
 ## 7.2.0 升级与回滚记录
 

@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import argparse
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+SCOPE_KEYS = ("application", "release_line", "release_lines")
+REQUIRED_SCOPE_PATHS = (
+    ("dps9-repository",),
+    ("dps11-repository",),
+    ("build-repository", "itrade-client"),
+    ("build-repository", "services-terminal"),
+    ("build-repository", "wvadmin"),
+    ("build-repository", "dps"),
+    ("itrade-client", "itrade-client-7.5.0"),
+    ("itrade-client", "itrade-client"),
+    ("itrade-client", "services-terminal"),
+    ("wvadmin-repository",),
+)
+
+
+def _mapping_at(payload: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
+    current: Any = payload
+    for segment in path:
+        if not isinstance(current, dict) or segment not in current:
+            raise RuntimeError(f"Production config is missing required scope path: {'.'.join(path)}")
+        current = current[segment]
+    if not isinstance(current, dict):
+        raise RuntimeError(f"Scope path is not a mapping: {'.'.join(path)}")
+    return current
+
+
+def merge_release_scopes(production: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
+    # Deliberately update only the 7.2.13 review-boundary fields. Runtime policy,
+    # endpoints, timeouts, auto-fetch and Linux paths remain production-owned.
+    for path in REQUIRED_SCOPE_PATHS:
+        target = _mapping_at(production, path)
+        source = _mapping_at(template, path)
+        copied = False
+        for key in SCOPE_KEYS:
+            if key in source:
+                target[key] = source[key]
+                copied = True
+        if not copied:
+            raise RuntimeError(f"Template has no release scope at: {'.'.join(path)}")
+    return production
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Merge only 7.2.13 application/release-line fields into production config."
+    )
+    parser.add_argument("production", type=Path)
+    parser.add_argument("template", type=Path)
+    parser.add_argument("output", type=Path)
+    args = parser.parse_args()
+
+    production = yaml.safe_load(args.production.read_text(encoding="utf-8")) or {}
+    template = yaml.safe_load(args.template.read_text(encoding="utf-8")) or {}
+    if not isinstance(production, dict) or not isinstance(template, dict):
+        raise RuntimeError("Both configuration documents must contain YAML mappings.")
+    merged = merge_release_scopes(production, template)
+    rendered = yaml.safe_dump(merged, allow_unicode=True, sort_keys=False, width=120)
+    if re.search(r"(?i)\b[A-Z]:[/\\]", rendered):
+        raise RuntimeError("Production config contains a Windows absolute path.")
+    args.output.write_text(rendered, encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
