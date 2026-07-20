@@ -141,6 +141,20 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(content)
             return
+        if parsed.path == "/assets/ttl-jay-crystal-logo.png":
+            asset = WEB_STATIC_DIR / "ttl-jay-crystal-logo.png"
+            if not asset.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            content = asset.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(content)
+            return
         if parsed.path == "/login":
             self._send_html(render_login())
             return
@@ -343,6 +357,7 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
                 if not detail:
                     self._send_json({"ok": False, "error": "Issue review was not found."}, status=HTTPStatus.NOT_FOUND)
                 else:
+                    _enrich_issue_review_finding_details(detail)
                     self._send_json({"ok": True, **detail, "permissions": _web_user_permissions(user), "role": _web_user_role(user)})
             except PermissionError as exc:
                 self._send_json({"ok": False, "error": str(exc) or "Forbidden"}, status=HTTPStatus.FORBIDDEN)
@@ -973,7 +988,11 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "Jira filter review is only available to Manager users."}, status=HTTPStatus.FORBIDDEN)
                 return
             jira_key = _text(payload.get("jira_key")).strip().upper()
-            is_single_jira_review = jira_key and not _text(payload.get("sprint")).strip() and not _text(payload.get("jira_filter")).strip()
+            is_single_jira_review = (
+                len(_jira_keys_from_text(jira_key)) == 1
+                and not _text(payload.get("sprint")).strip()
+                and not _text(payload.get("jira_filter")).strip()
+            )
             if is_single_jira_review and not bool(payload.get("rerun_confirmed")):
                 reuse_check = report_reuse_check(
                     jira_key=jira_key,
@@ -3131,9 +3150,75 @@ def _build_report_chat_reply(report_name: str, report_text: str, thread: dict[st
 def _extract_report_findings(report_text: str) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
     pattern = re.compile(r"^###\s+(\d+)\.\s+\[([^\]]+)\]\s+(.+?)\s*$", re.M)
-    for match in pattern.finditer(report_text or ""):
-        findings.append({"index": match.group(1), "severity": match.group(2).strip(), "title": match.group(3).strip()})
+    matches = list(pattern.finditer(report_text or ""))
+    for position, match in enumerate(matches):
+        section_end = matches[position + 1].start() if position + 1 < len(matches) else len(report_text or "")
+        section = (report_text or "")[match.end() : section_end]
+        problem = _report_finding_labeled_text(
+            section,
+            r"(?:问题(?:描述|详情)?|Problem(?:\s+(?:Description|Detail))?|Detail)",
+        )
+        suggestion = _report_finding_labeled_text(
+            section,
+            r"(?:建议|处理建议|解决建议|Recommendation|Suggestion)",
+        )
+        findings.append(
+            {
+                "index": match.group(1),
+                "severity": match.group(2).strip(),
+                "title": match.group(3).strip(),
+                "problem": problem,
+                "detail": problem,
+                "suggestion": suggestion,
+                "recommendation": suggestion,
+            }
+        )
     return findings
+
+
+def _report_finding_labeled_text(section: str, label_pattern: str) -> str:
+    match = re.search(
+        rf"^\s*[-*]\s*(?:{label_pattern})\s*[:：]\s*(.+?)\s*$",
+        section or "",
+        re.I | re.M,
+    )
+    if not match:
+        return ""
+    value = re.sub(r"`([^`]+)`", r"\1", match.group(1).strip())
+    value = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _enrich_issue_review_finding_details(detail: dict[str, object]) -> None:
+    """Add report problem/recommendation text to legacy workflow rows at read time."""
+    parsed_by_run: dict[str, dict[str, dict[str, str]]] = {}
+    for run in detail.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        report_path = Path(str(run.get("report_path") or ""))
+        parsed = _extract_report_findings(
+            report_path.read_text(encoding="utf-8", errors="ignore")
+        ) if report_path.is_file() else []
+        by_index = {str(item.get("index") or ""): item for item in parsed}
+        parsed_by_run[str(run.get("id") or "")] = by_index
+        for finding in run.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            source = by_index.get(str(finding.get("report_index") or ""), {})
+            details = finding.get("details") if isinstance(finding.get("details"), dict) else {}
+            finding["details"] = {**source, **details}
+    latest_group = detail.get("latest_run_group")
+    if not isinstance(latest_group, dict):
+        return
+    for finding in latest_group.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        source = parsed_by_run.get(str(finding.get("run_id") or ""), {}).get(
+            str(finding.get("report_index") or ""),
+            {},
+        )
+        details = finding.get("details") if isinstance(finding.get("details"), dict) else {}
+        finding["details"] = {**source, **details}
 
 
 def _related_thread_text_for_finding(finding: dict[str, str], messages: list[str]) -> str:
@@ -4774,15 +4859,9 @@ def render_login() -> str:
       width: 44px;
       height: 44px;
       flex: 0 0 auto;
-      display: grid;
-      place-items: center;
-      border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
-      border-radius: 12px;
-      background: linear-gradient(145deg, var(--accent), #248bff);
-      color: white;
-      font-size: 22px;
-      font-weight: 800;
-      box-shadow: 0 8px 20px color-mix(in srgb, var(--accent) 28%, transparent);
+      display: block;
+      object-fit: contain;
+      filter: drop-shadow(0 8px 14px color-mix(in srgb, var(--accent) 32%, transparent));
     }}
     .login-kicker {{
       color: var(--accent-strong);
@@ -4942,7 +5021,7 @@ def render_login() -> str:
   <main>
     <div class="login-head">
       <div class="login-brand">
-        <span class="brand-mark" aria-hidden="true">&#x2713;</span>
+        <img class="brand-mark" src="/assets/ttl-jay-crystal-logo.png" alt="">
         <div><div class="login-kicker">Secure review workspace</div><h1>CodeReviewer</h1></div>
       </div>
       <button id="loginHealthBtn" class="health-indicator" data-status="checking" type="button" aria-haspopup="dialog"><span class="health-dot" aria-hidden="true"></span><span id="loginHealthLabel">Checking</span></button>
@@ -5251,6 +5330,19 @@ def render_index(user: str = "") -> str:
       align-items: center;
       justify-content: space-between;
       gap: 16px;
+    }
+    .topbar-brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      min-width: 0;
+    }
+    .topbar-brand img {
+      width: 32px;
+      height: 38px;
+      flex: 0 0 auto;
+      object-fit: contain;
+      filter: drop-shadow(0 5px 8px color-mix(in srgb, var(--accent) 24%, transparent));
     }
     .topbar-meta {
       display: flex;
@@ -6017,6 +6109,7 @@ def render_index(user: str = "") -> str:
       display: flex;
       flex-direction: column;
       gap: 12px;
+      overflow: hidden;
       padding: 20px;
       font-size: 14px;
       border: 1px solid var(--line);
@@ -6061,6 +6154,7 @@ def render_index(user: str = "") -> str:
       display: grid;
       grid-template-columns: minmax(300px, .9fr) minmax(420px, 1.1fr);
       gap: 10px;
+      min-width: 0;
     }
     .coverage-view-tabs {
       display: flex;
@@ -6083,7 +6177,8 @@ def render_index(user: str = "") -> str:
     }
     .coverage-view-panel {
       min-height: 0;
-      overflow: auto;
+      overflow-x: hidden;
+      overflow-y: auto;
     }
     .coverage-view-panel[hidden] { display: none; }
     .coverage-overview-panel {
@@ -6092,6 +6187,7 @@ def render_index(user: str = "") -> str:
     }
     .coverage-report-totals,
     .coverage-report-lifecycle {
+      min-width: 0;
       padding: 12px;
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -6110,6 +6206,25 @@ def render_index(user: str = "") -> str:
       padding: 9px 10px;
       border-radius: 8px;
       background: color-mix(in srgb, var(--bg) 68%, var(--panel));
+    }
+    .coverage-report-total-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+    .coverage-report-total-head > span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .coverage-run-missing {
+      min-height: 28px;
+      padding: 4px 9px;
+      border-radius: 6px;
+      font-size: 12px;
+      white-space: nowrap;
     }
     .coverage-report-total span,
     .coverage-lifecycle-head span {
@@ -6130,12 +6245,25 @@ def render_index(user: str = "") -> str:
     .coverage-ratio-without { background: color-mix(in srgb, var(--muted) 62%, var(--line)); }
     .coverage-lifecycle-head {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
       gap: 10px;
       margin-bottom: 8px;
     }
-    .coverage-lifecycle-head strong { font-size: 16px; }
+    .coverage-lifecycle-head > div:first-child {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+    .coverage-lifecycle-head strong {
+      display: block;
+      font-size: 16px;
+      line-height: 1.3;
+    }
+    .coverage-lifecycle-head > div:first-child span {
+      display: block;
+      line-height: 1.4;
+    }
     .coverage-operational {
       display: flex;
       align-items: center;
@@ -6369,7 +6497,8 @@ def render_index(user: str = "") -> str:
     }
     .coverage-results {
       min-height: 240px;
-      overflow: auto;
+      overflow-x: hidden;
+      overflow-y: auto;
       border: 1px solid var(--line);
       border-radius: 10px;
       padding: 10px;
@@ -7890,7 +8019,15 @@ def render_index(user: str = "") -> str:
     .finding-head-main { min-width: 0; }
     .finding-summary { display: -webkit-box; margin: 10px 0 0; overflow: hidden; color: var(--muted); line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
     .finding-summary.expanded { display: block; white-space: pre-wrap; }
-    .finding-evidence-preview { display: grid; gap: 6px; margin-top: 11px; }
+    .finding-evidence-preview {
+      display: grid;
+      gap: 7px;
+      margin-top: 11px;
+      padding: 10px 11px;
+      border: 1px solid color-mix(in srgb, var(--accent) 12%, var(--line));
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--accent) 3%, var(--panel));
+    }
     .finding-evidence-line {
       display: grid;
       grid-template-columns: 68px minmax(0, 1fr);
@@ -7898,7 +8035,7 @@ def render_index(user: str = "") -> str:
       color: var(--muted);
       line-height: 1.5;
     }
-    .finding-evidence-label { color: var(--text); font-size: 12px; font-weight: 700; }
+    .finding-evidence-label { color: var(--accent-strong); font-size: 12px; font-weight: 700; }
     .finding-evidence-text {
       display: -webkit-box;
       overflow: hidden;
@@ -8203,7 +8340,7 @@ def render_index(user: str = "") -> str:
 <body>
   <header>
     <div class="topbar">
-      <h1>CodeReviewer</h1>
+      <div class="topbar-brand"><img src="/assets/ttl-jay-crystal-logo.png" alt=""><h1>CodeReviewer</h1></div>
       <div class="meta topbar-meta">
         <button id="issueReviewsBtn" class="secondary workflow-launch" type="button">Issue Reviews</button>
         <button id="pendingJiraBtn" class="secondary workflow-launch" type="button">Pending Jira</button>
@@ -9926,11 +10063,15 @@ __ADMIN_TRACE_SECTION__
       const withoutPercent = reportTotal ? 100 - withPercent : 0;
       const breakdown = reportCoverage.generated_breakdown || {};
       const applicationProgress = Array.isArray(data.application_progress) ? data.application_progress : [];
+      const missingIssueKeys = rows
+        .filter(item => item.workflow_status === 'missing' && item.jira_key)
+        .map(item => String(item.jira_key).trim().toUpperCase())
+        .filter(Boolean);
       $('coverageOverviewEmpty').hidden = true;
       $('coverageSummary').innerHTML = `
         <section class="coverage-report-totals" aria-label="Issue report coverage">
-          <div class="coverage-report-total"><span>Issues with reports</span><strong>${withReports}</strong><small>${withPercent}% of ${rows.length} Issue(s)</small></div>
-          <div class="coverage-report-total"><span>Issues without reports</span><strong>${withoutReports}</strong><small>${withoutPercent}% of ${rows.length} Issue(s)</small></div>
+          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues with reports</span></div><strong>${withReports}</strong><small>${withPercent}% of ${rows.length} Issue(s)</small></div>
+          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues without reports</span>${missingIssueKeys.length && currentPermissions.run_sprint_review ? `<button class="secondary coverage-run-missing" type="button" data-coverage-run-missing="${escapeHtml(missingIssueKeys.join(','))}">Run remaining</button>` : ''}</div><strong>${withoutReports}</strong><small>${withoutPercent}% of ${rows.length} Issue(s)</small></div>
           <div class="coverage-ratio-track" aria-hidden="true"><span class="coverage-ratio-with" style="width:${withPercent}%"></span><span class="coverage-ratio-without" style="width:${withoutPercent}%"></span></div>
         </section>
         <section class="coverage-report-lifecycle" aria-label="Generated report review lifecycle">
@@ -10022,6 +10163,9 @@ __ADMIN_TRACE_SECTION__
       for (const button of document.querySelectorAll('[data-coverage-run-review]')) {
         button.addEventListener('click', () => runCoverageIssueReview(button.dataset.coverageRunReview || '', button));
       }
+      for (const button of document.querySelectorAll('[data-coverage-run-missing]')) {
+        button.addEventListener('click', () => runCoverageMissingReviews(button.dataset.coverageRunMissing || '', button));
+      }
       setCoverageView('overview');
     }
 
@@ -10032,8 +10176,21 @@ __ADMIN_TRACE_SECTION__
       if ($('jira')) $('jira').value = key;
       if ($('sprint')) $('sprint').value = '';
       if ($('jiraFilter')) $('jiraFilter').value = '';
-      await singleFlight(`coverage-run-review-${key}`, button, () => runReview({ keepCoverageOpen: true }));
-      if (!$('coverageModal').hidden) await scanCoverage();
+      closeCoverage();
+      await singleFlight(`coverage-run-review-${key}`, button, () => runReview());
+    }
+
+    async function runCoverageMissingReviews(rawKeys, button) {
+      const keys = Array.from(new Set(String(rawKeys || '').match(/\\b[A-Z][A-Z0-9]+-\\d+\\b/gi) || []))
+        .map(key => key.toUpperCase());
+      if (!keys.length || !currentPermissions.run_sprint_review || button?.disabled) return;
+      if (!window.confirm(`Start Code Review for ${keys.length} Issue(s) without reports?`)) return;
+      if (button) button.textContent = 'Starting…';
+      if ($('jira')) $('jira').value = keys.join(', ');
+      if ($('sprint')) $('sprint').value = '';
+      if ($('jiraFilter')) $('jiraFilter').value = '';
+      closeCoverage();
+      await singleFlight(`coverage-run-missing-${keys.join('-')}`, button, () => runReview());
     }
 
     function coverageStatusLabel(value) {
@@ -12319,7 +12476,7 @@ function jiraKeyFromReportPath(reportPath) {
       const lineage = ({new:'New in this run', persisting:`Still present${finding.first_seen_run ? ` since Run ${finding.first_seen_run}` : ''}`, resolved:'Resolved after re-scan'})[String(finding.lineage_state || '').toLowerCase()] || statusLabel(finding.lineage_state);
       const fileStatus = finding.file_path || 'Architecture / No specific file';
       const scopeLabel = String(finding.scope_label || finding.application || 'Unmapped');
-      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div class="finding-head-main"><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <span class="status-chip">${escapeHtml(scopeLabel)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta finding-context">${escapeHtml(fileStatus)} · ${escapeHtml(lineage)}</div>${hasEvidence ? `<div class="finding-evidence-preview" id="finding-summary-${finding.id}">${problemText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">问题</span><span class="finding-evidence-text">${escapeHtml(problemText)}</span></div>` : ''}${suggestionText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">建议</span><span class="finding-evidence-text">${escapeHtml(suggestionText)}</span></div>` : ''}</div><button class="finding-summary-toggle" type="button" data-expand-finding="${finding.id}" aria-label="View full details" aria-expanded="false" aria-controls="finding-summary-${finding.id}">更多</button>` : ''}</div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : `<button class="finding-head-action" data-handle-finding="${finding.id}" type="button">Submit</button>`}</div>
+      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div class="finding-head-main"><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <span class="status-chip">${escapeHtml(scopeLabel)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta finding-context">${escapeHtml(fileStatus)} · ${escapeHtml(lineage)}</div>${hasEvidence ? `<div class="finding-evidence-preview" id="finding-summary-${finding.id}">${problemText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">问题详情</span><span class="finding-evidence-text">${escapeHtml(problemText)}</span></div>` : ''}${suggestionText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">处理建议</span><span class="finding-evidence-text">${escapeHtml(suggestionText)}</span></div>` : ''}</div><button class="finding-summary-toggle" type="button" data-expand-finding="${finding.id}" aria-label="View full details" aria-expanded="false" aria-controls="finding-summary-${finding.id}">更多</button>` : ''}</div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : `<button class="finding-head-action" data-handle-finding="${finding.id}" type="button">Submit</button>`}</div>
         ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-handling-form"><div class="finding-handling-primary"><label><span>处理结果 <span class="required-mark" aria-hidden="true">*</span></span><select id="disposition-${finding.id}" data-finding-disposition="${finding.id}" required><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select></label><label><span id="note-label-${finding.id}">处理说明 <span class="required-mark" aria-hidden="true">*</span></span><textarea id="note-${finding.id}" aria-labelledby="note-label-${finding.id}" aria-describedby="error-${finding.id}" placeholder="说明修改内容、判断依据及测试结果" required></textarea></label><div id="error-${finding.id}" class="field-message" role="alert"></div></div><div class="finding-handling-secondary"><div id="followup-${finding.id}" class="followup-fields" hidden><div class="followup-fields-head"><label><span>Issue Summary <span class="required-mark" aria-hidden="true">*</span></span><textarea class="summary-input" id="jira-summary-${finding.id}" maxlength="255" rows="2" placeholder="概括待跟进问题，建议 20–50 个字符"></textarea></label></div><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('')))}</textarea><div class="followup-card-head"><div class="followup-adf-state"><strong>Issue Description <span class="required-mark" aria-hidden="true">*</span></strong><div id="jira-adf-preview-${finding.id}" class="followup-adf-preview">Not provided yet.</div><div id="jira-adf-status-${finding.id}" class="meta">Open the editor and add the follow-up details.</div></div><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit issue</button></div></div></div></div>`}
       </article>`;
     }

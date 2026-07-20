@@ -19,4 +19,5 @@ select
 *.log
 *.tmp
 .tmp-ui.html
+tmp/
 _bmad/

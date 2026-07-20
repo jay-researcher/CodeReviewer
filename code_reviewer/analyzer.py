@@ -335,14 +335,17 @@ def _jira_involved_file_findings(review_input: ReviewInput) -> list[Finding]:
     actual = [_normalize_actual_changed_path(item.path) for item in review_input.changed_files]
     actual = _unique_preserve_order([item for item in actual if item])
     deferred_actual = _deferred_release_gate_file_paths(review_input)
-    effective_actual = _unique_preserve_order([*actual, *deferred_actual])
-    missing = [item for item in expected if not _path_matches_any(item, effective_actual)]
-    unexpected = [item for item in effective_actual if not _path_matches_any(item, expected)]
+    excluded_deferred = [item for item in expected if _path_matches_any(item, deferred_actual)]
+    comparison_expected = [item for item in expected if item not in excluded_deferred]
+    missing = [item for item in comparison_expected if not _path_matches_any(item, actual)]
+    unexpected = [item for item in actual if not _path_matches_any(item, comparison_expected)]
     review_input.metadata["jira_involved_files_check"] = {
-        "expected": expected,
+        "expected": comparison_expected,
+        "original_expected": expected,
         "actual": actual,
         "deferred_actual": deferred_actual,
-        "effective_actual": effective_actual,
+        "excluded_deferred": excluded_deferred,
+        "effective_actual": actual,
         "missing": missing,
         "unexpected": unexpected,
     }

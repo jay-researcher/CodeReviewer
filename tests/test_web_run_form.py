@@ -105,9 +105,11 @@ class WebRunFormTests(unittest.TestCase):
         self.assertIn("async function pollCoverageJob(jobId, options = {})", page)
         self.assertIn("Closing this window will not stop it.", page)
         self.assertNotIn("coverageController.abort(), 60000", page)
-        self.assertIn("runReview({ keepCoverageOpen: true })", page)
+        self.assertIn("async function runCoverageIssueReview(", page)
+        self.assertIn("closeCoverage();", page)
+        self.assertNotIn("runReview({ keepCoverageOpen: true })", page)
         self.assertIn('class="coverage-card-state"', page)
-        self.assertNotIn("closeCoverage();\n      setRunFormCollapsed(false);", page)
+        self.assertIn("data-coverage-run-missing=", page)
 
     def test_review_progress_pauses_auto_scroll_for_sixty_seconds_after_manual_input(self) -> None:
         page = render_index("admin")

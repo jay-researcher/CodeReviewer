@@ -313,9 +313,10 @@ def _involved_file_mismatch_table(source: ReviewInput, language: str) -> list[st
     if not actual:
         actual = _unique_text_lines([str(item) for item in check.get("actual") or []])
     deferred_actual = _unique_text_lines([str(item) for item in check.get("deferred_actual") or []])
-    effective_actual = _unique_text_lines([*actual, *deferred_actual])
-    deferred_keys = {item.lower() for item in deferred_actual}
-    deferred_sources = _deferred_file_source_types(source)
+    # Company Config/SCR resources are verified by the GIT_VERSION Release Gate.
+    # They are deliberately absent from this ordinary MR traceability table.
+    expected = [item for item in expected if not _first_matching_path(item, deferred_actual)]
+    effective_actual = actual
     missing = {item.lower() for item in expected if not _first_matching_path(item, effective_actual)}
     unexpected = {item.lower() for item in effective_actual if not _first_matching_path(item, expected)}
     headers = (
@@ -332,15 +333,7 @@ def _involved_file_mismatch_table(source: ReviewInput, language: str) -> list[st
         match = _first_matching_path(expected_path, effective_actual)
         if match:
             matched_actual.add(match.lower())
-            if match.lower() in deferred_keys:
-                source_type = _deferred_source_type_for_path(match, deferred_sources)
-                remark = (
-                    f"Matched in deferred {source_type} MR; verify at the GIT_VERSION release gate"
-                    if language == "en"
-                    else f"在延后处理的 {source_type} MR 中匹配；由 GIT_VERSION 发布闸门校验"
-                )
-            else:
-                remark = "Matched" if language == "en" else "匹配"
+            remark = "Matched" if language == "en" else "匹配"
             lines.append(f"| `{_table_cell(expected_path)}` | `{_table_cell(match)}` | {remark} |")
         else:
             remark = "Expected in Jira but not changed in MR diff" if language == "en" else "Jira 已列出，但 MR diff 未提交"
@@ -350,15 +343,7 @@ def _involved_file_mismatch_table(source: ReviewInput, language: str) -> list[st
         if actual_path.lower() in matched_actual:
             continue
         if actual_path.lower() in unexpected or not _first_matching_path(actual_path, expected):
-            if actual_path.lower() in deferred_keys:
-                source_type = _deferred_source_type_for_path(actual_path, deferred_sources)
-                remark = (
-                    f"Changed in deferred {source_type} MR but not listed in Jira"
-                    if language == "en"
-                    else f"延后处理的 {source_type} MR 已提交，但 Jira 涉及文件清单未列出"
-                )
-            else:
-                remark = "Changed in MR but not listed in Jira" if language == "en" else "MR 已提交，但 Jira 涉及文件清单未列出"
+            remark = "Changed in MR but not listed in Jira" if language == "en" else "MR 已提交，但 Jira 涉及文件清单未列出"
             lines.append(f"| - | `{_table_cell(actual_path)}` | {remark} |")
     return lines
 

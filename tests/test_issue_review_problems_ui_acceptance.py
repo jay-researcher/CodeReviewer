@@ -55,8 +55,8 @@ class IssueReviewProblemsUiAcceptanceTests(unittest.TestCase):
         page = self.page
         renderer = self.finding_renderer
         self.assertIn('class="finding-evidence-preview"', renderer)
-        self.assertIn('class="finding-evidence-label">问题', renderer)
-        self.assertIn('class="finding-evidence-label">建议', renderer)
+        self.assertIn('class="finding-evidence-label">问题详情', renderer)
+        self.assertIn('class="finding-evidence-label">处理建议', renderer)
         self.assertIn("details.recommendation", renderer)
         self.assertIn('data-expand-finding="${finding.id}"', renderer)
         self.assertIn('aria-expanded="false"', renderer)

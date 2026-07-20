@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from code_reviewer.models import ChangedFile, Finding, ReviewInput, ReviewResult
 from code_reviewer.analyzer import _jira_involved_file_findings
-from code_reviewer.report import render_markdown
+from code_reviewer.report import _involved_file_mismatch_table, render_markdown
 from code_reviewer.resource_optimizer import optimize_prompt_diff
 from code_reviewer.review_service import (
     _hydrate_mr_record_for_routing,
@@ -132,8 +132,10 @@ class ReleaseGateTests(unittest.TestCase):
         check = review_input.metadata["jira_involved_files_check"]
         self.assertEqual(check["missing"], [])
         self.assertEqual(check["deferred_actual"], ["company/SV/config/client.yml"])
+        self.assertEqual(check["excluded_deferred"], ["company/SV/config/client.yml"])
+        self.assertEqual(check["expected"], [])
 
-    def test_deferred_file_is_identified_in_mismatch_report(self) -> None:
+    def test_deferred_company_config_file_is_excluded_from_mismatch_report(self) -> None:
         review_input = ReviewInput(
             jira_key="ECHNL-6000",
             metadata={
@@ -153,11 +155,13 @@ class ReleaseGateTests(unittest.TestCase):
         result = ReviewResult(review_input, findings, "Has issues", [], [])
 
         markdown = render_markdown(result, language="en")
+        mismatch_table = "\n".join(_involved_file_mismatch_table(review_input, "en"))
 
-        self.assertIn("Changed in deferred Company Config MR but not listed in Jira", markdown)
-        self.assertIn("company/SV/config/actual.yml", markdown)
+        self.assertNotIn("Changed in deferred Company Config MR but not listed in Jira", markdown)
+        self.assertNotIn("company/SV/config/actual.yml", mismatch_table)
+        self.assertIn("company/SV/config/expected.yml", mismatch_table)
 
-    def test_deferred_scr_file_is_identified_with_exact_source_type(self) -> None:
+    def test_deferred_scr_file_is_excluded_from_mismatch_report(self) -> None:
         review_input = ReviewInput(
             jira_key="ECHNL-6001",
             metadata={
@@ -173,8 +177,10 @@ class ReleaseGateTests(unittest.TestCase):
         )
         findings = _jira_involved_file_findings(review_input)
         markdown = render_markdown(ReviewResult(review_input, findings, "Has issues", [], []), language="en")
+        mismatch_table = "\n".join(_involved_file_mismatch_table(review_input, "en"))
 
-        self.assertIn("Changed in deferred SCR MR but not listed in Jira", markdown)
+        self.assertNotIn("Changed in deferred SCR MR but not listed in Jira", markdown)
+        self.assertNotIn("release/db_change.scr", mismatch_table)
         self.assertNotIn("Changed in deferred Company Config MR", markdown)
 
     def test_branch_type_exclusion_keeps_changed_file_paths(self) -> None:

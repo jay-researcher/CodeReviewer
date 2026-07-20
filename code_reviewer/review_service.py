@@ -3841,15 +3841,20 @@ def run_review_from_payload(payload: dict[str, Any], progress: Any = None) -> di
             "severity_counts": _sum_summary_severity_counts(summary),
         }
     if mode == "jira":
-        summary = review_jira_issue_merge_requests(
-            jira_key=_text(payload.get("jira_key")),
-            state=_text(payload.get("state")) or configured_state,
-            limit=int(payload.get("limit") or configured_limit),
-            output_dir=output_dir,
-            context_repo=context_repo,
-            progress=progress,
-            report_owner=report_owner,
-            force_rerun=force_rerun,
+        jira_keys = parse_jira_issue_keys(_text(payload.get("jira_key")))
+        review_kwargs = {
+            "state": _text(payload.get("state")) or configured_state,
+            "limit": int(payload.get("limit") or configured_limit),
+            "output_dir": output_dir,
+            "context_repo": context_repo,
+            "progress": progress,
+            "report_owner": report_owner,
+            "force_rerun": force_rerun,
+        }
+        summary = (
+            review_jira_issues_merge_requests(jira_keys=jira_keys, **review_kwargs)
+            if len(jira_keys) > 1
+            else review_jira_issue_merge_requests(jira_key=jira_keys[0], **review_kwargs)
         )
         return {
             "ok": not bool(summary.get("errors")),
