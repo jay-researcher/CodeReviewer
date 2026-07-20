@@ -9,7 +9,6 @@
 - Sprint Overview 支持 Manager 一键启动全部缺少报告的 Issue，并确保单卡片 Run Review 只处理该 Issue。
 - Problems 同时展示“问题详情”和“处理建议”的两行摘要，可按需展开完整内容。
 - Company Config/SCR 延后资源不再混入普通 MR 的 Jira 文件清单差异表，由 GIT_VERSION Release Gate 独立校验。
-- 网站启用 TTL × Jay 结晶品牌标识，并优化 Sprint Overview 的留白、标题层级和横向溢出。
 
 ## 7.2.13 — 2026-07-20
 
