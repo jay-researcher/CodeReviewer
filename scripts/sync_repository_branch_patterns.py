@@ -36,6 +36,8 @@ def mapping_at(payload: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]
 def sync_repository_branches(
     production: dict[str, Any],
     template: dict[str, Any],
+    *,
+    allow_no_changes: bool = False,
 ) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
     for path, source in repository_nodes(template):
@@ -58,7 +60,7 @@ def sync_repository_branches(
                 }
             )
             target["branch"] = after
-    if not changes:
+    if not changes and not allow_no_changes:
         raise RuntimeError("No repository branch patterns require synchronization.")
     return changes
 
@@ -71,6 +73,11 @@ def main() -> int:
     parser.add_argument("template", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--changes", type=Path)
+    parser.add_argument(
+        "--allow-no-changes",
+        action="store_true",
+        help="Treat an already synchronized production configuration as a successful no-op.",
+    )
     args = parser.parse_args()
 
     production = yaml.safe_load(args.production.read_text(encoding="utf-8")) or {}
@@ -78,7 +85,11 @@ def main() -> int:
     if not isinstance(production, dict) or not isinstance(template, dict):
         raise RuntimeError("Both configuration documents must contain YAML mappings.")
 
-    changes = sync_repository_branches(production, template)
+    changes = sync_repository_branches(
+        production,
+        template,
+        allow_no_changes=args.allow_no_changes,
+    )
     rendered = yaml.safe_dump(production, allow_unicode=True, sort_keys=False, width=120)
     if re.search(r"(?i)\b[A-Z]:[/\\]", rendered):
         raise RuntimeError("Production config contains a Windows absolute path.")

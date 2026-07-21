@@ -193,7 +193,8 @@ prepare_and_test_staging() {
     "${CURRENT}/config.yml" "${CONFIG_TEMPLATE}" "${STAGING}/config.yml"
   "${PYTHON}" "${BRANCH_SYNC}" \
     "${STAGING}/config.yml" "${CONFIG_TEMPLATE}" "${STAGING}/config.yml" \
-    --changes "${BACKUP_ROOT}/repository-branch-changes.json"
+    --changes "${BACKUP_ROOT}/repository-branch-changes.json" \
+    --allow-no-changes
   if grep -Eq '(^|[[:space:]])[A-Za-z]:[/\\]' "${STAGING}/config.yml"; then
     echo "Merged production config contains a Windows path." >&2
     exit 1
