@@ -10,7 +10,7 @@
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
 | CodeReviewer 版本 | `7.2.13` |
-| 部署制品 | `codereviewer-7.2.13-07546bb.tgz`，SHA-256 `a871b9101f5c5894b36cc0899d00fbb34fbc21ff63d213c587511c515802de66` |
+| 部署制品 | `codereviewer-7.2.13-0779b3c.tgz`，SHA-256 `0d7f043d8dec58d4bb278729e989324d9382d378fc418a3d7277580c658cb075` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
@@ -23,7 +23,7 @@
 
 ## 7.2.13 验收反馈热更新
 
-2026-07-21 将 7.2.13 验收反馈整改与 TTL × Jay 结晶 Logo 同步到生产，固定 GitHub `20260720` 分支提交 `07546bbfff585cf149e8a07d857cc06212811548`。本次是 7.2.13 到 7.2.13 的受保护热更新：生产配置分支模式已是目标通配符，因此分支同步按幂等 no-op 处理，未覆盖 Linux 路径、端点、token 或运行策略。
+2026-07-21 将 7.2.13 验收反馈整改与 TTL × Jay 结晶 Logo 同步到生产，固定 GitHub `20260720` 分支提交 `0779b3cc50b1d826e27fad07e64428a6572b8f78`。本次是 7.2.13 到 7.2.13 的受保护热更新：生产配置分支模式已是目标通配符，因此分支同步按幂等 no-op 处理，未覆盖 Linux 路径、端点、token 或运行策略。
 
 验收结果：
 
@@ -37,8 +37,8 @@
 一致性备份：
 
 ```text
-/var/backups/codereviewer/7.2.13-to-7.2.13-20260721-091000/system-backup.tgz
-/var/backups/codereviewer/7.2.13-to-7.2.13-20260721-091000/system-backup.tgz.sha256
+/var/backups/codereviewer/7.2.13-to-7.2.13-20260721-091500/system-backup.tgz
+/var/backups/codereviewer/7.2.13-to-7.2.13-20260721-091500/system-backup.tgz.sha256
 ```
 
 一键还原：
@@ -47,7 +47,7 @@
 sudo /usr/local/sbin/codereviewer-rollback-latest
 ```
 
-当前固定回滚入口为 `/usr/local/sbin/codereviewer-rollback-20260721-091000`，用于恢复本次热更新前的 7.2.13 baseline、生产配置、用户、数据库、报告和 Jira/PRD 缓存。
+当前固定回滚入口为 `/usr/local/sbin/codereviewer-rollback-20260721-091500`，用于恢复本次最终文档同步前已通过验收的 7.2.13 热更新状态、生产配置、用户、数据库、报告和 Jira/PRD 缓存。更早的 `/usr/local/sbin/codereviewer-rollback-20260721-091000` 仍可用于恢复到本轮反馈上线前的 7.2.13 baseline。
 
 ## 7.2.13 升级与回滚记录
 
