@@ -1,6 +1,6 @@
 # 部署 CodeReviewer 到 192.168.3.78
 
-更新日期：2026-07-20
+更新日期：2026-07-21
 
 本文记录本次真实部署结果。通用部署原则和完整生产建议参见 [CodeReviewer-RHEL9-Deployment-Guide.md](CodeReviewer-RHEL9-Deployment-Guide.md)。
 
@@ -10,7 +10,7 @@
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
 | CodeReviewer 版本 | `7.2.13` |
-| 部署制品 | `codereviewer-7.2.13-27d7e4c.tgz`，SHA-256 `f8442696e3cd2fc0a1e50e8d33f0ab74fb4cb8e15a7f1f051e1b9f375da9b162` |
+| 部署制品 | `codereviewer-7.2.13-07546bb.tgz`，SHA-256 `a871b9101f5c5894b36cc0899d00fbb34fbc21ff63d213c587511c515802de66` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
@@ -19,7 +19,35 @@
 | 访问地址 | <http://192.168.3.78:8765> |
 | 健康检查 | `/api/version` 返回 `7.2.13`，`/api/health` 返回 `healthy` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 252 passed |
+| RHEL9 测试 | 259 passed |
+
+## 7.2.13 验收反馈热更新
+
+2026-07-21 将 7.2.13 验收反馈整改与 TTL × Jay 结晶 Logo 同步到生产，固定 GitHub `20260720` 分支提交 `07546bbfff585cf149e8a07d857cc06212811548`。本次是 7.2.13 到 7.2.13 的受保护热更新：生产配置分支模式已是目标通配符，因此分支同步按幂等 no-op 处理，未覆盖 Linux 路径、端点、token 或运行策略。
+
+验收结果：
+
+- staging 完整自动化测试 `259/259` 通过；
+- `/api/version=7.2.13`、`/api/health=healthy`，外部 `192.168.3.78:8765` 可访问；
+- 登录页和 `/assets/ttl-jay-crystal-logo.png` 返回 HTTP 200，页面已引用 Logo；
+- 10 个生产账户的凭据指纹、角色及启停状态保持一致，`web_users.json` 为 `0600 codereviewer:codereviewer`；
+- Workflow SQLite `integrity_check=ok`、schema v3，历史 Issue、Run、Finding、Discussion 和 Snapshot 数量未下降；
+- 未认证访问 Manager 用户 API 仍返回 HTTP 401。
+
+一致性备份：
+
+```text
+/var/backups/codereviewer/7.2.13-to-7.2.13-20260721-091000/system-backup.tgz
+/var/backups/codereviewer/7.2.13-to-7.2.13-20260721-091000/system-backup.tgz.sha256
+```
+
+一键还原：
+
+```bash
+sudo /usr/local/sbin/codereviewer-rollback-latest
+```
+
+当前固定回滚入口为 `/usr/local/sbin/codereviewer-rollback-20260721-091000`，用于恢复本次热更新前的 7.2.13 baseline、生产配置、用户、数据库、报告和 Jira/PRD 缓存。
 
 ## 7.2.13 升级与回滚记录
 
