@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 TARGET_VERSION="7.2.13"
-PREVIOUS_VERSION="7.2.0"
+PREVIOUS_VERSION="${PREVIOUS_VERSION:-7.2.0}"
 DEPLOYMENT_COMMIT="${DEPLOYMENT_COMMIT:?DEPLOYMENT_COMMIT is required}"
 ARTIFACT_SHA256="${ARTIFACT_SHA256:?ARTIFACT_SHA256 is required}"
 STAMP="${DEPLOYMENT_STAMP:-$(date +%Y%m%d-%H%M%S)}"
@@ -495,6 +495,7 @@ if payload.get("status") != "healthy" or not payload.get("ok"):
     raise SystemExit(f"Application health is not healthy: {payload}")
 PY
   curl -fsS http://127.0.0.1:8765/assets/login-code-review-bg.png >/dev/null
+  curl -fsS http://127.0.0.1:8765/assets/ttl-jay-crystal-logo.png >/dev/null
   local unauth_code
   unauth_code="$(curl -sS -o "${BACKUP_ROOT}/unauth-admin-users.json" -w '%{http_code}' \
     http://127.0.0.1:8765/api/admin/users)"

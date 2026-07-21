@@ -35,6 +35,7 @@ printf '%s\n' "${health_json}"
 curl -fsS http://127.0.0.1:8765/login >/dev/null
 curl -fsS http://127.0.0.1:8765/api/login-challenge >/dev/null
 curl -fsS http://127.0.0.1:8765/assets/login-code-review-bg.png >/dev/null
+curl -fsS http://127.0.0.1:8765/assets/ttl-jay-crystal-logo.png >/dev/null
 
 unauth_code="$(curl -sS -o /tmp/codereviewer-admin-users-unauth.json -w '%{http_code}' \
   http://127.0.0.1:8765/api/admin/users)"
