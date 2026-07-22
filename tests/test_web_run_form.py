@@ -88,6 +88,7 @@ class WebRunFormTests(unittest.TestCase):
         self.assertNotIn('class="coverage-table"', page)
         self.assertIn("item.workflow_status === 'missing' && currentPermissions.run_issue_review", page)
         self.assertLess(page.index('data-coverage-run-review='), page.index('class="coverage-card-summary"'))
+
         self.assertIn("Issues with reports", page)
         self.assertIn("Issues without reports", page)
         self.assertIn("Generated report lifecycle", page)
@@ -110,6 +111,24 @@ class WebRunFormTests(unittest.TestCase):
         self.assertNotIn("runReview({ keepCoverageOpen: true })", page)
         self.assertIn('class="coverage-card-state"', page)
         self.assertIn("data-coverage-run-missing=", page)
+
+    def test_sprint_scan_panel_collapses_after_success_and_can_be_reopened(self) -> None:
+        page = render_index("admin")
+
+        self.assertIn('id="coverageScanPanel" class="coverage-scan-panel"', page)
+        self.assertIn('id="coverageScanToggle"', page)
+        self.assertIn('aria-controls="coverageScanBody"', page)
+        self.assertIn('id="coverageScanBody" class="coverage-scan-body"', page)
+        self.assertIn("function setCoverageScanCollapsed(collapsed)", page)
+        self.assertIn("setCoverageScanCollapsed(true);", page)
+        self.assertIn("setCoverageScanCollapsed(false);", page)
+        self.assertIn("nextCollapsed ? 'Expand scan scope' : 'Collapse scan scope'", page)
+        self.assertIn("$('coverageScanToggle').addEventListener('click'", page)
+        self.assertIn("$('coverageScanToggle').disabled = active;", page)
+        self.assertIn("Recent result' : 'Completed'", page)
+        self.assertIn('.coverage-scan-body[hidden] { display: none; }', page)
+        self.assertIn("classList.toggle('complete', status === 'done')", page)
+        self.assertIn('.coverage-scan-panel.complete {', page)
 
     def test_review_progress_pauses_auto_scroll_for_sixty_seconds_after_manual_input(self) -> None:
         page = render_index("admin")

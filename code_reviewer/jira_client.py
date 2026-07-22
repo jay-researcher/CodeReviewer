@@ -19,6 +19,8 @@ JIRA_SEARCH_FIELDS = [
     "status",
     "issuetype",
     "labels",
+    "components",
+    "customfield_10036",
     "customfield_10005",
     "customfield_10006",
 ]
@@ -55,6 +57,8 @@ class JiraIssue:
     sprint_memberships: list["SprintMembership"] = field(default_factory=list)
     current_sprint_id: str = ""
     current_sprint_state: str = ""
+    components: list[str] = field(default_factory=list)
+    responsibles: list[str] = field(default_factory=list)
 
     @property
     def final_description(self) -> str:
@@ -599,7 +603,25 @@ def _jira_issue_from_item(item: dict[str, Any]) -> JiraIssue:
         sprint_memberships=memberships,
         current_sprint_id=current_sprint.id if current_sprint else "",
         current_sprint_state=current_sprint.state if current_sprint else "",
+        components=_jira_option_names(fields.get("components")),
+        responsibles=_jira_option_names(fields.get("customfield_10036")),
     )
+
+
+def _jira_option_names(value: object) -> list[str]:
+    items = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, dict):
+            name = str(item.get("displayName") or item.get("value") or item.get("name") or "").strip()
+        else:
+            name = str(item or "").strip()
+        key = name.casefold()
+        if name and key not in seen:
+            seen.add(key)
+            result.append(name)
+    return result
 
 
 def _should_fallback_to_legacy_search(exc: RuntimeError) -> bool:

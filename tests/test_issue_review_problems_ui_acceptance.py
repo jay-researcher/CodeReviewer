@@ -64,6 +64,28 @@ class IssueReviewProblemsUiAcceptanceTests(unittest.TestCase):
         self.assertIn('-webkit-line-clamp: 2;', page)
         self.assertIn('.finding-evidence-preview.expanded .finding-evidence-text { display: block; white-space: pre-wrap; }', page)
         self.assertIn("button.textContent = expanded ? '收起' : '更多';", page)
+        self.assertIn('class="finding-full-detail"', renderer)
+        self.assertIn('完整报告证据', renderer)
+        self.assertIn('details.report_section', renderer)
+        self.assertIn('class="finding-report-markdown markdown-preview"', renderer)
+        self.assertIn('renderMarkdown(reportSection, {anchorPrefix: `finding-${finding.id}-`})', renderer)
+        self.assertNotIn('<pre>${escapeHtml(reportSection)}</pre>', renderer)
+        self.assertIn('.finding-report-markdown.markdown-preview table { min-width: 720px;', page)
+
+    def test_issue_header_opens_jira_in_a_safe_new_tab(self) -> None:
+        page = self.page
+        self.assertIn('class="jira-issue-link"', page)
+        self.assertIn('target="_blank"', page)
+        self.assertIn('rel="noopener noreferrer"', page)
+        self.assertIn('Open ${escapeHtml(issue.jira_key)} in Jira (new tab)', page)
+
+    def test_sprint_overview_distinguishes_unique_issues_and_application_scopes(self) -> None:
+        page = self.page
+        self.assertIn('unique issues · ${scopeTotal} application scopes', page)
+        self.assertIn('Fully covered', page)
+        self.assertIn('Partially covered', page)
+        self.assertIn('Without reports', page)
+        self.assertIn('Application cards count scopes; this summary counts unique Issues.', page)
 
     def test_problem_action_uses_the_short_submit_label(self) -> None:
         renderer = self.finding_renderer

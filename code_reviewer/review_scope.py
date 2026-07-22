@@ -62,6 +62,37 @@ def review_scope_filename_component(item: Mapping[str, object]) -> str:
     return review_scope_for_merge_request(item).filename_component
 
 
+def delivery_version_for_merge_request(
+    item: Mapping[str, object],
+    scope: ReviewScope | None = None,
+) -> str:
+    """Return the exact weekly delivery version without changing report isolation.
+
+    Reports remain isolated by the stable release line (for example 7.5.1),
+    while readiness needs to distinguish weekly targets such as 7.5.1.38 and
+    7.5.1.39. Only explicit or branch-derived four-part iTrade versions are
+    accepted; ambiguous legacy data stays empty instead of being guessed.
+    """
+    review_scope = scope or review_scope_for_merge_request(item)
+    if review_scope.application != "iTrade Client":
+        return ""
+    values = [
+        item.get("delivery_version"),
+        item.get("target_branch"),
+        item.get("branch"),
+        item.get("source_branch"),
+    ]
+    for value in values:
+        match = re.search(
+            r"(?<!\d)(7[._-]5[._-][01][._-]\d+)(?!\d)",
+            str(value or ""),
+            flags=re.I,
+        )
+        if match:
+            return re.sub(r"[._-]", ".", match.group(1))
+    return ""
+
+
 def _application(value: object, identity: str) -> str:
     explicit = str(value or "").strip()
     normalized = re.sub(r"[^a-z0-9]+", "", explicit.lower())

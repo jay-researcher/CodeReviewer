@@ -180,6 +180,94 @@ class IssueHistoryApplicationReadinessTests(unittest.TestCase):
         self.assertEqual(0, current["DPS"]["report_count"])
         self.assertEqual(0, current["Unmapped"]["report_count"])
 
+    def test_legacy_blank_run_is_reconciled_to_unique_weekly_delivery_version(self) -> None:
+        cycle = self._cycle(
+            sprint_id="legacy",
+            scope=[
+                {
+                    "application": "iTrade Client",
+                    "target_branch": "7.5.1.38",
+                    "project_path": "itrade-sv/client/web",
+                    "mr_id": "1313",
+                }
+            ],
+        )
+        group = self.store.create_run_group(cycle_id=str(cycle["cycle_id"]))
+        self.store.register_run(
+            jira_key="ECHNL-7280",
+            report_path=str(self._report("legacy-75138.md")),
+            findings=[],
+            cycle_id=str(cycle["cycle_id"]),
+            run_group_id=str(group["id"]),
+            application="",
+            release_line="",
+        )
+
+        summary = self._summary()
+        progress = summary["current_cycle"]["application_progress"]
+        self.assertEqual(1, len(progress))
+        self.assertEqual("7.5.1", progress[0]["release_line"])
+        self.assertEqual("7.5.1.38", progress[0]["delivery_version"])
+        self.assertEqual("iTrade Client 7.5.1.38", progress[0]["scope_label"])
+        self.assertEqual(1, progress[0]["report_count"])
+
+    def test_weekly_delivery_versions_remain_isolated_across_review_cycles(self) -> None:
+        expected_labels: list[str] = []
+        for sprint_id, delivery_version in (("10088", "7.5.1.38"), ("10089", "7.5.1.39")):
+            cycle = self._cycle(
+                sprint_id=sprint_id,
+                scope=[
+                    {
+                        "application": "iTrade Client",
+                        "target_branch": delivery_version,
+                        "project_path": "itrade-sv/client/web",
+                    }
+                ],
+            )
+            group = self.store.create_run_group(cycle_id=str(cycle["cycle_id"]))
+            self.store.register_run(
+                jira_key="ECHNL-7280",
+                report_path=str(self._report(f"itrade-{delivery_version}.md")),
+                findings=[],
+                cycle_id=str(cycle["cycle_id"]),
+                run_group_id=str(group["id"]),
+                application="iTrade Client",
+                release_line="7.5.1",
+            )
+            expected_labels.append(f"iTrade Client {delivery_version}")
+
+        labels = {
+            str(progress["scope_label"])
+            for cycle in self._summary()["cycles"]
+            for progress in cycle["application_progress"]
+        }
+        self.assertEqual(set(expected_labels), labels)
+
+    def test_manual_pass_requires_every_weekly_delivery_scope_report(self) -> None:
+        cycle = self._cycle(
+            sprint_id="10090",
+            scope=[
+                {"application": "iTrade Client", "target_branch": "7.5.0.78"},
+                {"application": "iTrade Client", "target_branch": "7.5.1.39"},
+            ],
+        )
+        group = self.store.create_run_group(cycle_id=str(cycle["cycle_id"]))
+        self.store.register_run(
+            jira_key="ECHNL-7280",
+            report_path=str(self._report("itrade-75078.md")),
+            findings=[],
+            cycle_id=str(cycle["cycle_id"]),
+            run_group_id=str(group["id"]),
+            application="iTrade Client",
+            release_line="7.5.0",
+        )
+
+        readiness = self.store.pass_readiness("ECHNL-7280")
+        self.assertFalse(readiness["ready"])
+        self.assertEqual("iTrade Client 7.5.1.39", readiness["scope_gaps"][0]["scope_label"])
+        with self.assertRaisesRegex(ValueError, "required application scope"):
+            self.store.manual_pass("ECHNL-7280", "wen.yi", "auditor", "Pass")
+
     def test_generating_and_failed_states_follow_the_current_cycle_attempt(self) -> None:
         cycle = self._cycle(
             sprint_id="10091",

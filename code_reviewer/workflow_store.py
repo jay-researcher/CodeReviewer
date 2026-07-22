@@ -16,7 +16,7 @@ from typing import Any, Iterator, Protocol
 
 from .adf import adf_json, adf_plain_text, empty_adf, validate_adf
 from .config import DATA_DIR, app_config_get
-from .review_scope import review_scope_for_merge_request
+from .review_scope import delivery_version_for_merge_request, review_scope_for_merge_request
 
 
 SCHEMA_VERSION = 3
@@ -114,14 +114,15 @@ def scope_people(value: object) -> set[str]:
     }
 
 
-def review_scope_label(application: str, release_line: str = "") -> str:
+def review_scope_label(application: str, release_line: str = "", delivery_version: str = "") -> str:
     """Build the stable display label for an application/release-line scope."""
     application = application.strip() or "Unmapped"
     release_line = release_line.strip()
+    delivery_version = delivery_version.strip()
     if not release_line:
         return application
     if application == "iTrade Client":
-        return f"{application} {release_line}"
+        return f"{application} {delivery_version or release_line}"
     if application == "DPS":
         return release_line if release_line.casefold().startswith("dps") else f"{application} {release_line}"
     return application
@@ -1837,12 +1838,13 @@ class WorkflowStore:
         """Return current-cycle state per application without mixing older Sprints."""
         cycle_id = str(cycle.get("cycle_id") or "")
         scope = cycle.get("mr_scope") if isinstance(cycle.get("mr_scope"), list) else []
-        expected: set[tuple[str, str]] = set()
+        expected: set[tuple[str, str, str]] = set()
         for item in scope:
             if not isinstance(item, dict):
                 continue
             review_scope = review_scope_for_merge_request(item)
             release_line = review_scope.release_line
+            delivery_version = delivery_version_for_merge_request(item, review_scope)
             if (
                 review_scope.application != "Unmapped"
                 and not str(item.get("release_line") or "").strip()
@@ -1854,12 +1856,13 @@ class WorkflowStore:
                 # v2 Cycle snapshots predate release-line persistence. Keep their
                 # mapped application aligned with legacy runs whose line is empty.
                 release_line = ""
-            expected.add((review_scope.application, release_line))
+            expected.add((review_scope.application, release_line, delivery_version))
         run_rows = db.execute(
             "SELECT * FROM review_runs WHERE cycle_id=? ORDER BY run_number", (cycle_id,)
         ).fetchall()
-        latest: dict[tuple[str, str], sqlite3.Row] = {}
-        report_counts: dict[tuple[str, str], int] = {}
+        latest: dict[tuple[str, str, str], sqlite3.Row] = {}
+        report_counts: dict[tuple[str, str, str], int] = {}
+        run_scope_keys: dict[str, tuple[str, str, str]] = {}
         for run in run_rows:
             application = str(run["application"] or "").strip()
             if application not in APPLICATION_ORDER:
@@ -1870,24 +1873,36 @@ class WorkflowStore:
                     else "Unmapped"
                 )
             release_line = str(run["release_line"] or "").strip()
-            scope_key = (application, release_line)
+            candidates = [
+                item
+                for item in expected
+                if item[0] == application and (not release_line or item[1] == release_line)
+            ]
+            delivery_version = ""
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                release_line = release_line or candidate[1]
+                delivery_version = candidate[2]
+            scope_key = (application, release_line, delivery_version)
             expected.add(scope_key)
             report_counts[scope_key] = report_counts.get(scope_key, 0) + 1
             latest[scope_key] = run
+            run_scope_keys[str(run["id"])] = scope_key
         group_running = bool(db.execute(
             "SELECT 1 FROM review_run_groups WHERE cycle_id=? AND status IN ('queued','running') LIMIT 1",
             (cycle_id,),
         ).fetchone())
         rows: list[dict[str, Any]] = []
         blocking = blocking_severities()
-        for application, release_line in sorted(
+        for application, release_line, delivery_version in sorted(
             expected,
             key=lambda item: (
                 APPLICATION_ORDER.index(item[0]) if item[0] in APPLICATION_ORDER else 99,
                 item[1].casefold(),
+                item[2].casefold(),
             ),
         ):
-            scope_key = (application, release_line)
+            scope_key = (application, release_line, delivery_version)
             run = latest.get(scope_key)
             current_runs: list[sqlite3.Row] = []
             if run:
@@ -1895,8 +1910,7 @@ class WorkflowStore:
                 current_runs = [
                     candidate
                     for candidate in run_rows
-                    if str(candidate["application"] or "").strip() == application
-                    and str(candidate["release_line"] or "").strip() == release_line
+                    if run_scope_keys.get(str(candidate["id"])) == scope_key
                     and str(candidate["run_group_id"] or "") == current_group_id
                 ]
                 if not current_runs:
@@ -1944,7 +1958,8 @@ class WorkflowStore:
                 {
                     "application": application,
                     "release_line": release_line,
-                    "scope_label": review_scope_label(application, release_line),
+                    "delivery_version": delivery_version,
+                    "scope_label": review_scope_label(application, release_line, delivery_version),
                     "state": state,
                     "report_count": report_counts.get(scope_key, 0),
                     "finding_count": finding_count,
@@ -1958,6 +1973,30 @@ class WorkflowStore:
         issue = db.execute("SELECT * FROM review_issues WHERE jira_key=?", (jira_key.upper(),)).fetchone()
         if not issue or not issue["latest_run_id"]:
             return {"ready": False, "message": "No completed Review Run is available.", "pending_blockers": []}
+        scope_gaps: list[dict[str, Any]] = []
+        cycle_id = str(issue["current_cycle_id"] or "")
+        if cycle_id:
+            cycle_row = db.execute(
+                "SELECT * FROM review_cycles WHERE cycle_id=?",
+                (cycle_id,),
+            ).fetchone()
+            if cycle_row:
+                cycle = self._decoded_row(
+                    cycle_row,
+                    ("status_transition_json", "mr_scope_json"),
+                )
+                for progress in self._cycle_application_progress(db, cycle):
+                    state = str(progress.get("state") or "")
+                    if state in {"without-report", "generating", "failed"}:
+                        scope_gaps.append(
+                            {
+                                "application": progress.get("application") or "Unmapped",
+                                "release_line": progress.get("release_line") or "",
+                                "delivery_version": progress.get("delivery_version") or "",
+                                "scope_label": progress.get("scope_label") or "Unmapped",
+                                "state": state,
+                            }
+                        )
         run_id = str(issue["latest_run_id"])
         latest_run = db.execute("SELECT run_group_id FROM review_runs WHERE id=?", (run_id,)).fetchone()
         run_group_id = str(latest_run["run_group_id"] or "") if latest_run else ""
@@ -1987,11 +2026,18 @@ class WorkflowStore:
                 manager_exceptions += int(bool(handling["manager_override"]))
             if not accepted:
                 pending.append(self._row(finding))
-        ready = not pending
+        ready = not pending and not scope_gaps
+        if scope_gaps:
+            message = f"{len(scope_gaps)} required application scope(s) have no completed report."
+        elif pending:
+            message = f"{len(pending)} blocking finding(s) remain."
+        else:
+            message = "All required application scopes have reports and configured blocking findings are cleared."
         return {
             "ready": ready,
-            "message": "All configured blocking findings are cleared." if ready else f"{len(pending)} blocking finding(s) remain.",
+            "message": message,
             "pending_blockers": pending,
+            "scope_gaps": scope_gaps,
             "blocking_severities": sorted(blocking_severities()),
             "manager_exceptions": manager_exceptions,
             "run_id": run_id,

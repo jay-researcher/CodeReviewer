@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from code_reviewer.jira_client import JiraClient, JiraIssue, is_description_template_comment
+from code_reviewer.jira_client import JiraClient, JiraIssue, _jira_issue_from_item, is_description_template_comment
 from code_reviewer.llm_provider import _review_prompt
 from code_reviewer.models import ReviewInput
 
@@ -47,6 +47,24 @@ class _FakeJiraClient(JiraClient):
 
 
 class JiraDescriptionCommentTests(unittest.TestCase):
+    def test_issue_parser_keeps_components_and_responsibles(self) -> None:
+        issue = _jira_issue_from_item(
+            {
+                "key": "ECHNL-5757",
+                "fields": {
+                    "summary": "Scope extraction",
+                    "components": [{"name": "MO Client Config"}, {"name": "MOMD"}, {"name": "WVAdmin"}],
+                    "customfield_10036": [
+                        {"displayName": "Luck Chen"},
+                        {"displayName": "Tran Trung Hieu"},
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(issue.components, ["MO Client Config", "MOMD", "WVAdmin"])
+        self.assertEqual(issue.responsibles, ["Luck Chen", "Tran Trung Hieu"])
+
     def test_requirement_template_requires_table_and_all_defined_rows(self) -> None:
         labels = (
             'Screenshot', 'Description', 'Additional remarks',

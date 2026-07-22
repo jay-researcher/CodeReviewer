@@ -2,6 +2,23 @@
 
 本页面仅展示面向用户的版本摘要。详细技术变更、验证结果及部署状态请参阅内部 7.x Release Notes。
 
+## 7.2.15 — 2026-07-22
+
+状态：仅部署到本机验收；未部署到 `192.168.3.78:8765`。
+
+- 同一 Jira Issue 的代码与 Company Config/SCR 分属不同应用时，会分别生成应用报告；ECHNL-5757 预期显示 WVAdmin 和 DPS11 两份。
+- 仅有 Company Config/SCR 的 Issue 也会生成可下载报告，不再出现“Review completed”但报告数仍为 0。
+- 修复多应用报告保存阶段 `review_scope_for_merge_request` 未定义导致 ECHNL-5755/5757 失败的问题。
+- DPS Codex 审核超时后会使用收敛到 42,000 字符以内的上下文重试一次，避免单次 300 秒超时直接结束整项审核。
+- Codex 使用真实 JSON 流活动作为心跳：持续有 Provider 活动时不再被固定 300 秒终止，同时保留 15 分钟绝对上限防止永久挂起。
+- Issues Review History 按精确交付版本区分 `7.5.1.38` 与 `7.5.1.39`；唯一明确的 Legacy Run 会安全归并，不再生成空版本假 Scope。
+- Manual Review Pass 会先确认当前 Cycle 的全部应用交付版本 Scope 都已有完成报告；应用筛选后的 Issue 卡片显示当前 Scope 状态。
+- Issues Review History 的完整报告证据支持 Markdown 表格，文件清单会按表头和行列展示，并在内容较宽时提供滚动浏览。
+- Sprint Overview 扫描完成后会自动收起 Scan Scope，并保留本次范围与结果摘要；需要修改范围时可手动展开。
+- 文件清单校验按应用隔离，不再把另一个应用范围的配置误报为当前 MR 缺失。
+- Responsible 按 Jira Components 与应用规则确定；Jira Responsible 原值仅供审计查看，不参与范围推断。
+- Issues Review History 区分唯一 Issue 与应用审核范围，支持 Jira 外链、完整问题证据和应用级 Reviewer 权限。
+
 ## 7.2.14 — 2026-07-22
 
 状态：已于 2026-07-22 部署到 `192.168.3.78:8765`，生产健康检查及数据完整性验证通过。

@@ -14,6 +14,7 @@ from .models import ChangedFile, Finding
 from .models import ReviewInput, ReviewResult
 from .review_scope import (
     group_merge_requests_by_review_scope,
+    review_scope_for_merge_request,
     review_scope_filename_component,
 )
 
@@ -595,6 +596,11 @@ def split_result_by_responsible(result: ReviewResult) -> list[ReviewResult]:
 
 
 def split_result_by_review_scope(result: ReviewResult) -> list[ReviewResult]:
+    # Deferred-only results are already created for one explicit application
+    # and release line. Splitting them again would strip their unprefixed file
+    # evidence because there is no ordinary consolidated-MR file prefix.
+    if result.review_input.metadata.get("deferred_scope_report"):
+        return [result]
     related_mrs = result.review_input.metadata.get("related_merge_requests") or []
     if not isinstance(related_mrs, list) or not related_mrs:
         return [result]
@@ -1078,13 +1084,13 @@ def _safe_release_report_component(value: str) -> str:
 
 
 def _responsible_output_dir(output_dir: Path, metadata: dict[str, object]) -> Path:
-    owner = _web_report_owner(metadata)
-    if owner:
-        return output_dir / _safe_path_component(owner)
     if not app_config_bool("report.group_by_responsible", "REPORT_GROUP_BY_RESPONSIBLE", True):
         return output_dir
     responsible = _responsible_folder_name(metadata)
-    return output_dir / responsible if responsible else output_dir
+    if responsible:
+        return output_dir / responsible
+    owner = _web_report_owner(metadata)
+    return output_dir / _safe_path_component(owner) if owner else output_dir
 
 
 def _responsible_folder_name(metadata: dict[str, object]) -> str:

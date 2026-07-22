@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-TARGET_VERSION="7.2.13"
+TARGET_VERSION="${TARGET_VERSION:-7.2.13}"
 PREVIOUS_VERSION="${PREVIOUS_VERSION:-7.2.0}"
 DEPLOYMENT_COMMIT="${DEPLOYMENT_COMMIT:?DEPLOYMENT_COMMIT is required}"
 ARTIFACT_SHA256="${ARTIFACT_SHA256:?ARTIFACT_SHA256 is required}"
 STAMP="${DEPLOYMENT_STAMP:-$(date +%Y%m%d-%H%M%S)}"
 
-ARTIFACT="/tmp/codereviewer-7.2.13.tgz"
-CONFIG_TEMPLATE="/tmp/config-7.2.13-template.yml"
+ARTIFACT="${ARTIFACT:-/tmp/codereviewer-${TARGET_VERSION}.tgz}"
+CONFIG_TEMPLATE="${CONFIG_TEMPLATE:-/tmp/config-${TARGET_VERSION}-template.yml}"
 CONFIG_MERGER="/tmp/merge_release_scope_config.py"
 BRANCH_SYNC="/tmp/sync_repository_branch_patterns.py"
 CURRENT="/opt/codereviewer/current"
@@ -470,7 +470,7 @@ start_and_verify() {
   # ISO-8601 offset form from date -Iseconds is not accepted on every build.
   started_at="$(date '+%Y-%m-%d %H:%M:%S')"
   mkdir -p /run/systemd/system/codereviewer.service.d
-  cat >/run/systemd/system/codereviewer.service.d/upgrade-7.2.13.conf <<'EOF'
+  cat >"/run/systemd/system/codereviewer.service.d/upgrade-${TARGET_VERSION}.conf" <<'EOF'
 [Service]
 Environment=WEB_AUTH_PRUNE_USERS=0
 EOF
@@ -506,7 +506,7 @@ PY
     echo "Production config contains a Windows path." >&2
     exit 1
   fi
-  rm -f /run/systemd/system/codereviewer.service.d/upgrade-7.2.13.conf
+  rm -f "/run/systemd/system/codereviewer.service.d/upgrade-${TARGET_VERSION}.conf"
   rmdir /run/systemd/system/codereviewer.service.d 2>/dev/null || true
   systemctl daemon-reload
   {
@@ -531,7 +531,7 @@ PY
 handle_error() {
   local rc=$?
   trap - ERR
-  rm -f /run/systemd/system/codereviewer.service.d/upgrade-7.2.13.conf 2>/dev/null || true
+  rm -f "/run/systemd/system/codereviewer.service.d/upgrade-${TARGET_VERSION}.conf" 2>/dev/null || true
   rmdir /run/systemd/system/codereviewer.service.d 2>/dev/null || true
   systemctl daemon-reload || true
   if [[ -x "${ROLLBACK_SCRIPT}" ]]; then

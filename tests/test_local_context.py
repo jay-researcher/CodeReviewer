@@ -17,7 +17,7 @@ from code_reviewer.gitlab_client import GitLabClient
 from code_reviewer.jira_client import JiraIssue
 from code_reviewer.models import ChangedFile, Finding, ReviewInput, ReviewResult
 from code_reviewer.project_context import build_project_context
-from code_reviewer.report import render_markdown, save_report, save_reports, split_result_by_responsible
+from code_reviewer.report import _responsible_output_dir, render_markdown, save_report, save_reports, split_result_by_responsible
 from code_reviewer.repository_sync import RepositorySyncResult, _attach_codebase_memory
 from code_reviewer.resource_optimizer import optimize_prompt_diff
 from code_reviewer.review_service import (
@@ -33,8 +33,11 @@ from code_reviewer.review_service import (
 )
 from code_reviewer.llm_provider import (
     _call_codex_cli,
+    _compact_prompt_for_retry,
     _looks_like_dps_project,
+    _run_codex_process,
     _run_auto_review,
+    _run_single_review,
     preview_llm_prompt_budget,
 )
 from code_reviewer.local_changes import (
@@ -48,6 +51,249 @@ from web import _acquire_instance_lock
 
 
 class LocalContextTests(unittest.TestCase):
+    def test_scope_responsible_takes_precedence_over_web_runner_folder(self) -> None:
+        target = _responsible_output_dir(
+            Path("reports"),
+            {"responsible": "hieut.tran", "responsible_people": ["hieut.tran"], "web_report_owner": "wen.yi"},
+        )
+        self.assertEqual(target, Path("reports") / "hieut.tran")
+
+    def test_issue_review_creates_wvadmin_and_deferred_dps11_reports(self) -> None:
+        issue = JiraIssue(
+            key="ECHNL-5757",
+            summary="MO Client Config and MOMD change",
+            description=(
+                "Involved File Lists\n"
+                "dps/release/11.2.84/mas/config/client_config/wvadmin_web.yml\n"
+                "modules/subsystem/momd/src/constants/configuration.ts\n"
+                "Acceptance Criteria"
+            ),
+            assignee="owner",
+            status="Development Done",
+            sprint="10085",
+            issue_type="Story",
+            labels=[],
+            components=["MO Client Config", "MOMD", "WVAdmin"],
+            responsibles=["Luck Chen", "Tran Trung Hieu"],
+        )
+        normal = ReviewInput(
+            project="wvp-sv/wvadm/sub/momd",
+            mr_id="105",
+            jira_key=issue.key,
+            source_branch=f"feature/{issue.key}",
+            target_branch="master",
+            changed_files=[ChangedFile(path="src/constants/configuration.ts", diff="+export const value = 1")],
+            raw_diff="+export const value = 1",
+            metadata={
+                "application": "WVAdmin",
+                "release_line": "1.0",
+                "responsible": "developer.one",
+                "gitlab_project_path": "wvp-sv/wvadm/sub/momd",
+                "git_tools_project_match": "matched",
+            },
+        )
+        deferred = [
+            {
+                "application": "DPS",
+                "release_line": "DPS11",
+                "project_path": "web-sv-build/dps",
+                "mr_id": "2184",
+                "mr_url": "https://gitlab.example.com/web-sv-build/dps/-/merge_requests/2184",
+                "source_branch": "DPS11_Config-1.4.77",
+                "release_gate_role": "company_config",
+                "changed_file_paths": ["release/11.2.84/mas/config/client_config/wvadmin_web.yml"],
+            },
+            {
+                "application": "DPS",
+                "release_line": "DPS11",
+                "project_path": "web-sv-build/dps",
+                "mr_id": "2185",
+                "source_branch": "DPS11_SCR-1.4.77",
+                "release_gate_role": "scr",
+                "changed_file_paths": ["release/11.2.84/mas/db_change.scr"],
+            },
+        ]
+        saved_inputs: list[ReviewInput] = []
+
+        def fake_analyze(review_input: ReviewInput, progress: object = None) -> ReviewResult:
+            return ReviewResult(review_input, _jira_involved_file_findings(review_input), "Pass", [], [])
+
+        def fake_save(result: ReviewResult, *_args: object, **_kwargs: object) -> dict[str, object]:
+            saved_inputs.append(result.review_input)
+            scope = f"{result.review_input.metadata['application']}:{result.review_input.metadata['release_line']}"
+            return {
+                "report": f"{scope}.md",
+                "reports": [{"path": f"{scope}.md", "name": f"{scope}.md"}],
+                "gitnexus_report": "",
+            }
+
+        with (
+            patch("code_reviewer.review_service.analyze", side_effect=fake_analyze),
+            patch("code_reviewer.review_service._save_review_reports", side_effect=fake_save),
+            patch(
+                "code_reviewer.review_service._preview_prompt_budget_no_raise",
+                return_value={"original_chars": 100, "max_chars": 160000},
+            ),
+        ):
+            result = _review_fetched_inputs_for_issue(
+                issue=issue,
+                fetched_inputs=[normal],
+                discovered_items=[],
+                configured_project_paths=[],
+                output_dir=Path("."),
+                progress=None,
+                deferred_release_gate_resources=deferred,
+            )
+
+        self.assertEqual(result["scope_count"], 2)
+        self.assertEqual(len(saved_inputs), 2)
+        by_scope = {
+            (item.metadata["application"], item.metadata["release_line"]): item
+            for item in saved_inputs
+        }
+        self.assertEqual(by_scope[("WVAdmin", "1.0")].metadata["responsible"], "hieut.tran")
+        self.assertEqual(by_scope[("DPS", "DPS11")].metadata["responsible"], "luckxh.chen")
+        self.assertTrue(by_scope[("DPS", "DPS11")].metadata["deferred_scope_report"])
+        self.assertEqual(len(by_scope[("DPS", "DPS11")].metadata["related_merge_requests"]), 2)
+        self.assertEqual(_jira_involved_file_findings(by_scope[("WVAdmin", "1.0")]), [])
+        self.assertEqual(_jira_involved_file_findings(by_scope[("DPS", "DPS11")]), [])
+
+    def test_deferred_only_issue_generates_a_real_report(self) -> None:
+        issue = JiraIssue(
+            key="ECHNL-5751",
+            summary="Company Config only",
+            description="Involved File Lists\nrelease/11.2.84/config.yml\nAcceptance Criteria",
+            assignee="owner",
+            status="Development Done",
+            sprint="10085",
+            issue_type="Story",
+            labels=[],
+            components=["DPS Config"],
+        )
+        deferred = [
+            {
+                "application": "DPS",
+                "release_line": "DPS11",
+                "project_path": "web-sv-build/dps",
+                "mr_id": "2184",
+                "mr_url": "https://gitlab.example.com/web-sv-build/dps/-/merge_requests/2184",
+                "source_branch": "DPS11_Config-1.4.77",
+                "release_gate_role": "company_config",
+                "changed_file_paths": ["release/11.2.84/config.yml"],
+            }
+        ]
+        saved_inputs: list[ReviewInput] = []
+
+        def fake_save(result: ReviewResult, *_args: object, **_kwargs: object) -> dict[str, object]:
+            saved_inputs.append(result.review_input)
+            return {
+                "report": "ECHNL-5751.md",
+                "reports": [{"path": "ECHNL-5751.md", "name": "ECHNL-5751.md"}],
+                "gitnexus_report": "",
+            }
+
+        with patch("code_reviewer.review_service._save_review_reports", side_effect=fake_save):
+            result = _review_fetched_inputs_for_issue(
+                issue=issue,
+                fetched_inputs=[],
+                discovered_items=[],
+                configured_project_paths=[],
+                output_dir=Path("."),
+                progress=None,
+                deferred_release_gate_resources=deferred,
+            )
+
+        self.assertEqual(result["review_mode"], "deferred-release-scope")
+        self.assertEqual(result["deferred_resource_count"], 1)
+        self.assertEqual(result["issue_review_status"], "report-generated")
+        self.assertEqual(len(saved_inputs), 1)
+        self.assertTrue(saved_inputs[0].metadata["deferred_scope_report"])
+
+    def test_save_reports_splits_deferred_resources_without_name_error(self) -> None:
+        review_input = ReviewInput(
+            project="web-sv-build/dps",
+            mr_id="multi-mr-1",
+            jira_key="ECHNL-5757",
+            changed_files=[ChangedFile(path="web-sv-build/dps!2184/release/config.yml", diff="+enabled: true")],
+            raw_diff="+enabled: true",
+            metadata={
+                "related_merge_requests": [
+                    {
+                        "project_path": "web-sv-build/dps",
+                        "mr_id": "2184",
+                        "application": "DPS",
+                        "release_line": "DPS11",
+                        "responsible": "luckxh.chen",
+                    }
+                ],
+                "deferred_release_gate_resources": [
+                    {
+                        "project_path": "web-sv-build/dps",
+                        "mr_id": "2184",
+                        "application": "DPS",
+                        "release_line": "DPS11",
+                        "release_gate_role": "company_config",
+                    }
+                ],
+            },
+        )
+        result = ReviewResult(review_input, [], "Pass", [], [])
+        with tempfile.TemporaryDirectory() as directory:
+            saved = save_reports(result, Path(directory))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0][0].review_input.metadata["application"], "DPS")
+        self.assertEqual(len(saved[0][0].review_input.changed_files), 1)
+
+    def test_deferred_scope_report_keeps_unprefixed_file_evidence(self) -> None:
+        review_input = ReviewInput(
+            project="jira-issue",
+            mr_id="deferred-DPS11",
+            jira_key="ECHNL-5751",
+            changed_files=[ChangedFile(path="release/11.2.84/config.yml")],
+            metadata={
+                "deferred_scope_report": True,
+                "application": "DPS",
+                "release_line": "DPS11",
+                "related_merge_requests": [
+                    {
+                        "project_path": "web-sv-build/dps",
+                        "mr_id": "2184",
+                        "application": "DPS",
+                        "release_line": "DPS11",
+                    }
+                ],
+            },
+        )
+        result = ReviewResult(review_input, [], "Pass", [], [])
+        split = split_result_by_responsible(result)
+        self.assertEqual(len(split), 1)
+        self.assertEqual(split[0].review_input.changed_files[0].path, "release/11.2.84/config.yml")
+
+    def test_codex_retry_uses_compacted_prompt(self) -> None:
+        prompt = "instructions\n" + ("context\n" * 9000)
+        retry_prompt = _compact_prompt_for_retry(prompt, 24000)
+        self.assertLessEqual(len(retry_prompt), 24000)
+        with patch(
+            "code_reviewer.llm_provider._call_codex_cli",
+            side_effect=[RuntimeError("timed out after 300 seconds"), '{"findings": [], "notes": []}'],
+        ) as call:
+            output = _run_single_review(
+                "codex-cli",
+                "gpt-test",
+                prompt,
+                300,
+                "high",
+                "standard",
+                "default",
+                max_retries=2,
+                require_success=True,
+                retry_prompt=retry_prompt,
+            )
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(call.call_args_list[0].args[0], prompt)
+        self.assertEqual(call.call_args_list[1].args[0], retry_prompt)
+        self.assertIn("attempt 2/2", " ".join(output.notes))
+
     def test_issue_review_partitions_llm_input_by_application_release_line(self) -> None:
         issue = JiraIssue(
             key="ECHNL-7213",
@@ -359,7 +605,7 @@ class LocalContextTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"LLM_CODEX_HTTP_API_KEY_ENV": "OPENAI_API_KEY", "OPENAI_API_KEY": "test-key"}),
             patch("code_reviewer.llm_provider._resolve_codex_cli", return_value="codex"),
-            patch("code_reviewer.llm_provider.subprocess.run") as run_mock,
+            patch("code_reviewer.llm_provider._run_codex_process") as run_mock,
         ):
             run_mock.return_value = subprocess.CompletedProcess(
                 args=["codex"],
@@ -371,16 +617,50 @@ class LocalContextTests(unittest.TestCase):
             output = _call_codex_cli("\ufeff中文 prompt", "gpt-5.6-sol", 30)
 
         self.assertIn("findings", output)
-        kwargs = run_mock.call_args.kwargs
-        self.assertFalse(kwargs["text"])
-        self.assertNotIn("encoding", kwargs)
-        self.assertTrue(kwargs["input"].startswith("\ufeff中文".encode("utf-8")))
-        command = kwargs["args"] if "args" in kwargs else run_mock.call_args.args[0]
+        self.assertTrue(run_mock.call_args.args[1].startswith("\ufeff中文".encode("utf-8")))
+        command = run_mock.call_args.args[0]
         self.assertIn("--ignore-user-config", command)
+        self.assertIn("--json", command)
         self.assertIn("model_provider=\"codereviewer_http\"", command)
         self.assertIn('model_providers.codereviewer_http.env_key="OPENAI_API_KEY"', command)
         self.assertIn("model_providers.codereviewer_http.requires_openai_auth=false", command)
         self.assertIn("model_providers.codereviewer_http.supports_websockets=false", command)
+
+    def test_codex_process_emits_heartbeats_while_stream_is_active(self) -> None:
+        events: list[dict[str, object]] = []
+        command = [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdin.buffer.read(); print('{\"type\":\"started\"}', flush=True); time.sleep(.2); print('{\"type\":\"done\"}', flush=True)",
+        ]
+        completed = _run_codex_process(
+            command,
+            "中文".encode("utf-8"),
+            os.environ.copy(),
+            activity_timeout=1,
+            absolute_timeout=3,
+            heartbeat_seconds=1,
+            progress=events.append,
+            jira_key="ECHNL-5655",
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn(b'"started"', completed.stdout)
+        self.assertIn("llm-start", [str(item.get("event")) for item in events])
+        self.assertIn("llm-heartbeat", [str(item.get("event")) for item in events])
+
+    def test_codex_process_times_out_only_after_no_real_activity(self) -> None:
+        command = [sys.executable, "-c", "import time; time.sleep(2)"]
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "no Codex provider activity"):
+            _run_codex_process(
+                command,
+                b"prompt",
+                os.environ.copy(),
+                activity_timeout=0.2,
+                absolute_timeout=3,
+                heartbeat_seconds=1,
+            )
+        self.assertLess(time.monotonic() - started, 1.5)
 
     def test_web_port_instance_lock_rejects_a_second_server(self) -> None:
         port = 49000 + (os.getpid() % 1000)

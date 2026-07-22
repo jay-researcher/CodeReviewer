@@ -9,6 +9,14 @@ import yaml
 
 
 SCOPE_KEYS = ("application", "release_line", "release_lines")
+APP_POLICY_KEYS = ("review_domains",)
+LLM_POLICY_KEYS = (
+    "codex_activity_timeout_seconds",
+    "codex_absolute_timeout_seconds",
+    "codex_progress_heartbeat_seconds",
+    "dps_codex_max_retries",
+    "dps_codex_retry_prompt_chars",
+)
 REQUIRED_SCOPE_PATHS = (
     ("dps9-repository",),
     ("dps11-repository",),
@@ -35,8 +43,9 @@ def _mapping_at(payload: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any
 
 
 def merge_release_scopes(production: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
-    # Deliberately update only the 7.2.13 review-boundary fields. Runtime policy,
-    # endpoints, timeouts, auto-fetch and Linux paths remain production-owned.
+    # Deliberately update only portable review-boundary and review-policy fields.
+    # Endpoints, credentials, auto-fetch settings and Linux paths remain
+    # production-owned.
     for path in REQUIRED_SCOPE_PATHS:
         target = _mapping_at(production, path)
         source = _mapping_at(template, path)
@@ -47,12 +56,24 @@ def merge_release_scopes(production: dict[str, Any], template: dict[str, Any]) -
                 copied = True
         if not copied:
             raise RuntimeError(f"Template has no release scope at: {'.'.join(path)}")
+    production_app = _mapping_at(production, ("app",))
+    template_app = _mapping_at(template, ("app",))
+    for key in APP_POLICY_KEYS:
+        if key not in template_app:
+            raise RuntimeError(f"Template is missing required app policy: app.{key}")
+        production_app[key] = template_app[key]
+    production_llm = _mapping_at(production, ("app", "llm"))
+    template_llm = _mapping_at(template, ("app", "llm"))
+    for key in LLM_POLICY_KEYS:
+        if key not in template_llm:
+            raise RuntimeError(f"Template is missing required LLM policy: app.llm.{key}")
+        production_llm[key] = template_llm[key]
     return production
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Merge only 7.2.13 application/release-line fields into production config."
+        description="Merge portable application scope and review policy fields into production config."
     )
     parser.add_argument("production", type=Path)
     parser.add_argument("template", type=Path)

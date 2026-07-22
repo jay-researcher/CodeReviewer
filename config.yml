@@ -1,4 +1,8 @@
 app:
+  review_domains:
+    web_frontend:
+      applications: [WVAdmin, Services Terminal]
+      reviewers: [wen.yi]
   report:
     language: zh-CN
     min_severity: Medium
@@ -165,7 +169,12 @@ app:
     #codex_model: gpt-5.6-terra # balanced
     cc_switch_provider: Claude code opus
     timeout_seconds: 180
+    # Codex timeout is based on real CLI stream activity. A separate absolute
+    # ceiling prevents a live-but-stuck process from running forever.
     codex_timeout_seconds: 300
+    codex_activity_timeout_seconds: 300
+    codex_absolute_timeout_seconds: 900
+    codex_progress_heartbeat_seconds: 15
     codex_ignore_user_config: true
     codex_force_http: true
     # Local CodeReviewer uses CLIProxyAPI's OpenAI-compatible Responses API.
@@ -174,9 +183,10 @@ app:
     codex_http_api_key_env: OPENAI_API_KEY
     codex_stream_max_retries: 2
     max_retries: 3
-    # DPS reviews cannot fall back to another provider. One bounded Codex
-    # attempt avoids repeating the same 300-second request after a hard timeout.
-    dps_codex_max_retries: 1
+    # DPS reviews cannot fall back to another provider. Retry once with a
+    # compacted prompt after a provider failure (including a hard timeout).
+    dps_codex_max_retries: 2
+    dps_codex_retry_prompt_chars: 42000
     max_tokens: 3000
     max_diff_chars: 60000
     # GIT_VERSION reviews already have deterministic YAML/lock validation and

@@ -358,7 +358,13 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "Issue review was not found."}, status=HTTPStatus.NOT_FOUND)
                 else:
                     _enrich_issue_review_finding_details(detail)
-                    self._send_json({"ok": True, **detail, "permissions": _web_user_permissions(user), "role": _web_user_role(user)})
+                    self._send_json({
+                        "ok": True,
+                        **detail,
+                        "jira_url": _jira_issue_url(jira_key),
+                        "permissions": _web_user_permissions(user),
+                        "role": _web_user_role(user),
+                    })
             except PermissionError as exc:
                 self._send_json({"ok": False, "error": str(exc) or "Forbidden"}, status=HTTPStatus.FORBIDDEN)
             except Exception as exc:
@@ -2209,7 +2215,12 @@ def build_review_coverage(
         if not isinstance(item, dict):
             continue
         responsible = str(item.get("responsible") or "")
-        if _web_user_role(user) != "manager" and not _can_access_project_responsible(responsible, user):
+        review_scope = _review_scope_from_discovery(item)
+        if (
+            _web_user_role(user) != "manager"
+            and not _can_access_project_responsible(responsible, user)
+            and not _review_domain_allows(user, [review_scope.application])
+        ):
             continue
         key = str(item.get("jira_key") or "").upper()
         if not key:
@@ -2219,7 +2230,6 @@ def build_review_coverage(
         row["jira_status"] = str(item.get("jira_status") or row.get("jira_status") or "")
         if responsible:
             row["responsibles"].update(_split_people(responsible))
-        review_scope = _review_scope_from_discovery(item)
         row["applications"].add(review_scope.application)
         row["review_scopes"].add((review_scope.application, review_scope.release_line))
         project_path = str(item.get("gitlab_project") or item.get("project_path") or "").strip()
@@ -2420,6 +2430,18 @@ def _jira_keys_from_text(value: str) -> list[str]:
 def _jira_key_from_report_name(value: str) -> str:
     keys = _jira_keys_from_text(value)
     return keys[0] if keys else ""
+
+
+def _jira_issue_url(jira_key: str) -> str:
+    """Return a safe Jira browse URL without exposing credentials or query data."""
+    key = (jira_key or "").strip().upper()
+    base = os.getenv("JIRA_URL", "").strip().rstrip("/")
+    parsed = urlparse(base)
+    if not re.fullmatch(r"[A-Z][A-Z0-9]+-\d+", key):
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}/browse/{quote(key, safe='')}"
 
 
 def _coverage_report_state(report: dict[str, object]) -> dict[str, object]:
@@ -3192,6 +3214,9 @@ def _extract_report_findings(report_text: str) -> list[dict[str, str]]:
     for position, match in enumerate(matches):
         section_end = matches[position + 1].start() if position + 1 < len(matches) else len(report_text or "")
         section = (report_text or "")[match.end() : section_end]
+        next_report_section = re.search(r"^##\s+", section, re.M)
+        if next_report_section:
+            section = section[: next_report_section.start()]
         problem = _report_finding_labeled_text(
             section,
             r"(?:问题(?:描述|详情)?|Problem(?:\s+(?:Description|Detail))?|Detail)",
@@ -3209,6 +3234,7 @@ def _extract_report_findings(report_text: str) -> list[dict[str, str]]:
                 "detail": problem,
                 "suggestion": suggestion,
                 "recommendation": suggestion,
+                "report_section": section.strip(),
             }
         )
     return findings
@@ -3375,6 +3401,8 @@ def _can_access_report(
     if _can_access_responsible(responsible, user):
         return True
     metadata = metadata if metadata is not None else _read_report_metadata(report_path)
+    if _review_domain_allows(user, _metadata_applications(metadata)):
+        return True
     report_people = {
         item.casefold()
         for item in scope_people(metadata.get("responsible_scope") or metadata.get("responsible"))
@@ -3457,6 +3485,57 @@ def _web_user_responsibles(user: str) -> list[str]:
     return values or [(user or "").strip()]
 
 
+def _web_user_review_applications(user: str) -> set[str]:
+    """Return application-scoped review grants, independent of delivery owners."""
+    domains = app_config_get("review_domains", {})
+    if not isinstance(domains, dict):
+        return set()
+    username = (user or "").strip().casefold()
+    applications: set[str] = set()
+    for policy in domains.values():
+        if not isinstance(policy, dict):
+            continue
+        reviewers = policy.get("reviewers") or []
+        reviewer_values = reviewers if isinstance(reviewers, list) else _split_people(str(reviewers))
+        if username not in {str(item).strip().casefold() for item in reviewer_values}:
+            continue
+        configured = policy.get("applications") or []
+        values = configured if isinstance(configured, list) else [configured]
+        applications.update(str(item).strip().casefold() for item in values if str(item).strip())
+    return applications
+
+
+def _metadata_applications(metadata: dict[str, object]) -> set[str]:
+    values: list[object] = []
+    applications = metadata.get("applications")
+    if isinstance(applications, list):
+        values.extend(applications)
+    values.append(metadata.get("application"))
+    return {str(item).strip() for item in values if str(item or "").strip()}
+
+
+def _issue_summary_applications(issue: dict[str, object]) -> set[str]:
+    applications: set[str] = set()
+    cycles = issue.get("cycles") if isinstance(issue.get("cycles"), list) else []
+    current = issue.get("current_cycle") if isinstance(issue.get("current_cycle"), dict) else {}
+    for cycle in [*cycles, current]:
+        if not isinstance(cycle, dict):
+            continue
+        progress = cycle.get("application_progress") if isinstance(cycle.get("application_progress"), list) else []
+        for item in progress:
+            if isinstance(item, dict) and str(item.get("application") or "").strip():
+                applications.add(str(item["application"]).strip())
+    return applications
+
+
+def _review_domain_allows(user: str, applications: object) -> bool:
+    if _web_user_role(user) == "manager":
+        return True
+    values = applications if isinstance(applications, (set, list, tuple)) else []
+    allowed = _web_user_review_applications(user)
+    return bool(allowed.intersection(str(item).strip().casefold() for item in values if str(item).strip()))
+
+
 def _web_user_permissions(user: str) -> dict[str, bool]:
     role = _web_user_role(user)
     return {
@@ -3484,7 +3563,14 @@ def _issue_access_allowed(user: str, jira_key: str) -> bool:
         for item in scope_people(issue.get("responsible_scope") or issue.get("responsible"))
     }
     allowed = {item.casefold() for item in _web_user_responsibles(user)}
-    return bool(owners & allowed)
+    if owners & allowed:
+        return True
+    applications = {
+        str(run.get("application") or "").strip()
+        for run in (detail.get("runs") or [])
+        if isinstance(run, dict) and str(run.get("application") or "").strip()
+    }
+    return _review_domain_allows(user, applications)
 
 
 def _require_issue_access(user: str, jira_key: str) -> None:
@@ -3494,10 +3580,19 @@ def _require_issue_access(user: str, jira_key: str) -> None:
 
 def _workflow_issues_for_user(user: str) -> list[dict[str, object]]:
     permissions = _web_user_permissions(user)
-    return workflow_store().list_issues(
-        responsibles=_web_user_responsibles(user),
-        view_all=permissions["view_all"],
-    )
+    if permissions["view_all"]:
+        return workflow_store().list_issues(view_all=True)
+    issues = workflow_store().list_issues(view_all=True)
+    allowed_owners = {item.casefold() for item in _web_user_responsibles(user)}
+    return [
+        issue
+        for issue in issues
+        if allowed_owners.intersection(
+            item.casefold()
+            for item in scope_people(issue.get("responsible_scope") or issue.get("responsible"))
+        )
+        or _review_domain_allows(user, _issue_summary_applications(issue))
+    ]
 
 
 def recent_workflow_sprints(query: str = "", limit: int = 30) -> list[dict[str, str]]:
@@ -6155,6 +6250,45 @@ def render_index(user: str = "") -> str:
       background: var(--panel);
       box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
     }
+    .coverage-scan-panel {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--bg) 28%, var(--panel));
+    }
+    .coverage-scan-panel.collapsed { gap: 0; }
+    .coverage-scan-panel.complete {
+      border-color: color-mix(in srgb, var(--ok) 28%, var(--line));
+      background: color-mix(in srgb, var(--ok) 3%, var(--panel));
+    }
+    .coverage-scan-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      min-width: 0;
+    }
+    .coverage-scan-heading { display: grid; gap: 2px; min-width: 0; }
+    .coverage-scan-heading strong { font-size: 14px; }
+    .coverage-scan-panel.complete .coverage-scan-heading strong::before {
+      content: "";
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      margin-right: 7px;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 12%, transparent);
+      vertical-align: 1px;
+    }
+    .coverage-scan-heading .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .coverage-scan-toggle { flex: 0 0 auto; min-height: 32px; padding: 5px 10px; }
+    .coverage-scan-toggle::after { content: "▴"; display: inline-block; margin-left: 6px; font-size: 11px; }
+    .coverage-scan-toggle[aria-expanded="false"]::after { content: "▾"; }
+    .coverage-scan-body { display: grid; gap: 10px; min-width: 0; }
+    .coverage-scan-body[hidden] { display: none; }
     .coverage-filters {
       display: grid;
       grid-template-columns: minmax(220px, 1fr) minmax(150px, 0.45fr) minmax(150px, 0.45fr) auto;
@@ -6185,6 +6319,8 @@ def render_index(user: str = "") -> str:
     }
     @media (max-width: 520px) {
       .coverage-dialog { width: calc(100vw - 16px); padding: 14px; }
+      .coverage-scan-head { align-items: flex-start; }
+      .coverage-scan-heading .meta { white-space: normal; }
       .coverage-filters { grid-template-columns: 1fr; }
       .coverage-filters label:first-of-type { grid-column: auto; }
     }
@@ -7924,6 +8060,10 @@ def render_index(user: str = "") -> str:
     .sprint-overview-head .meta,
     .sprint-overview-footer .meta { font-size: 13px; }
     .sprint-overview-head .count-pill { font-size: 12px; }
+    .sprint-coverage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .sprint-coverage-summary > div { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--line) 72%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--bg) 74%, var(--panel)); }
+    .sprint-coverage-summary span { display: block; color: var(--muted); font-size: 12px; }
+    .sprint-coverage-summary strong { display: block; margin-top: 3px; font-size: 18px; }
     .sprint-overview-metrics { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; }
     .sprint-overview-metric { padding: 13px 14px; border: 1px solid color-mix(in srgb, var(--line) 72%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--bg) 65%, var(--panel)); }
     .sprint-overview-metric .meta { font-size: 14px; }
@@ -7948,7 +8088,8 @@ def render_index(user: str = "") -> str:
     .sprint-application-card[data-ready="true"] { border-color: color-mix(in srgb, var(--ok) 42%, var(--line)); background: color-mix(in srgb, var(--ok) 5%, var(--panel)); }
     .sprint-application-card[data-application="Unmapped"] { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); }
     @media (max-width: 1180px) { .sprint-application-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-    @media (max-width: 660px) { .sprint-application-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 860px) { .sprint-coverage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 660px) { .sprint-application-grid, .sprint-coverage-summary { grid-template-columns: 1fr; } }
     .cycle-history-card > .timeline-card { margin: 10px 0 0 14px; background: color-mix(in srgb, var(--bg) 55%, var(--panel)); }
     .cycle-history-card h5 { margin: 14px 0 6px 14px; }
     .workflow-head {
@@ -8001,6 +8142,9 @@ def render_index(user: str = "") -> str:
     .issue-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
     .issue-hero-copy { min-width: 0; }
     .issue-hero-title-row { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+    .jira-issue-link { display: inline-flex; align-items: center; gap: 5px; color: var(--accent-strong); text-decoration: none; }
+    .jira-issue-link:hover { text-decoration: underline; }
+    .jira-issue-link:focus-visible { border-radius: 4px; outline: 2px solid var(--accent); outline-offset: 3px; }
     .issue-hero h2 { margin: 0; font-size: 21px; line-height: 1.34; overflow-wrap: anywhere; }
     .issue-hero-meta { display: flex; gap: 7px 14px; flex-wrap: wrap; margin-top: 7px; }
     .issue-hero .status-chip { margin-top: 2px; }
@@ -8094,6 +8238,29 @@ def render_index(user: str = "") -> str:
       white-space: normal;
     }
     .finding-evidence-preview.expanded .finding-evidence-text { display: block; white-space: pre-wrap; }
+    .finding-full-detail { display: none; min-width: 0; margin-top: 3px; padding-top: 10px; border-top: 1px solid var(--line); }
+    .finding-evidence-preview.expanded .finding-full-detail { display: block; }
+    .finding-full-detail-title { margin-bottom: 7px; color: var(--text); font-size: 12px; font-weight: 700; }
+    .finding-report-markdown.markdown-preview {
+      display: block;
+      min-height: 0;
+      max-height: 420px;
+      margin: 0;
+      overflow: auto;
+      padding: 11px;
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--bg) 72%, var(--panel));
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .finding-report-markdown.markdown-preview table { min-width: 720px; margin: 8px 0 12px; }
+    .finding-report-markdown.markdown-preview th,
+    .finding-report-markdown.markdown-preview td { padding: 7px 8px; }
+    .finding-report-markdown.markdown-preview p:last-child,
+    .finding-report-markdown.markdown-preview ul:last-child,
+    .finding-report-markdown.markdown-preview ol:last-child,
+    .finding-report-markdown.markdown-preview table:last-child { margin-bottom: 0; }
     .finding-summary-toggle { min-height: 28px; margin-top: 4px; padding: 3px 7px; border: 0; background: transparent; color: var(--accent-strong); }
     .finding-head-action { flex: 0 0 auto; min-width: 132px; }
     .finding-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
@@ -8721,30 +8888,41 @@ __ADMIN_TRACE_SECTION__
         </div>
         <button id="coverageCloseBtn" class="icon-action" type="button" title="Close coverage" aria-label="Close coverage">&#x2715;</button>
       </div>
-      <div class="coverage-filters">
-        <div class="field-help">Review scope <span class="required-mark" aria-hidden="true">*</span> — complete at least one field.</div>
-        <label>Jira issues
-          <input id="coverageJira" placeholder="ECHNL-1001, ECHNL-1002" aria-describedby="coverageValidation">
-        </label>
-        <label>Sprint
-          <input id="coverageSprint" placeholder="10068" aria-describedby="coverageValidation">
-        </label>
-        <label>Jira Filter ID
-          <input id="coverageFilter" placeholder="12345" aria-describedby="coverageValidation">
-        </label>
-        <button id="coverageScanBtn" type="button">Scan</button>
-      </div>
-      <div id="coverageValidation" class="field-message" role="alert"></div>
-      <div id="coverageProgress" class="coverage-progress" role="status" aria-live="polite" hidden>
-        <span class="coverage-progress-spinner" aria-hidden="true"></span>
-        <div class="coverage-progress-copy">
-          <strong id="coverageProgressTitle">Preparing Sprint overview</strong>
-          <span id="coverageProgressDetail">Starting coverage discovery…</span>
+      <section id="coverageScanPanel" class="coverage-scan-panel" aria-label="Sprint scan scope">
+        <div class="coverage-scan-head">
+          <div class="coverage-scan-heading">
+            <strong>Review scope</strong>
+            <span id="coverageScanSummary" class="meta">Complete Jira issues, Sprint, or Jira Filter ID.</span>
+          </div>
+          <button id="coverageScanToggle" class="secondary coverage-scan-toggle" type="button" title="Collapse scan scope" aria-label="Collapse scan scope" aria-expanded="true" aria-controls="coverageScanBody">Collapse scan scope</button>
         </div>
-        <div id="coverageProgressTiming" class="coverage-progress-timing">Elapsed 0s</div>
-        <div class="coverage-progress-track" aria-hidden="true"><span id="coverageProgressBar"></span></div>
-      </div>
-      <div id="coverageStatus" class="status"></div>
+        <div id="coverageScanBody" class="coverage-scan-body">
+          <div class="coverage-filters">
+            <div class="field-help">Review scope <span class="required-mark" aria-hidden="true">*</span> — complete at least one field.</div>
+            <label>Jira issues
+              <input id="coverageJira" placeholder="ECHNL-1001, ECHNL-1002" aria-describedby="coverageValidation">
+            </label>
+            <label>Sprint
+              <input id="coverageSprint" placeholder="10068" aria-describedby="coverageValidation">
+            </label>
+            <label>Jira Filter ID
+              <input id="coverageFilter" placeholder="12345" aria-describedby="coverageValidation">
+            </label>
+            <button id="coverageScanBtn" type="button">Scan</button>
+          </div>
+          <div id="coverageValidation" class="field-message" role="alert"></div>
+          <div id="coverageProgress" class="coverage-progress" role="status" aria-live="polite" hidden>
+            <span class="coverage-progress-spinner" aria-hidden="true"></span>
+            <div class="coverage-progress-copy">
+              <strong id="coverageProgressTitle">Preparing Sprint overview</strong>
+              <span id="coverageProgressDetail">Starting coverage discovery…</span>
+            </div>
+            <div id="coverageProgressTiming" class="coverage-progress-timing">Elapsed 0s</div>
+            <div class="coverage-progress-track" aria-hidden="true"><span id="coverageProgressBar"></span></div>
+          </div>
+          <div id="coverageStatus" class="status"></div>
+        </div>
+      </section>
       <div class="coverage-view-tabs" role="tablist" aria-label="Sprint Review views">
         <button id="coverageOverviewTab" class="coverage-view-tab active" type="button" role="tab" aria-selected="true" aria-controls="coverageOverviewPanel" data-coverage-view="overview">Overview</button>
         <button id="coverageIssuesTab" class="coverage-view-tab" type="button" role="tab" aria-selected="false" aria-controls="coverageIssuesPanel" data-coverage-view="issues">Sprint issues</button>
@@ -9902,8 +10080,12 @@ __ADMIN_TRACE_SECTION__
       $('coverageRoleHint').textContent = currentUserRole === 'manager'
         ? 'Manager view: all configured responsible teams and Sprint issues.'
         : 'Auditor view: only GitLab projects and reports matching your responsible scope.';
-      resumeCoverageJob({ preserveJiraInput: true });
-      requestAnimationFrame(() => $('coverageJira').focus());
+      setCoverageScanCollapsed(String(coverageJobSnapshot?.status || '') === 'done');
+      const resumePromise = resumeCoverageJob({ preserveJiraInput: true });
+      resumePromise.finally(() => requestAnimationFrame(() => {
+        const target = $('coverageScanBody').hidden ? $('coverageScanToggle') : $('coverageJira');
+        target.focus();
+      }));
     }
 
     function closeCoverage() {
@@ -9926,12 +10108,33 @@ __ADMIN_TRACE_SECTION__
       return ['queued', 'running'].includes(String(job?.status || ''));
     }
 
+    function coverageScopeLabel(scope = {}) {
+      const parts = [];
+      if (String(scope.jira || '').trim()) parts.push(`Jira ${String(scope.jira).trim()}`);
+      if (String(scope.sprint || '').trim()) parts.push(`Sprint ${String(scope.sprint).trim()}`);
+      if (String(scope.jira_filter || '').trim()) parts.push(`Filter ${String(scope.jira_filter).trim()}`);
+      return parts.join(' · ') || 'Review scope';
+    }
+
+    function setCoverageScanCollapsed(collapsed) {
+      const active = coverageJobIsActive(coverageJobSnapshot);
+      const nextCollapsed = Boolean(collapsed) && !active;
+      $('coverageScanPanel').classList.toggle('collapsed', nextCollapsed);
+      $('coverageScanBody').hidden = nextCollapsed;
+      $('coverageScanToggle').setAttribute('aria-expanded', nextCollapsed ? 'false' : 'true');
+      const label = nextCollapsed ? 'Expand scan scope' : 'Collapse scan scope';
+      $('coverageScanToggle').textContent = label;
+      $('coverageScanToggle').title = label;
+      $('coverageScanToggle').setAttribute('aria-label', label);
+    }
+
     function syncCoverageControls() {
       const active = coverageJobIsActive(coverageJobSnapshot);
       $('coverageScanBtn').disabled = active || submissionFlights.has('coverage-scan');
       if (active) $('coverageScanBtn').setAttribute('aria-busy', 'true');
       else $('coverageScanBtn').removeAttribute('aria-busy');
       $('coverageScanBtn').textContent = active ? 'Scanning…' : 'Scan';
+      $('coverageScanToggle').disabled = active;
     }
 
     function rememberCoverageJob(jobId) {
@@ -9989,6 +10192,7 @@ __ADMIN_TRACE_SECTION__
       if (scope.sprint != null) $('coverageSprint').value = scope.sprint || '';
       if (scope.jira_filter != null) $('coverageFilter').value = scope.jira_filter || '';
       const status = String(job.status || '');
+      $('coverageScanPanel').classList.toggle('complete', status === 'done');
       const progress = job.progress || {};
       const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
       const progressTitles = {
@@ -10018,13 +10222,19 @@ __ADMIN_TRACE_SECTION__
       if (status === 'done') {
         renderCoverage(job.result || {});
         const issueCount = Array.isArray(job.result?.issues) ? job.result.issues.length : 0;
+        $('coverageScanSummary').textContent = `${coverageScopeLabel(scope)} · ${options.reused ? 'Recent result' : 'Completed'} · ${issueCount} issue(s)`;
         $('coverageStatus').textContent = options.reused
           ? `Recent coverage result restored · ${issueCount} issue(s)`
           : `Coverage scan completed · ${issueCount} issue(s)`;
+        setCoverageScanCollapsed(true);
       } else if (status === 'failed') {
+        $('coverageScanSummary').textContent = `${coverageScopeLabel(scope)} · Scan failed`;
         $('coverageStatus').textContent = job.error || progress.message || 'Coverage scan failed.';
+        setCoverageScanCollapsed(false);
       } else {
+        $('coverageScanSummary').textContent = `${coverageScopeLabel(scope)} · Scan in progress`;
         $('coverageStatus').textContent = 'Coverage discovery is running in the background. Closing this window will not stop it.';
+        setCoverageScanCollapsed(false);
       }
       syncCoverageControls();
       startCoverageTiming();
@@ -10071,12 +10281,16 @@ __ADMIN_TRACE_SECTION__
       $('coverageValidation').className = 'field-message';
       $('coverageValidation').textContent = '';
       if (!jira && !sprint && !jiraFilter) {
+        setCoverageScanCollapsed(false);
         fields.forEach(field => field.setAttribute('aria-invalid', 'true'));
         $('coverageValidation').className = 'field-message error';
         $('coverageValidation').textContent = 'Enter Jira issues, a Sprint, or a Jira Filter ID.';
         $('coverageJira').focus();
         return;
       }
+      setCoverageScanCollapsed(false);
+      $('coverageScanPanel').classList.remove('complete');
+      $('coverageScanSummary').textContent = `${coverageScopeLabel({ jira, sprint, jira_filter: jiraFilter })} · Starting scan`;
       $('coverageStatus').className = 'status';
       $('coverageStatus').textContent = 'Creating background coverage scan…';
       $('coverageProgress').hidden = false;
@@ -10095,6 +10309,8 @@ __ADMIN_TRACE_SECTION__
         applyCoverageJob(job, { reused: Boolean(data.reused) });
         if (coverageJobIsActive(job)) pollCoverageJob(job.id || '');
       } catch (error) {
+        $('coverageScanSummary').textContent = `${coverageScopeLabel({ jira, sprint, jira_filter: jiraFilter })} · Scan failed`;
+        setCoverageScanCollapsed(false);
         $('coverageStatus').className = 'status error';
         $('coverageStatus').textContent = error.message;
         $('coverageProgress').hidden = true;
@@ -12198,7 +12414,7 @@ function jiraKeyFromReportPath(reportPath) {
     }
 
     function renderIssueReviewOverview() {
-      const applicationOrder = ['WVAdmin', 'iTrade Client 7.5.0', 'iTrade Client 7.5.1', 'Services Terminal', 'DPS9', 'DPS11'];
+      const defaultApplications = ['WVAdmin', 'Services Terminal', 'DPS9', 'DPS11'];
       const groups = new Map();
       issueReviews.forEach(issue => {
         const cycles = (issue.cycles || []).length ? issue.cycles : [issue.current_cycle || {}];
@@ -12219,7 +12435,8 @@ function jiraKeyFromReportPath(reportPath) {
         const blockers = entries.reduce((sum, {issue, cycle}) => sum + (issue.current_cycle_id === cycle.cycle_id ? Number(((issue.pass_readiness || {}).pending_blockers || []).length) : 0), 0);
         const pending = entries.reduce((sum, {issue, cycle}) => sum + (issue.current_cycle_id === cycle.cycle_id ? Number((issue.handling_counts || {}).pending || 0) : 0), 0);
         const snapshots = entries.reduce((sum, {cycle}) => sum + Number(cycle.review_snapshot_count || 0), 0);
-        const perApplication = new Map(applicationOrder.map(name => [name, []]));
+        const perApplication = new Map();
+        const coverageByIssue = new Map([...issueKeys].map(key => [key, []]));
         entries.forEach(({issue, cycle}) => {
           let progress = Array.isArray(cycle.application_progress) ? cycle.application_progress : [];
           if (!progress.length) {
@@ -12229,10 +12446,31 @@ function jiraKeyFromReportPath(reportPath) {
             const scopeLabel = String(item.scope_label || item.application || 'Unmapped');
             if (!perApplication.has(scopeLabel)) perApplication.set(scopeLabel, []);
             perApplication.get(scopeLabel).push({issue, cycle, progress:item});
+            if (!coverageByIssue.has(issue.jira_key)) coverageByIssue.set(issue.jira_key, []);
+            coverageByIssue.get(issue.jira_key).push(item);
           });
         });
-        const additionalScopes = [...perApplication.keys()].filter(name => !applicationOrder.includes(name)).sort();
-        const applications = [...applicationOrder, ...additionalScopes];
+        const scopeTotal = [...perApplication.values()].reduce((sum, scoped) => sum + new Set(scoped.map(item => item.issue.jira_key)).size, 0);
+        const coverageCounts = {full:0, partial:0, without:0, unmapped:0};
+        coverageByIssue.forEach(progress => {
+          const mapped = progress.filter(item => String(item.application || 'Unmapped') !== 'Unmapped');
+          const unresolved = !mapped.length || progress.some(item => String(item.application || 'Unmapped') === 'Unmapped');
+          if (unresolved) { coverageCounts.unmapped += 1; return; }
+          const reportsPresent = mapped.filter(item => Number(item.report_count || 0) > 0).length;
+          if (reportsPresent === mapped.length) coverageCounts.full += 1;
+          else if (reportsPresent > 0) coverageCounts.partial += 1;
+          else coverageCounts.without += 1;
+        });
+        const applicationRank = name => name === 'WVAdmin' ? 0
+          : name.startsWith('iTrade Client') ? 1
+          : name === 'Services Terminal' ? 2
+          : name === 'DPS9' ? 3
+          : name === 'DPS11' ? 4
+          : name.startsWith('Unmapped') ? 6 : 5;
+        const applications = [...new Set([...defaultApplications, ...perApplication.keys()])].sort((left, right) => {
+          const rank = applicationRank(left) - applicationRank(right);
+          return rank || left.localeCompare(right, undefined, {numeric:true});
+        });
         const appCards = applications.map(application => {
           const scoped = perApplication.get(application) || [];
           const unique = new Map(scoped.map(item => [item.issue.jira_key, item]));
@@ -12261,7 +12499,7 @@ function jiraKeyFromReportPath(reportPath) {
             </span>
           </button>`;
         }).join('');
-        return `<article class="sprint-overview-card"><div class="sprint-overview-head"><div><strong>${escapeHtml(group.sprintName)}</strong><div class="meta">Sprint ${escapeHtml(group.sprintId)} · ${escapeHtml(statusLabel(group.state))}</div></div><span class="count-pill">${total} issues</span></div><div class="sprint-overview-metrics"><div class="sprint-overview-metric"><span class="meta">Review Pass</span><strong>${passed}/${total}</strong></div><div class="sprint-overview-metric"><span class="meta">Blockers</span><strong>${blockers}</strong></div><div class="sprint-overview-metric"><span class="meta">Pending handling</span><strong>${pending}</strong></div></div><div class="sprint-application-grid">${appCards}</div><div class="sprint-overview-footer"><div class="meta">${snapshots} review snapshot(s) · ${entries.length} cycle membership(s)</div><button class="secondary" type="button" data-open-sprint="${escapeHtml(group.key)}" data-sprint-label="${escapeHtml(`${group.sprintName} (${group.sprintId})`)}">View sprint issues</button></div></article>`;
+        return `<article class="sprint-overview-card"><div class="sprint-overview-head"><div><strong>${escapeHtml(group.sprintName)}</strong><div class="meta">Sprint ${escapeHtml(group.sprintId)} · ${escapeHtml(statusLabel(group.state))} · Application cards count scopes; this summary counts unique Issues.</div></div><span class="count-pill">${total} unique issues · ${scopeTotal} application scopes</span></div><div class="sprint-coverage-summary" aria-label="Unique Issue report coverage"><div><span>Fully covered</span><strong>${coverageCounts.full}</strong></div><div><span>Partially covered</span><strong>${coverageCounts.partial}</strong></div><div><span>Without reports</span><strong>${coverageCounts.without}</strong></div><div><span>Unmapped</span><strong>${coverageCounts.unmapped}</strong></div></div><div class="sprint-overview-metrics"><div class="sprint-overview-metric"><span class="meta">Review Pass</span><strong>${passed}/${total}</strong></div><div class="sprint-overview-metric"><span class="meta">Blockers</span><strong>${blockers}</strong></div><div class="sprint-overview-metric"><span class="meta">Pending handling</span><strong>${pending}</strong></div></div><div class="sprint-application-grid">${appCards}</div><div class="sprint-overview-footer"><div class="meta">${snapshots} review snapshot(s) · ${entries.length} cycle membership(s)</div><button class="secondary" type="button" data-open-sprint="${escapeHtml(group.key)}" data-sprint-label="${escapeHtml(`${group.sprintName} (${group.sprintId})`)}">View sprint issues</button></div></article>`;
       }).join('')}</div>` : '<div class="markdown-preview empty">No persisted Sprint review data is available.</div>';
       $('issueReviewOverviewPanel').querySelectorAll('[data-open-sprint]').forEach(button => button.addEventListener('click', () => {
         issueReviewSprintFilter = button.dataset.openSprint || '';
@@ -12384,10 +12622,22 @@ function jiraKeyFromReportPath(reportPath) {
       $('issueReviewList').innerHTML = `<div class="issue-review-cards">${rows.map(item => {
         const counts = item.handling_counts || {};
         const selected = selectedIssueReview === item.jira_key ? ' selected' : '';
+        let scopeStatus = '';
+        if (issueReviewApplicationFilter) {
+          const cycles = (item.cycles || []).length ? item.cycles : [item.current_cycle || {}];
+          for (const cycle of cycles) {
+            const cycleKey = `${cycle.sprint_id || 'legacy'}|${cycle.sprint_name || (cycle.sprint_id === 'legacy' ? 'Legacy / Unknown Sprint' : cycle.sprint_id || 'legacy')}`;
+            if (issueReviewSprintFilter && cycleKey !== issueReviewSprintFilter) continue;
+            const progress = Array.isArray(cycle.application_progress) ? cycle.application_progress : [];
+            const matched = progress.find(entry => String(entry.scope_label || entry.application || 'Unmapped') === issueReviewApplicationFilter);
+            if (matched) { scopeStatus = String(matched.state || ''); break; }
+          }
+        }
+        const displayedStatus = scopeStatus || item.status;
         return `<article class="issue-review-card${selected}" data-jira="${escapeHtml(item.jira_key)}" role="button" tabindex="0" aria-label="Open ${escapeHtml(item.jira_key)} Issue Review">
-          <div class="issue-review-card-head"><strong class="issue-review-key">${escapeHtml(item.jira_key)}</strong><span class="status-chip" data-status="${escapeHtml(item.status)}">${escapeHtml(statusLabel(item.status))}</span></div>
+          <div class="issue-review-card-head"><strong class="issue-review-key">${escapeHtml(item.jira_key)}</strong><span class="status-chip" data-status="${escapeHtml(displayedStatus)}">${escapeHtml(statusLabel(displayedStatus))}</span></div>
           <div class="issue-review-summary">${escapeHtml(item.summary || 'No summary')}</div>
-          <div class="meta">${escapeHtml(item.responsible || '-')} · Run ${escapeHtml(item.run_number || '-')} · ${escapeHtml(item.finding_count || 0)} findings</div>
+          <div class="meta">${escapeHtml(item.responsible || '-')} · Run ${escapeHtml(item.run_number || '-')} · ${escapeHtml(item.finding_count || 0)} findings${scopeStatus && scopeStatus !== item.status ? ` · Issue ${escapeHtml(statusLabel(item.status))}` : ''}</div>
           <div class="issue-review-progress"><span class="handling-chip">Fixed ${counts.fixed || 0}</span><span class="handling-chip">Jira ${counts['follow-up'] || 0}</span><span class="handling-chip">Not issue ${counts['not-issue'] || 0}</span><span class="handling-chip">Pending ${counts.pending || 0}</span></div>
           <div class="issue-review-card-foot"><span class="meta">Last updated</span><time class="meta issue-review-updated">${escapeHtml(formatDateTime(item.updated_at))}</time></div>
         </article>`;
@@ -12437,6 +12687,7 @@ function jiraKeyFromReportPath(reportPath) {
       const snapshots = data.review_snapshots || [];
       const canPass = Boolean((data.permissions || {}).manual_pass);
       const canReview = Boolean((data.permissions || {}).run_issue_review);
+      const jiraUrl = String(data.jira_url || '');
       const severityProgress = level => {
         const scoped = findings.filter(item => String(item.severity || '').toLowerCase() === level.toLowerCase());
         const handled = scoped.filter(item => Boolean(item.handling)).length;
@@ -12458,7 +12709,7 @@ function jiraKeyFromReportPath(reportPath) {
       )));
       $('issueReviewDetail').innerHTML = `
         <section class="issue-overview" aria-label="Issue review overview">
-        <header class="issue-review-header"><div class="issue-review-identity"><div class="issue-hero-title-row"><h2>${escapeHtml(issue.jira_key)} · ${escapeHtml(issue.summary || 'Issue Review')}</h2><span class="info-hint"><button class="information-icon" type="button" aria-label="Issue overview guidance" aria-expanded="false" aria-controls="issueOverviewHintPopover">i</button><span id="issueOverviewHintPopover" class="information-hint-popover" role="tooltip" hidden>Metrics use the latest logical Review Run. Click a severity card to jump to its first Problem.</span></span></div><div class="meta issue-hero-meta"><span>Responsible: ${escapeHtml(issue.responsible || '-')}</span><span>Latest Run ${escapeHtml(latest.run_number || '-')}</span><span>Updated ${escapeHtml(formatDateTime(issue.updated_at))}</span></div></div><div class="issue-review-controls"><div class="issue-review-actions"><span class="status-chip" data-status="${escapeHtml(issue.status)}">${escapeHtml(statusLabel(issue.status))}</span>${canReview ? '<button id="issueRescanBtn" class="secondary" type="button">Re-scan Issue</button>' : ''}${canPass ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : 'disabled'}>Manual Pass</button>` : ''}</div><div class="issue-readiness ${readiness.ready ? 'ready' : ''}" role="status"><span class="issue-readiness-dot" aria-hidden="true"></span><span class="meta">${escapeHtml(readiness.message || '')}</span></div></div></header>
+        <header class="issue-review-header"><div class="issue-review-identity"><div class="issue-hero-title-row"><h2>${jiraUrl ? `<a class="jira-issue-link" href="${escapeHtml(jiraUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(issue.jira_key)} in Jira (new tab)">${escapeHtml(issue.jira_key)} <span aria-hidden="true">↗</span></a>` : escapeHtml(issue.jira_key)} · ${escapeHtml(issue.summary || 'Issue Review')}</h2><span class="info-hint"><button class="information-icon" type="button" aria-label="Issue overview guidance" aria-expanded="false" aria-controls="issueOverviewHintPopover">i</button><span id="issueOverviewHintPopover" class="information-hint-popover" role="tooltip" hidden>Metrics use the latest logical Review Run. Click a severity card to jump to its first Problem.</span></span></div><div class="meta issue-hero-meta"><span>Responsible: ${escapeHtml(issue.responsible || '-')}</span><span>Latest Run ${escapeHtml(latest.run_number || '-')}</span><span>Updated ${escapeHtml(formatDateTime(issue.updated_at))}</span></div></div><div class="issue-review-controls"><div class="issue-review-actions"><span class="status-chip" data-status="${escapeHtml(issue.status)}">${escapeHtml(statusLabel(issue.status))}</span>${canReview ? '<button id="issueRescanBtn" class="secondary" type="button">Re-scan Issue</button>' : ''}${canPass ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : 'disabled'}>Manual Pass</button>` : ''}</div><div class="issue-readiness ${readiness.ready ? 'ready' : ''}" role="status"><span class="issue-readiness-dot" aria-hidden="true"></span><span class="meta">${escapeHtml(readiness.message || '')}</span></div></div></header>
         <div class="metric-grid">
           <button class="metric-card" type="button" data-jump-severity="critical" ${(severity.Critical || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">Critical</span><strong>${severity.Critical || 0}</strong></span><span class="metric-ratio"><span>${criticalProgress.handled} handled / ${criticalProgress.unhandled} unhandled</span><b>${criticalProgress.percent}%</b></span><span class="metric-bar" aria-label="Critical ${criticalProgress.percent}% handled"><span style="--completion:${criticalProgress.percent}%"></span></span></button>
           <button class="metric-card" type="button" data-jump-severity="high" ${(severity.High || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">High</span><strong>${severity.High || 0}</strong></span><span class="metric-ratio"><span>${highProgress.handled} handled / ${highProgress.unhandled} unhandled</span><b>${highProgress.percent}%</b></span><span class="metric-bar" aria-label="High ${highProgress.percent}% handled"><span style="--completion:${highProgress.percent}%"></span></span></button>
@@ -12538,11 +12789,12 @@ function jiraKeyFromReportPath(reportPath) {
       const details = finding.details && typeof finding.details === 'object' ? finding.details : {};
       const problemText = String(details.problem || details.detail || details.description || details.impact || finding.description || '').trim();
       const suggestionText = String(details.suggestion || details.recommendation || details.solution || details.workaround || '').trim();
-      const hasEvidence = Boolean(problemText || suggestionText);
+      const reportSection = String(details.report_section || '').trim();
+      const hasEvidence = Boolean(problemText || suggestionText || reportSection);
       const lineage = ({new:'New in this run', persisting:`Still present${finding.first_seen_run ? ` since Run ${finding.first_seen_run}` : ''}`, resolved:'Resolved after re-scan'})[String(finding.lineage_state || '').toLowerCase()] || statusLabel(finding.lineage_state);
       const fileStatus = finding.file_path || 'Architecture / No specific file';
       const scopeLabel = String(finding.scope_label || finding.application || 'Unmapped');
-      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div class="finding-head-main"><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <span class="status-chip">${escapeHtml(scopeLabel)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta finding-context">${escapeHtml(fileStatus)} · ${escapeHtml(lineage)}</div>${hasEvidence ? `<div class="finding-evidence-preview" id="finding-summary-${finding.id}">${problemText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">问题详情</span><span class="finding-evidence-text">${escapeHtml(problemText)}</span></div>` : ''}${suggestionText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">处理建议</span><span class="finding-evidence-text">${escapeHtml(suggestionText)}</span></div>` : ''}</div><button class="finding-summary-toggle" type="button" data-expand-finding="${finding.id}" aria-label="View full details" aria-expanded="false" aria-controls="finding-summary-${finding.id}">更多</button>` : ''}</div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : `<button class="finding-head-action" data-handle-finding="${finding.id}" type="button">Submit</button>`}</div>
+      return `<article class="finding-card" data-finding-severity="${escapeHtml(severityClass)}" data-finding-blocker="${isPendingBlocker ? 'true' : 'false'}"><div class="finding-head"><div class="finding-head-main"><span class="severity-chip ${escapeHtml(severityClass)}">${escapeHtml(finding.severity)}</span> <span class="status-chip">${escapeHtml(scopeLabel)}</span> <strong>#${escapeHtml(finding.report_index)} ${escapeHtml(finding.title)}</strong><div class="meta finding-context">${escapeHtml(fileStatus)} · ${escapeHtml(lineage)}</div>${hasEvidence ? `<div class="finding-evidence-preview" id="finding-summary-${finding.id}">${problemText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">问题详情</span><span class="finding-evidence-text">${escapeHtml(problemText)}</span></div>` : ''}${suggestionText ? `<div class="finding-evidence-line"><span class="finding-evidence-label">处理建议</span><span class="finding-evidence-text">${escapeHtml(suggestionText)}</span></div>` : ''}${reportSection ? `<div class="finding-full-detail"><div class="finding-full-detail-title">完整报告证据</div><div class="finding-report-markdown markdown-preview">${renderMarkdown(reportSection, {anchorPrefix: `finding-${finding.id}-`})}</div></div>` : ''}</div><button class="finding-summary-toggle" type="button" data-expand-finding="${finding.id}" aria-label="View full details" aria-expanded="false" aria-controls="finding-summary-${finding.id}">更多</button>` : ''}</div>${handling ? `<span class="handling-chip">${escapeHtml(handling.disposition)} · ${escapeHtml(handling.approval_status)}</span>` : `<button class="finding-head-action" data-handle-finding="${finding.id}" type="button">Submit</button>`}</div>
         ${handling ? `<p>${escapeHtml(handling.note)}</p>${handling.manager_override ? `<div class="status">Manager Exception: ${escapeHtml(handling.override_reason)}</div>` : ''}<div class="finding-actions">${needsApproval && role !== 'developer' ? `<button class="secondary small-action" data-approve-handling="${handling.id}" type="button">Approve Not an issue</button>` : ''}${isManager && handling.disposition === 'follow-up' && !handling.manager_override ? `<button class="secondary small-action" data-override-handling="${handling.id}" type="button">Manager Exception</button>` : ''}</div>` : `<div class="finding-handling-form"><div class="finding-handling-primary"><label><span>处理结果 <span class="required-mark" aria-hidden="true">*</span></span><select id="disposition-${finding.id}" data-finding-disposition="${finding.id}" required><option value="fixed">已整改，Pass通过</option><option value="follow-up">不是阻碍，另报 Jira</option><option value="not-issue">不是问题，Pass通过</option></select></label><label><span id="note-label-${finding.id}">处理说明 <span class="required-mark" aria-hidden="true">*</span></span><textarea id="note-${finding.id}" aria-labelledby="note-label-${finding.id}" aria-describedby="error-${finding.id}" placeholder="说明修改内容、判断依据及测试结果" required></textarea></label><div id="error-${finding.id}" class="field-message" role="alert"></div></div><div class="finding-handling-secondary"><div id="followup-${finding.id}" class="followup-fields" hidden><div class="followup-fields-head"><label><span>Issue Summary <span class="required-mark" aria-hidden="true">*</span></span><textarea class="summary-input" id="jira-summary-${finding.id}" maxlength="255" rows="2" placeholder="概括待跟进问题，建议 20–50 个字符"></textarea></label></div><textarea id="jira-adf-${finding.id}" hidden>${escapeHtml(JSON.stringify(textToAdf('')))}</textarea><div class="followup-card-head"><div class="followup-adf-state"><strong>Issue Description <span class="required-mark" aria-hidden="true">*</span></strong><div id="jira-adf-preview-${finding.id}" class="followup-adf-preview">Not provided yet.</div><div id="jira-adf-status-${finding.id}" class="meta">Open the editor and add the follow-up details.</div></div><button class="secondary" data-compose-adf="${finding.id}" type="button">Edit issue</button></div></div></div></div>`}
       </article>`;
     }
@@ -13170,6 +13422,9 @@ function jiraKeyFromReportPath(reportPath) {
     $('refreshBtn').addEventListener('click', loadReports);
     $('coverageBtn').addEventListener('click', openCoverage);
     $('coverageCloseBtn').addEventListener('click', closeCoverage);
+    $('coverageScanToggle').addEventListener('click', () => {
+      setCoverageScanCollapsed(!$('coverageScanBody').hidden);
+    });
     $('coverageScanBtn').addEventListener('click', () => {
       singleFlight('coverage-scan', $('coverageScanBtn'), scanCoverage).finally(syncCoverageControls);
     });

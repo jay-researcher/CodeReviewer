@@ -57,7 +57,7 @@ def analyze(review_input: ReviewInput, progress: Any = None) -> ReviewResult:
     findings.extend(enrich_git_version_review(review_input))
     budget = preview_llm_prompt_budget(review_input)
     _progress_context_budget(progress, review_input, budget)
-    llm_output = run_llm_review(review_input)
+    llm_output = run_llm_review(review_input, progress=progress)
     llm_findings, suppressed_notes = _filter_llm_findings(review_input, llm_output.findings)
     llm_output.notes.extend(suppressed_notes)
     findings.extend(llm_findings)
@@ -335,16 +335,26 @@ def _jira_involved_file_findings(review_input: ReviewInput) -> list[Finding]:
     actual = [_normalize_actual_changed_path(item.path) for item in review_input.changed_files]
     actual = _unique_preserve_order([item for item in actual if item])
     deferred_actual = _deferred_release_gate_file_paths(review_input)
-    excluded_deferred = [item for item in expected if _path_matches_any(item, deferred_actual)]
-    comparison_expected = [item for item in expected if item not in excluded_deferred]
+    other_scope_actual = _metadata_file_paths(review_input, "other_review_scope_file_paths")
+    excluded_deferred = [] if review_input.metadata.get("deferred_scope_report") else [
+        item for item in expected if _path_matches_any(item, deferred_actual)
+    ]
+    excluded_other_scopes = [item for item in expected if _path_matches_any(item, other_scope_actual)]
+    comparison_expected = [
+        item for item in expected if item not in excluded_deferred and item not in excluded_other_scopes
+    ]
     missing = [item for item in comparison_expected if not _path_matches_any(item, actual)]
-    unexpected = [item for item in actual if not _path_matches_any(item, comparison_expected)]
+    unexpected = [] if review_input.metadata.get("deferred_scope_report") else [
+        item for item in actual if not _path_matches_any(item, comparison_expected)
+    ]
     review_input.metadata["jira_involved_files_check"] = {
         "expected": comparison_expected,
         "original_expected": expected,
         "actual": actual,
         "deferred_actual": deferred_actual,
         "excluded_deferred": excluded_deferred,
+        "other_scope_actual": other_scope_actual,
+        "excluded_other_scopes": excluded_other_scopes,
         "effective_actual": actual,
         "missing": missing,
         "unexpected": unexpected,
@@ -373,6 +383,15 @@ def _jira_involved_file_findings(review_input: ReviewInput) -> list[Finding]:
             category="Traceability",
         )
     ]
+
+
+def _metadata_file_paths(review_input: ReviewInput, key: str) -> list[str]:
+    values = review_input.metadata.get(key) or []
+    if not isinstance(values, list):
+        return []
+    return _unique_preserve_order(
+        [normalized for value in values if (normalized := _normalize_actual_changed_path(str(value)))]
+    )
 
 
 def _deferred_release_gate_file_paths(review_input: ReviewInput) -> list[str]:

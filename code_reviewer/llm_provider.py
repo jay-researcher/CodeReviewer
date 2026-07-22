@@ -6,6 +6,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -24,6 +26,7 @@ from .config import (
     report_min_severity,
 )
 from .models import Finding, ReviewInput
+from .process_utils import _terminate_process_tree
 from .resource_optimizer import optimize_prompt_diff
 
 
@@ -40,7 +43,7 @@ class LLMReviewOutput:
     speed: str = "standard"
 
 
-def run_llm_review(review_input: ReviewInput) -> LLMReviewOutput:
+def run_llm_review(review_input: ReviewInput, progress: Any = None) -> LLMReviewOutput:
     config = llm_config()
     provider = _normalize_provider(str(config["provider"]))
     dps_codex_required = _dps_review_requires_codex(review_input)
@@ -73,8 +76,14 @@ def run_llm_review(review_input: ReviewInput) -> LLMReviewOutput:
         )
 
     prompt = _review_prompt(review_input)
+    retry_prompt = ""
+    if dps_codex_required and max_retries > 1:
+        retry_prompt = _compact_prompt_for_retry(
+            prompt,
+            int(config.get("dps_codex_retry_prompt_chars") or 42000),
+        )
     if provider == "auto":
-        return _run_auto_review(prompt, timeout, config, reasoning_effort, speed, max_retries)
+        return _run_auto_review(prompt, timeout, config, reasoning_effort, speed, max_retries, progress=progress)
 
     return _run_single_review(
         provider,
@@ -88,6 +97,9 @@ def run_llm_review(review_input: ReviewInput) -> LLMReviewOutput:
         require_success=True if dps_codex_required else None,
         no_fallback_reason="DPS GitLab projects require codex-cli review." if dps_codex_required else "",
         cc_switch_selector=str(config.get("cc_switch_provider") or DEFAULT_CC_SWITCH_PROVIDER),
+        retry_prompt=retry_prompt,
+        progress=progress,
+        jira_key=review_input.jira_key,
     )
 
 
@@ -168,6 +180,7 @@ def _run_auto_review(
     reasoning_effort: str,
     speed: str,
     max_retries: int,
+    progress: Any = None,
 ) -> LLMReviewOutput:
     notes: list[str] = []
     codex_timeout = int(config.get("codex_timeout_seconds") or timeout)
@@ -204,6 +217,9 @@ def _run_auto_review(
                         reasoning_effort=reasoning_effort,
                         speed=speed,
                         service_tier=codex_service_tier,
+                        progress=progress,
+                        attempt=attempt,
+                        max_attempts=max_retries,
                     )
                     output_provider = provider
                     output_model = model
@@ -253,6 +269,9 @@ def _run_single_review(
     require_success: bool | None = None,
     no_fallback_reason: str = "",
     cc_switch_selector: str = "",
+    retry_prompt: str = "",
+    progress: Any = None,
+    jira_key: str = "",
 ) -> LLMReviewOutput:
     strict_success = _llm_require_success() if require_success is None else require_success
     if provider not in {"codex-cli", "deepseek", "claude", "cc-switch"}:
@@ -271,22 +290,27 @@ def _run_single_review(
     for attempt in range(1, max_retries + 1):
         output_provider = provider
         output_model = model
+        attempt_prompt = retry_prompt if attempt > 1 and retry_prompt else prompt
         try:
             if provider == "codex-cli":
                 text = _call_codex_cli(
-                    prompt,
+                    attempt_prompt,
                     model,
                     timeout,
                     reasoning_effort=reasoning_effort,
                     speed=speed,
                     service_tier=codex_service_tier,
+                    progress=progress,
+                    attempt=attempt,
+                    max_attempts=max_retries,
+                    jira_key=jira_key,
                 )
             elif provider == "deepseek":
-                text = _call_deepseek_api(prompt, model, timeout)
+                text = _call_deepseek_api(attempt_prompt, model, timeout)
             elif provider == "claude":
-                text = _call_claude_api(prompt, model, timeout)
+                text = _call_claude_api(attempt_prompt, model, timeout)
             else:
-                text, provider_name, output_model = _call_cc_switch_api(prompt, model, timeout, selector=cc_switch_selector)
+                text, provider_name, output_model = _call_cc_switch_api(attempt_prompt, model, timeout, selector=cc_switch_selector)
                 output_provider = f"cc-switch:{provider_name}"
             findings, notes = _parse_llm_response_strict(text)
             if no_fallback_reason:
@@ -380,6 +404,10 @@ def _call_codex_cli(
     reasoning_effort: str = "high",
     speed: str = "standard",
     service_tier: str = "",
+    progress: Any = None,
+    attempt: int = 1,
+    max_attempts: int = 1,
+    jira_key: str = "",
 ) -> str:
     codex = _resolve_codex_cli()
     if not codex:
@@ -411,6 +439,7 @@ def _call_codex_cli(
         str(output_path),
         "--output-schema",
         str(schema_path),
+        "--json",
     ]
     tier = service_tier or ("priority" if speed == "fast" else "default")
     if tier:
@@ -464,30 +493,34 @@ def _call_codex_cli(
         command.extend(["--model", model])
     command.append("-")
 
+    activity_timeout = app_config_int(
+        "llm.codex_activity_timeout_seconds",
+        "LLM_CODEX_ACTIVITY_TIMEOUT_SECONDS",
+        timeout,
+    )
+    absolute_timeout = app_config_int(
+        "llm.codex_absolute_timeout_seconds",
+        "LLM_CODEX_ABSOLUTE_TIMEOUT_SECONDS",
+        max(timeout, 900),
+    )
+    heartbeat_seconds = app_config_int(
+        "llm.codex_progress_heartbeat_seconds",
+        "LLM_CODEX_PROGRESS_HEARTBEAT_SECONDS",
+        15,
+    )
     try:
-        # Pass bytes explicitly. On Windows, subprocess text mode can otherwise
-        # fall back to the active ANSI code page in its writer thread and leave
-        # Codex waiting until timeout when a prompt contains BOM/CJK characters.
-        completed = subprocess.run(
+        completed = _run_codex_process(
             command,
-            input=prompt.encode("utf-8"),
-            capture_output=True,
-            text=False,
-            env=process_env,
-            check=False,
-            timeout=timeout,
+            prompt.encode("utf-8"),
+            process_env,
+            activity_timeout=max(1, activity_timeout),
+            absolute_timeout=max(activity_timeout, absolute_timeout),
+            heartbeat_seconds=max(1, heartbeat_seconds),
+            progress=progress,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            jira_key=jira_key,
         )
-    except subprocess.TimeoutExpired as exc:
-        output = "\n".join(
-            _decode_subprocess_output(item)
-            for item in (
-                getattr(exc, "stderr", ""),
-                getattr(exc, "stdout", ""),
-            )
-            if item
-        )
-        detail = f": {_brief_error(output)}" if output else ""
-        raise RuntimeError(f"timed out after {timeout} seconds{detail}") from exc
     finally:
         output = output_path.read_text(encoding="utf-8", errors="ignore") if output_path.exists() else ""
         output_path.unlink(missing_ok=True)
@@ -497,6 +530,149 @@ def _call_codex_cli(
     if completed.returncode != 0:
         raise RuntimeError(_brief_error((stderr or stdout).strip() or "codex CLI failed"))
     return output or stdout
+
+
+def _run_codex_process(
+    command: list[str],
+    prompt: bytes,
+    process_env: dict[str, str],
+    *,
+    activity_timeout: int,
+    absolute_timeout: int,
+    heartbeat_seconds: int,
+    progress: Any = None,
+    attempt: int = 1,
+    max_attempts: int = 1,
+    jira_key: str = "",
+) -> subprocess.CompletedProcess[bytes]:
+    """Run Codex with an activity watchdog and a separate absolute ceiling."""
+    creationflags = 0
+    start_new_session = os.name != "nt"
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+        env=process_env,
+        creationflags=creationflags,
+        start_new_session=start_new_session,
+    )
+    chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    activity = {"last": time.monotonic(), "events": 0}
+    activity_lock = threading.Lock()
+
+    def drain(pipe: Any, key: str) -> None:
+        try:
+            while True:
+                value = pipe.readline()
+                if not value:
+                    return
+                chunks[key].append(value)
+                with activity_lock:
+                    activity["last"] = time.monotonic()
+                    activity["events"] += 1
+        except (OSError, ValueError):
+            return
+        finally:
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
+
+    readers = [
+        threading.Thread(target=drain, args=(process.stdout, "stdout"), daemon=True),
+        threading.Thread(target=drain, args=(process.stderr, "stderr"), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    if process.stdin is not None:
+        try:
+            process.stdin.write(prompt)
+            process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+    started = time.monotonic()
+    next_heartbeat = started
+    _emit_llm_progress(
+        progress,
+        "llm-start",
+        f"Codex attempt {attempt}/{max_attempts} started with activity watchdog",
+        jira_key=jira_key,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        activity_timeout_seconds=activity_timeout,
+        absolute_timeout_seconds=absolute_timeout,
+    )
+    timeout_message = ""
+    while process.poll() is None:
+        now = time.monotonic()
+        with activity_lock:
+            idle_seconds = now - activity["last"]
+            event_count = int(activity["events"])
+        elapsed = now - started
+        if idle_seconds >= activity_timeout:
+            timeout_message = (
+                f"no Codex provider activity for {activity_timeout} seconds "
+                f"(elapsed {int(elapsed)} seconds)"
+            )
+            break
+        if elapsed >= absolute_timeout:
+            timeout_message = f"Codex absolute timeout after {absolute_timeout} seconds"
+            break
+        if now >= next_heartbeat:
+            _emit_llm_progress(
+                progress,
+                "llm-heartbeat",
+                (
+                    f"Codex attempt {attempt}/{max_attempts} still running · "
+                    f"elapsed {int(elapsed)}s · last activity {int(idle_seconds)}s ago"
+                ),
+                jira_key=jira_key,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                elapsed_seconds=int(elapsed),
+                idle_seconds=int(idle_seconds),
+                provider_event_count=event_count,
+            )
+            next_heartbeat = now + heartbeat_seconds
+        time.sleep(0.1)
+
+    if timeout_message:
+        _terminate_process_tree(process)
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        _emit_llm_progress(
+            progress,
+            "llm-timeout",
+            timeout_message,
+            jira_key=jira_key,
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+    for reader in readers:
+        reader.join(timeout=0.5)
+    stdout = b"".join(chunks["stdout"])
+    stderr = b"".join(chunks["stderr"])
+    if timeout_message:
+        detail = _brief_error(_decode_subprocess_output(stderr or stdout))
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"{timeout_message}{suffix}")
+    return subprocess.CompletedProcess(command, int(process.returncode or 0), stdout, stderr)
+
+
+def _emit_llm_progress(progress: Any, event: str, message: str, **data: Any) -> None:
+    if not callable(progress):
+        return
+    try:
+        progress({"event": event, "message": message, **data})
+    except Exception:
+        pass
 
 
 def _decode_subprocess_output(value: object) -> str:
@@ -1043,6 +1219,47 @@ def _trim_section_content(content: str, target_chars: int, section_name: str) ->
     head_len = max(1, int(budget * 0.75))
     tail_len = max(0, budget - head_len)
     return content[:head_len] + marker + (content[-tail_len:] if tail_len else "")
+
+
+def _compact_prompt_for_retry(prompt: str, target_chars: int) -> str:
+    """Create a bounded second-attempt prompt while retaining review instructions and diff evidence."""
+    target = max(20000, int(target_chars or 42000))
+    if len(prompt) <= target:
+        return prompt
+    sections = [
+        ("historical_requirement_context", "Historical Requirement Context (background only; never treat previous-cycle diffs as current changes):\n", "\n\nLocal Jira/PRD issue context:", 1200),
+        ("review_template_context", "Review report template/style guide:\n", "\n\nCurrent Review Scope incremental diff", 1000),
+        ("project_context", "Target-branch related project context:\n", "\n\nHistorical Requirement Context", 2500),
+        ("jira_prd_context", "Local Jira/PRD issue context:\n", "\n\nGIT_VERSION MR context:", 2500),
+        ("git_version_context", "GIT_VERSION MR context:\n", "\n\nFramework review context:", 1500),
+        ("framework_context", "Framework review context:\n", "\n\nReview report template/style guide:", 1500),
+        ("current_review_scope", "Current Review Scope (the only actionable review target):\n", "\n\nCurrent revision MRs:", 1800),
+        ("related_mrs_context", "Current revision MRs:\n", "\n\nCross-MR implementation contracts:", 2000),
+        ("cross_mr_contract_context", "Cross-MR implementation contracts:\n", "\n\nCurrent revision changed files:", 1200),
+        ("diff", "Current Review Scope incremental diff (base SHA to current head SHA only):\n```diff\n", "\n```", 16000),
+    ]
+    current = prompt
+    for name, start_marker, end_marker, minimum in sections:
+        if len(current) <= target:
+            break
+        content = _section_content(current, start_marker, end_marker)
+        if content is None:
+            continue
+        desired = max(minimum, len(content) - (len(current) - target))
+        if desired < len(content):
+            current = _replace_section_content(
+                current,
+                start_marker,
+                end_marker,
+                _trim_section_content(content, desired, f"retry-{name}"),
+            )
+    if len(current) <= target:
+        return current
+    marker = "\n[Retry prompt compacted after the previous provider attempt failed]\n"
+    budget = max(1, target - len(marker))
+    head = max(1, int(budget * 0.6))
+    tail = max(0, budget - head)
+    return current[:head] + marker + (current[-tail:] if tail else "")
 
 
 def _related_mrs_context(review_input: ReviewInput) -> str:

@@ -15,7 +15,7 @@ try:
 except ImportError:
     yaml = None
 
-from .analyzer import analyze
+from .analyzer import _jira_involved_file_findings, analyze
 from .association import association_to_metadata, parse_issue_association
 from .config import (
     app_config_bool,
@@ -44,7 +44,7 @@ from .models import ChangedFile
 from .models import ReviewInput, ReviewResult
 from .project_context import attach_project_context
 from .resource_optimizer import is_optimizable_build_resource
-from .review_scope import review_scope_for_merge_request
+from .review_scope import ReviewScope, review_scope_for_merge_request
 from .repository_sync import codebase_memory_change_context, sync_workspace
 from .report import render_markdown, save_report, save_reports
 from .resume import ResumeTracker, stable_resume_key
@@ -795,6 +795,116 @@ def _deferred_resource_in_review_scope(item: dict[str, Any], scope: object) -> b
     return resource_scope.release_line == release_line
 
 
+def _review_scope_file_paths(
+    inputs: list[ReviewInput], resources: list[dict[str, Any]]
+) -> list[str]:
+    paths = [changed.path for review_input in inputs for changed in review_input.changed_files if changed.path]
+    paths.extend(
+        str(path)
+        for resource in resources
+        for path in (resource.get("changed_file_paths") or [])
+        if str(path).strip()
+    )
+    return list(dict.fromkeys(path.replace("\\", "/") for path in paths))
+
+
+def _review_deferred_scope_for_issue(
+    *,
+    issue: JiraIssue,
+    scope: ReviewScope,
+    resources: list[dict[str, Any]],
+    other_scope_file_paths: list[str],
+    output_dir: Path,
+    report_owner: str,
+    sprint: str,
+    run_group_id: str,
+) -> dict[str, Any]:
+    related_mrs: list[dict[str, Any]] = []
+    for resource in resources:
+        related_mrs.append(
+            {
+                "mr_url": resource.get("mr_url", ""),
+                "mr_id": resource.get("mr_id") or resource.get("iid", ""),
+                "state": resource.get("state") or resource.get("status", ""),
+                "project": resource.get("project") or resource.get("project_path", ""),
+                "project_path": resource.get("project_path") or resource.get("project", ""),
+                "source_branch": resource.get("source_branch", ""),
+                "target_branch": resource.get("target_branch", ""),
+                "commit": resource.get("head_sha") or resource.get("commit", ""),
+                "head_sha": resource.get("head_sha") or resource.get("commit", ""),
+                "base_sha": resource.get("base_sha", ""),
+                "file_count": len(resource.get("changed_file_paths") or []),
+                "application": scope.application,
+                "release_line": scope.release_line,
+                "release_gate_role": resource.get("release_gate_role", ""),
+                "responsible": resource.get("responsible", ""),
+            }
+        )
+    paths = _review_scope_file_paths([], resources)
+    review_input = ReviewInput(
+        project="jira-issue",
+        mr_id=f"deferred-{scope.filename_component}",
+        jira_key=issue.key,
+        sprint=sprint or issue.sprint,
+        source_branch="deferred-release-resources",
+        target_branch=scope.release_line,
+        commit="deferred",
+        title=issue.summary,
+        changed_files=[ChangedFile(path=path) for path in paths],
+        metadata={
+            "review_input_mode": "jira-deferred-release-scope",
+            "network_stage": "jira-issue-deferred-release-scope",
+            "mr_type": "DEFERRED_RELEASE_RESOURCES",
+            "related_merge_requests": related_mrs,
+            "deferred_release_gate_resources": resources,
+            "deferred_scope_report": True,
+            "other_review_scope_file_paths": other_scope_file_paths,
+            "jira_summary": issue.summary,
+            "jira_description": issue.final_description,
+            "jira_status": issue.status,
+            "jira_issue_type": issue.issue_type,
+            "jira_components": issue.components,
+            "jira_responsibles": issue.responsibles,
+            "application": scope.application,
+            "applications": [scope.application],
+            "release_line": scope.release_line,
+            "release_lines": [scope.release_line],
+            "run_group_id": run_group_id,
+        },
+    )
+    _attach_review_scope_metadata(review_input, issue)
+    _apply_jira_scope_responsible(review_input, issue, resources)
+    findings = _jira_involved_file_findings(review_input)
+    result = ReviewResult(
+        review_input=review_input,
+        findings=findings,
+        conclusion="Blocking traceability mismatch." if findings else "Deferred to GIT_VERSION release gate.",
+        risk_summary=[
+            "Company Config/SCR resources are recorded as a separate application scope and remain subject to GIT_VERSION release-gate review."
+        ],
+        test_suggestions=["Verify the final GIT_VERSION lock includes these deferred resource commits before release."],
+    )
+    saved_reports = _save_review_reports(result, output_dir, report_owner=report_owner)
+    reviewed_item = _reviewed_item_from_result(
+        issue,
+        result,
+        saved_reports,
+        "deferred-release-scope",
+        len(resources),
+    )
+    reviewed_item.update(
+        {
+            "code_mr_count": 0,
+            "deferred_resource_count": len(resources),
+            "deferred_release_gate_resources": resources,
+            "issue_review_status": "report-generated",
+            "code_review_status": "complete",
+            "release_gate_status": "pending",
+        }
+    )
+    return reviewed_item
+
+
 def _review_fetched_inputs_for_issue(
     *,
     issue: JiraIssue,
@@ -811,6 +921,7 @@ def _review_fetched_inputs_for_issue(
     deferred_release_gate_resources: list[dict[str, Any]] | None = None,
     _scope_partitioned: bool = False,
     _run_group_id: str = "",
+    _other_scope_file_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     run_group_seed = "|".join(
         [
@@ -822,7 +933,7 @@ def _review_fetched_inputs_for_issue(
     )
     run_group_id = _run_group_id or f"rg-{hashlib.sha256(run_group_seed.encode('utf-8')).hexdigest()[:20]}"
     if not _scope_partitioned:
-        scoped_inputs: dict[object, list[ReviewInput]] = {}
+        scoped_inputs: dict[ReviewScope, list[ReviewInput]] = {}
         for review_input in fetched_inputs:
             scope = review_scope_for_merge_request(
                 {
@@ -835,18 +946,54 @@ def _review_fetched_inputs_for_issue(
                 }
             )
             scoped_inputs.setdefault(scope, []).append(review_input)
-        if len(scoped_inputs) > 1:
+        scoped_deferred: dict[ReviewScope, list[dict[str, Any]]] = {}
+        for item in deferred_release_gate_resources or []:
+            if not isinstance(item, dict):
+                continue
+            scoped_deferred.setdefault(review_scope_for_merge_request(item), []).append(item)
+        all_scopes = list(dict.fromkeys([*scoped_inputs, *scoped_deferred]))
+        if not scoped_inputs and all_scopes:
+            scope = all_scopes[0]
+            _progress(
+                progress,
+                "scope-reviewing",
+                f"Generating deferred release-scope report for {issue.key}: {scope.filename_component}",
+                index=index,
+                total=total,
+                jira_key=issue.key,
+                application=scope.application,
+                release_line=scope.release_line,
+                mr_count=0,
+                deferred_resource_count=len(scoped_deferred.get(scope, [])),
+            )
+            return _review_deferred_scope_for_issue(
+                issue=issue,
+                scope=scope,
+                resources=scoped_deferred.get(scope, []),
+                other_scope_file_paths=[],
+                output_dir=output_dir,
+                report_owner=report_owner,
+                sprint=sprint,
+                run_group_id=run_group_id,
+            )
+        if len(all_scopes) > 1:
             all_reports: list[dict[str, Any]] = []
             aggregate_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Warning": 0}
             aggregate_findings = 0
             aggregate_mrs: list[dict[str, Any]] = []
             gitnexus_report = ""
-            for scope, scope_inputs in scoped_inputs.items():
-                scoped_deferred_resources = [
-                    item
-                    for item in (deferred_release_gate_resources or [])
-                    if isinstance(item, dict)
-                    and _deferred_resource_in_review_scope(item, scope)
+            scope_paths = {
+                scope: _review_scope_file_paths(scoped_inputs.get(scope, []), scoped_deferred.get(scope, []))
+                for scope in all_scopes
+            }
+            for scope in all_scopes:
+                scope_inputs = scoped_inputs.get(scope, [])
+                scoped_deferred_resources = scoped_deferred.get(scope, [])
+                other_scope_paths = [
+                    path
+                    for other_scope, paths in scope_paths.items()
+                    if other_scope != scope
+                    for path in paths
                 ]
                 _progress(
                     progress,
@@ -859,22 +1006,35 @@ def _review_fetched_inputs_for_issue(
                     release_line=scope.release_line,
                     mr_count=len(scope_inputs),
                 )
-                scoped_result = _review_fetched_inputs_for_issue(
-                    issue=issue,
-                    fetched_inputs=scope_inputs,
-                    discovered_items=discovered_items,
-                    configured_project_paths=configured_project_paths,
-                    output_dir=output_dir,
-                    progress=progress,
-                    context_repo=context_repo,
-                    sprint=sprint,
-                    index=index,
-                    total=total,
-                    report_owner=report_owner,
-                    deferred_release_gate_resources=scoped_deferred_resources,
-                    _scope_partitioned=True,
-                    _run_group_id=run_group_id,
-                )
+                if scope_inputs:
+                    scoped_result = _review_fetched_inputs_for_issue(
+                        issue=issue,
+                        fetched_inputs=scope_inputs,
+                        discovered_items=discovered_items,
+                        configured_project_paths=configured_project_paths,
+                        output_dir=output_dir,
+                        progress=progress,
+                        context_repo=context_repo,
+                        sprint=sprint,
+                        index=index,
+                        total=total,
+                        report_owner=report_owner,
+                        deferred_release_gate_resources=scoped_deferred_resources,
+                        _scope_partitioned=True,
+                        _run_group_id=run_group_id,
+                        _other_scope_file_paths=other_scope_paths,
+                    )
+                else:
+                    scoped_result = _review_deferred_scope_for_issue(
+                        issue=issue,
+                        scope=scope,
+                        resources=scoped_deferred_resources,
+                        other_scope_file_paths=other_scope_paths,
+                        output_dir=output_dir,
+                        report_owner=report_owner,
+                        sprint=sprint,
+                        run_group_id=run_group_id,
+                    )
                 all_reports.extend(scoped_result.get("reports") or [])
                 for severity, count in (scoped_result.get("severity_counts") or {}).items():
                     aggregate_counts[severity] = aggregate_counts.get(severity, 0) + int(count or 0)
@@ -894,7 +1054,7 @@ def _review_fetched_inputs_for_issue(
                 "severity_counts": aggregate_counts,
                 "finding_count": aggregate_findings,
                 "mr_count": len(fetched_inputs),
-                "scope_count": len(scoped_inputs),
+                "scope_count": len(all_scopes),
                 "mrs": aggregate_mrs,
             }
     combined_input = _combine_jira_issue_review_inputs(
@@ -906,10 +1066,13 @@ def _review_fetched_inputs_for_issue(
     )
     if deferred_release_gate_resources:
         combined_input.metadata["deferred_release_gate_resources"] = deferred_release_gate_resources
+    if _other_scope_file_paths:
+        combined_input.metadata["other_review_scope_file_paths"] = _other_scope_file_paths
     if report_owner:
         combined_input.metadata["web_report_owner"] = report_owner
     combined_input.sprint = sprint or combined_input.sprint
     _attach_review_scope_metadata(combined_input, issue)
+    _apply_jira_scope_responsible(combined_input, issue, deferred_release_gate_resources or [])
     if context_repo:
         _attach_project_context(combined_input, context_repo)
     _ensure_detailed_jira_review_runtime()
@@ -969,10 +1132,13 @@ def _review_fetched_inputs_for_issue(
         )
         if deferred_release_gate_resources:
             chunk_input.metadata["deferred_release_gate_resources"] = deferred_release_gate_resources
+        if _other_scope_file_paths:
+            chunk_input.metadata["other_review_scope_file_paths"] = _other_scope_file_paths
         if report_owner:
             chunk_input.metadata["web_report_owner"] = report_owner
         chunk_input.sprint = sprint or chunk_input.sprint
         _attach_review_scope_metadata(chunk_input, issue)
+        _apply_jira_scope_responsible(chunk_input, issue, deferred_release_gate_resources or [])
         chunk_input.mr_id = f"multi-mr-{len(chunk_inputs)}-chunk-{chunk_index}"
         chunk_input.metadata["chunked_review"] = True
         chunk_input.metadata["chunk_index"] = chunk_index
@@ -1378,6 +1544,8 @@ def _attach_jira_issue_metadata(review_input: ReviewInput) -> None:
             'jira_description': issue.final_description,
             "jira_status": issue.status,
             "jira_issue_type": issue.issue_type,
+            "jira_components": issue.components,
+            "jira_responsibles": issue.responsibles,
             "jira_sprint_memberships": [item.to_dict() for item in issue.sprint_memberships],
             "jira_current_sprint_id": issue.current_sprint_id,
             "jira_current_sprint_state": issue.current_sprint_state,
@@ -1735,6 +1903,11 @@ def _review_issue_collection_merge_requests(
     project_paths = _sprint_branch_project_paths(gitlab)
     issues_by_key = {issue.key.upper(): issue for issue in issues}
     grouped_items = _group_discovered_mrs_by_jira(discovered["mrs"])
+    for item in excluded_branch_type_mrs:
+        issue_key = str(item.get("jira_key") or "").upper()
+        release_role = _normalize_branch_type(str(item.get("release_gate_role") or ""))
+        if issue_key in issues_by_key and release_role in {"company_config", "scr"}:
+            grouped_items.setdefault(issue_key, [])
     _print_batch_start(batch_title, len(grouped_items), target_output_dir, tracker)
     _progress(progress, "batch-start", f"Preparing consolidated review for {len(grouped_items)} Jira issue(s)", total=len(grouped_items), output_dir=str(target_output_dir), resume_state=_resume_path(tracker))
     for issue_index, (issue_key, issue_items) in enumerate(grouped_items.items(), 1):
@@ -1831,7 +2004,67 @@ def _review_issue_collection_merge_requests(
                 jira_key=issue.key,
                 excluded_revisions=cycle_exclusions,
             )
+        deferred_resources = _hydrate_deferred_release_gate_resources(
+            [
+                item
+                for item in excluded_branch_type_mrs
+                if str(item.get("jira_key") or "").upper() == issue.key.upper()
+                and _normalize_branch_type(str(item.get("release_gate_role") or ""))
+                in {"company_config", "scr"}
+            ],
+            issue.key,
+            sprint,
+        )
         if not fetched_inputs:
+            if deferred_resources:
+                try:
+                    reviewed_item = _review_fetched_inputs_for_issue(
+                        issue=issue,
+                        fetched_inputs=[],
+                        discovered_items=issue_items,
+                        configured_project_paths=project_paths,
+                        output_dir=target_output_dir,
+                        progress=progress,
+                        context_repo=context_repo,
+                        sprint=sprint,
+                        index=issue_index,
+                        total=len(grouped_items),
+                        report_owner=report_owner,
+                        deferred_release_gate_resources=deferred_resources,
+                    )
+                    reviewed.append(reviewed_item)
+                    tracker.mark_done(resume_key, reviewed_item)
+                    _print_done(
+                        issue_index,
+                        len(grouped_items),
+                        f"{issue.key} ({len(deferred_resources)} deferred resource(s))",
+                        reviewed_item,
+                    )
+                    _progress(
+                        progress,
+                        "done",
+                        f"DONE {issue.key} ({len(deferred_resources)} deferred release resource(s))",
+                        index=issue_index,
+                        total=len(grouped_items),
+                        jira_key=issue.key,
+                        report=reviewed_item.get("report", ""),
+                        reports=reviewed_item.get("reports", []),
+                        deferred_resource_count=len(deferred_resources),
+                    )
+                except Exception as exc:
+                    errors.append({"jira_key": issue.key, "stage": "deferred-scope-report", "error": str(exc)})
+                    tracker.mark_failed(resume_key, str(exc), resume_item)
+                    _print_failed(issue_index, len(grouped_items), issue.key, str(exc))
+                    _progress(
+                        progress,
+                        "failed",
+                        f"FAILED {issue.key} deferred report: {exc}",
+                        index=issue_index,
+                        total=len(grouped_items),
+                        jira_key=issue.key,
+                        error=str(exc),
+                    )
+                continue
             if issue_excluded_count:
                 cycle_only = bool(cycle_exclusions) and len(cycle_exclusions) == issue_excluded_count
                 excluded_item = {
@@ -1869,15 +2102,7 @@ def _review_issue_collection_merge_requests(
                 index=issue_index,
                 total=len(grouped_items),
                 report_owner=report_owner,
-                deferred_release_gate_resources=_hydrate_deferred_release_gate_resources(
-                    [
-                        item for item in excluded_branch_type_mrs
-                        if str(item.get("jira_key") or "").upper() == issue.key.upper()
-                        and str(item.get("release_gate_role") or "").strip()
-                    ],
-                    issue.key,
-                    sprint,
-                ),
+                deferred_release_gate_resources=deferred_resources,
             )
             reviewed.append(reviewed_item)
             if len(fetched_inputs) + issue_excluded_count == len(issue_items):
@@ -1985,6 +2210,77 @@ def _responsible_people_from_related_mrs(items: list[dict[str, Any]]) -> list[st
             if key and key not in by_key:
                 by_key[key] = person
     return [by_key[key] for key in sorted(by_key)]
+
+
+JIRA_REVIEWER_RESPONSIBLE_USERNAMES = {
+    "Luck Chen": "luckxh.chen",
+    "Tran Trung Hieu": "hieut.tran",
+    "Wen Yi": "wen.yi",
+    "Kevin Tan": "kevin.tan",
+    "Sunny Cheng": "sunny.cheng",
+    "Victor Xu": "victorcz.xu",
+}
+
+
+def _apply_jira_scope_responsible(
+    review_input: ReviewInput,
+    issue: JiraIssue,
+    deferred_resources: list[dict[str, Any]],
+) -> None:
+    display_name = _jira_scope_responsible_display(
+        str(review_input.metadata.get("application") or ""),
+        issue.components,
+        deferred_resources,
+    )
+    username = JIRA_REVIEWER_RESPONSIBLE_USERNAMES.get(display_name, "")
+    review_input.metadata["jira_components"] = issue.components
+    review_input.metadata["jira_responsibles"] = issue.responsibles
+    if not username:
+        return
+    previous = str(review_input.metadata.get("responsible") or "").strip()
+    if previous and not review_input.metadata.get("git_tools_responsible"):
+        review_input.metadata["git_tools_responsible"] = previous
+    review_input.metadata.update(
+        {
+            "scope_responsible_display": display_name,
+            "scope_responsible": username,
+            "responsible": username,
+            "responsible_people": [username],
+            "responsible_scope": [username],
+        }
+    )
+
+
+def _jira_scope_responsible_display(
+    application: str,
+    components: list[str],
+    deferred_resources: list[dict[str, Any]],
+) -> str:
+    component_keys = {
+        re.sub(r"[^a-z0-9]+", " ", component.casefold()).strip()
+        for component in components
+    }
+    is_aop_or_lca = bool(component_keys & {"account opening system", "lowcode application"})
+    roles = {
+        _normalize_branch_type(str(item.get("release_gate_role") or ""))
+        for item in deferred_resources
+    }
+    if application in {"MO Client Config", "DPS Config"}:
+        return "Luck Chen"
+    if "company_config" in roles:
+        if application == "iTrade Client" and "mo client config" in component_keys:
+            return "Luck Chen"
+        if application == "DPS" and component_keys & {"dps config", "mo client config"}:
+            return "Luck Chen"
+    if application == "iTrade Client":
+        return "Wen Yi"
+    if application in {"WVAdmin", "Services Terminal"}:
+        return "Victor Xu" if application == "WVAdmin" and is_aop_or_lca else "Tran Trung Hieu"
+    if application == "DPS":
+        if is_aop_or_lca:
+            return "Sunny Cheng"
+        return "Kevin Tan"
+    return ""
 
 
 def review_fingerprint_from_merge_requests(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2572,6 +2868,63 @@ def review_jira_issue_merge_requests(
                 excluded_revisions=excluded_cycle_revision_mrs,
             )
 
+    deferred_resources = _hydrate_deferred_release_gate_resources(
+        [
+            item
+            for item in excluded_branch_type_mrs
+            if str(item.get("jira_key") or "").upper() == issue.key.upper()
+            and _normalize_branch_type(str(item.get("release_gate_role") or ""))
+            in {"company_config", "scr"}
+        ],
+        issue.key,
+        issue.sprint,
+    )
+
+    if not reviewed and not fetched_inputs and deferred_resources:
+        try:
+            reviewed_item = _review_fetched_inputs_for_issue(
+                issue=issue,
+                fetched_inputs=[],
+                discovered_items=discovered["mrs"],
+                configured_project_paths=project_paths,
+                output_dir=target_output_dir,
+                progress=progress,
+                context_repo=context_repo,
+                sprint=issue.sprint,
+                index=1,
+                total=1,
+                report_owner=report_owner,
+                deferred_release_gate_resources=deferred_resources,
+            )
+            reviewed.append(reviewed_item)
+            tracker.mark_done(resume_key, reviewed_item)
+            _print_done(
+                1,
+                1,
+                f"{issue.key} ({len(deferred_resources)} deferred resource(s))",
+                reviewed_item,
+            )
+            _progress(
+                progress,
+                "done",
+                f"DONE {issue.key} ({len(deferred_resources)} deferred release resource(s))",
+                jira_key=issue.key,
+                report=reviewed_item.get("report", ""),
+                reports=reviewed_item.get("reports", []),
+                deferred_resource_count=len(deferred_resources),
+            )
+        except Exception as exc:
+            errors.append({"jira_key": issue.key, "stage": "deferred-scope-report", "error": str(exc)})
+            tracker.mark_failed(resume_key, str(exc), resume_item)
+            _print_failed(1, 1, issue.key, str(exc))
+            _progress(
+                progress,
+                "failed",
+                f"FAILED {issue.key} deferred report: {exc}",
+                jira_key=issue.key,
+                error=str(exc),
+            )
+
     if not reviewed and not fetched_inputs and discovered["mrs"]:
         if issue_excluded_count:
             cycle_only = bool(excluded_cycle_revision_mrs) and len(excluded_cycle_revision_mrs) == issue_excluded_count
@@ -2608,15 +2961,7 @@ def review_jira_issue_merge_requests(
                 index=1,
                 total=1,
                 report_owner=report_owner,
-                deferred_release_gate_resources=_hydrate_deferred_release_gate_resources(
-                    [
-                        item for item in excluded_branch_type_mrs
-                        if str(item.get("jira_key") or "").upper() == issue.key.upper()
-                        and str(item.get("release_gate_role") or "").strip()
-                    ],
-                    issue.key,
-                    issue.sprint,
-                ),
+                deferred_release_gate_resources=deferred_resources,
             )
             reviewed.append(reviewed_item)
             if len(fetched_inputs) + issue_excluded_count == len(discovered["mrs"]):
@@ -2644,34 +2989,6 @@ def review_jira_issue_merge_requests(
             tracker.mark_failed(resume_key, str(exc), resume_item)
             _print_failed(1, 1, issue.key, str(exc))
             _progress(progress, "failed", f"FAILED {issue.key}: {exc}", jira_key=issue.key, error=str(exc))
-
-    if not reviewed:
-        deferred = [
-            item
-            for item in excluded_branch_type_mrs
-            if str(item.get("jira_key") or "").upper() == issue.key.upper()
-            and _normalize_branch_type(str(item.get("release_gate_role") or "")) in {"company_config", "scr"}
-        ]
-        if deferred:
-            hydrated = _hydrate_deferred_release_gate_resources(deferred, issue.key, issue.sprint)
-            reviewed.append(
-                {
-                    "jira_key": issue.key,
-                    "jira_summary": issue.summary,
-                    "jira_status": issue.status,
-                    "review_mode": "deferred-only",
-                    "code_mr_count": 0,
-                    "mr_count": 0,
-                    "deferred_resource_count": len(hydrated),
-                    "deferred_release_gate_resources": hydrated,
-                    "issue_review_status": "no-code-changes-to-review",
-                    "code_review_status": "complete",
-                    "release_gate_status": "pending",
-                    "conclusion": "No code changes to review; deferred resources await GIT_VERSION Release Gate.",
-                    "severity_counts": {},
-                    "finding_count": 0,
-                }
-            )
 
     return {
         "jira_key": issue.key,
@@ -2858,6 +3175,8 @@ def _combine_jira_issue_review_inputs(
         'jira_description': issue.final_description,
         "jira_status": issue.status,
         "jira_issue_type": issue.issue_type,
+        "jira_components": issue.components,
+        "jira_responsibles": issue.responsibles,
         "multi_mr_file_links": file_links,
         "configured_gitlab_project_count": len(configured_project_paths),
         "configured_gitlab_projects": configured_project_paths,
@@ -2884,6 +3203,8 @@ def _combine_jira_issue_review_inputs(
     metadata["review_stable_fingerprint_items"] = fingerprint["stable_items"]
     responsible_people = _responsible_people_from_related_mrs(related_mrs)
     if responsible_people:
+        metadata["git_tools_responsible_people"] = responsible_people
+        metadata["git_tools_responsible"] = "+".join(responsible_people)
         metadata["responsible_people"] = responsible_people
         metadata["responsible"] = "+".join(responsible_people)
         metadata["responsible_scope"] = responsible_people

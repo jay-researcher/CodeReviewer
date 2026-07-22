@@ -545,7 +545,12 @@ def llm_config() -> dict[str, str | int]:
         "use_cc_switch": app_config_str("llm.use_cc_switch", "LLM_USE_CC_SWITCH", ""),
         "timeout_seconds": app_config_int("llm.timeout_seconds", "LLM_TIMEOUT_SECONDS", 180),
         "max_retries": app_config_int("llm.max_retries", "LLM_MAX_RETRIES", 3),
-        "dps_codex_max_retries": app_config_int("llm.dps_codex_max_retries", "DPS_CODEX_MAX_RETRIES", 1),
+        "dps_codex_max_retries": app_config_int("llm.dps_codex_max_retries", "DPS_CODEX_MAX_RETRIES", 2),
+        "dps_codex_retry_prompt_chars": app_config_int(
+            "llm.dps_codex_retry_prompt_chars",
+            "DPS_CODEX_RETRY_PROMPT_CHARS",
+            42000,
+        ),
     }
 
 
