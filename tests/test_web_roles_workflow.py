@@ -3,13 +3,16 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from code_reviewer.web_app import (
     _can_access_report,
     _application_review_progress,
     _aggregate_coverage_report_status,
     _coverage_report_summary,
+    _coverage_scope_summary,
+    _jira_key_from_report_name,
+    _jira_keys_from_text,
     _review_application_from_discovery,
     build_review_coverage,
     _manual_pass_readiness,
@@ -149,6 +152,73 @@ class WebRolesWorkflowTests(unittest.TestCase):
         self.assertEqual(summary["generated_breakdown"], {"handling": 1, "ready": 1, "passed": 1})
         self.assertEqual(summary["generating"], 1)
         self.assertEqual(summary["failed"], 2)
+
+    def test_report_filename_jira_key_allows_generated_underscore_suffix(self) -> None:
+        name = "wen.yi/ECHNL-5747_iTrade-Client-7.5.1_has-issue-critical.md"
+        self.assertEqual(_jira_key_from_report_name(name), "ECHNL-5747")
+        self.assertEqual(_jira_keys_from_text(name), ["ECHNL-5747", "CLIENT-7"])
+
+    def test_scope_coverage_distinguishes_required_scopes_from_report_history(self) -> None:
+        summary = _coverage_scope_summary(
+            [{"report_count": 3}],
+            [
+                {"application": "iTrade Client", "release_line": "7.5.0", "issue_count": 1, "issues_with_reports": 1},
+                {"application": "iTrade Client", "release_line": "7.5.1", "issue_count": 1, "issues_with_reports": 1},
+            ],
+        )
+        self.assertEqual(summary["application_scope_count"], 2)
+        self.assertEqual(summary["application_scopes_with_reports"], 2)
+        self.assertEqual(summary["application_scopes_without_reports"], 0)
+        self.assertEqual(summary["generated_report_files"], 3)
+
+    def test_coverage_matches_generated_underscore_report_name_to_issue(self) -> None:
+        discovered = {
+            "jira_key": "ECHNL-5747",
+            "jira_summary": "Korean market restoration",
+            "jira_status": "Development Done",
+            "items": [
+                {
+                    "jira_key": "ECHNL-5747",
+                    "jira_summary": "Korean market restoration",
+                    "jira_status": "Development Done",
+                    "responsible": "wen.yi",
+                    "git_tools_group": "itrade-client",
+                    "git_tools_module": "itrade-client",
+                    "gitlab_project": "itrade-sv/client/web",
+                }
+            ],
+            "issues_without_mrs": [],
+            "errors": [],
+        }
+        report = {
+            "name": "ECHNL-5747_iTrade-Client-7.5.1_has-issue-critical.md",
+            "relative_path": "wen.yi/ECHNL-5747_iTrade-Client-7.5.1_has-issue-critical.md",
+            "output_dir": "/reports/e-channel-sprint20260724",
+        }
+        report_state = {
+            "status": "pending",
+            "finding_count": 1,
+            "handled_count": 0,
+            "blocking_pending": 1,
+            "application": "iTrade Client",
+            "release_line": "7.5.1",
+        }
+        store = Mock()
+        store.list_issues.return_value = []
+        with (
+            patch("code_reviewer.web_app._web_user_permissions", return_value={"scan_coverage": True}),
+            patch("code_reviewer.web_app._web_user_role", return_value="manager"),
+            patch("code_reviewer.web_app.review_jira_issue_merge_requests", return_value=discovered),
+            patch("code_reviewer.web_app.list_reports", return_value=[report]),
+            patch("code_reviewer.web_app._coverage_report_state", return_value=report_state),
+            patch("code_reviewer.web_app.list_review_job_snapshots", return_value=[]),
+            patch("code_reviewer.web_app.workflow_store", return_value=store),
+        ):
+            coverage = build_review_coverage("admin", jira_keys="ECHNL-5747")
+
+        self.assertEqual(coverage["report_coverage"]["issues_with_reports"], 1)
+        self.assertEqual(coverage["report_coverage"]["application_scopes_with_reports"], 1)
+        self.assertEqual(coverage["issues"][0]["latest_report"], report["relative_path"])
 
     def test_review_application_mapping_uses_configured_project_group_and_module(self) -> None:
         self.assertEqual(

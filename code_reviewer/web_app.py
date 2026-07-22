@@ -2383,8 +2383,11 @@ def build_review_coverage(
     for row in rows:
         status = str(row.get("workflow_status") or "")
         counts[status] = counts.get(status, 0) + 1
-    report_coverage = _coverage_report_summary(rows, counts)
     application_progress = _application_review_progress(rows)
+    report_coverage = {
+        **_coverage_report_summary(rows, counts),
+        **_coverage_scope_summary(rows, application_progress),
+    }
     return {
         "role": _web_user_role(user),
         "scope": {"jira": requested_keys, "sprint": sprint, "jira_filter": jira_filter},
@@ -2397,7 +2400,21 @@ def build_review_coverage(
 
 
 def _jira_keys_from_text(value: str) -> list[str]:
-    return list(dict.fromkeys(match.upper() for match in re.findall(r"\b[A-Z][A-Z0-9]+-\d+\b", (value or "").upper())))
+    # Report names use an underscore immediately after the Jira key, for
+    # example ECHNL-5747_iTrade-Client-7.5.1_has-issue-critical.md.  ``\b``
+    # does not match before an underscore because both digits and underscores
+    # are regex word characters.  Use explicit Jira-token boundaries so the
+    # leading ECHNL key is retained and a later release label such as CLIENT-7
+    # is not mistaken for the report's issue key.
+    return list(
+        dict.fromkeys(
+            match.upper()
+            for match in re.findall(
+                r"(?<![A-Z0-9])[A-Z][A-Z0-9]+-\d+(?![A-Z0-9])",
+                (value or "").upper(),
+            )
+        )
+    )
 
 
 def _jira_key_from_report_name(value: str) -> str:
@@ -2457,6 +2474,27 @@ def _coverage_report_summary(
         },
         "generating": counts.get("running", 0),
         "failed": counts.get("failed", 0),
+    }
+
+
+def _coverage_scope_summary(
+    rows: list[dict[str, object]],
+    application_progress: list[dict[str, object]],
+) -> dict[str, int]:
+    """Summarize required Application + Release Line report coverage.
+
+    A Jira issue can legitimately belong to more than one release scope.  The
+    unique-Issue summary remains useful, but release readiness must count each
+    required scope independently and must not confuse reruns with additional
+    required reports.
+    """
+    scope_count = sum(int(item.get("issue_count") or 0) for item in application_progress)
+    scopes_with_reports = sum(int(item.get("issues_with_reports") or 0) for item in application_progress)
+    return {
+        "application_scope_count": scope_count,
+        "application_scopes_with_reports": scopes_with_reports,
+        "application_scopes_without_reports": max(0, scope_count - scopes_with_reports),
+        "generated_report_files": sum(int(row.get("report_count") or 0) for row in rows),
     }
 
 
@@ -6152,7 +6190,7 @@ def render_index(user: str = "") -> str:
     }
     .coverage-summary {
       display: grid;
-      grid-template-columns: minmax(300px, .9fr) minmax(420px, 1.1fr);
+      grid-template-columns: repeat(3, minmax(280px, 1fr));
       gap: 10px;
       min-width: 0;
     }
@@ -6186,6 +6224,7 @@ def render_index(user: str = "") -> str:
       gap: 12px;
     }
     .coverage-report-totals,
+    .coverage-scope-totals,
     .coverage-report-lifecycle {
       min-width: 0;
       padding: 12px;
@@ -6194,11 +6233,20 @@ def render_index(user: str = "") -> str:
       background: var(--panel);
       box-shadow: 0 2px 9px rgba(15, 23, 42, .035);
     }
-    .coverage-report-totals {
+    .coverage-report-totals,
+    .coverage-scope-totals {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
     }
+    .coverage-totals-title {
+      grid-column: 1 / -1;
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+    .coverage-totals-title strong { font-size: 16px; line-height: 1.3; }
+    .coverage-totals-title span { color: var(--muted); font-size: 12px; line-height: 1.35; }
     .coverage-report-total {
       display: grid;
       gap: 4px;
@@ -6290,13 +6338,15 @@ def render_index(user: str = "") -> str:
     }
     .coverage-lifecycle-stat span { display: block; color: var(--muted); font-size: 13px; }
     .coverage-lifecycle-stat strong { display: block; margin-top: 3px; font-size: 20px; }
-    @media (max-width: 900px) {
+    @media (max-width: 1180px) {
       .coverage-summary { grid-template-columns: 1fr; }
     }
     @media (max-width: 520px) {
       .coverage-report-totals,
+      .coverage-scope-totals,
       .coverage-lifecycle-grid { grid-template-columns: 1fr; }
       .coverage-ratio-track { grid-column: 1; }
+      .coverage-totals-title { grid-column: 1; }
     }
     .coverage-applications {
       display: grid;
@@ -10063,19 +10113,35 @@ __ADMIN_TRACE_SECTION__
       const withoutPercent = reportTotal ? 100 - withPercent : 0;
       const breakdown = reportCoverage.generated_breakdown || {};
       const applicationProgress = Array.isArray(data.application_progress) ? data.application_progress : [];
+      const scopeTotal = Number(reportCoverage.application_scope_count ?? applicationProgress.reduce((total, item) => total + Number(item.issue_count || 0), 0));
+      const scopesWithReports = Number(reportCoverage.application_scopes_with_reports ?? applicationProgress.reduce((total, item) => total + Number(item.issues_with_reports || 0), 0));
+      const scopesWithoutReports = Number(reportCoverage.application_scopes_without_reports ?? Math.max(0, scopeTotal - scopesWithReports));
+      const scopeWithPercent = scopeTotal ? Math.round((scopesWithReports / scopeTotal) * 100) : 0;
+      const scopeWithoutPercent = scopeTotal ? 100 - scopeWithPercent : 0;
+      const generatedReportFiles = Number(reportCoverage.generated_report_files ?? rows.reduce((total, item) => total + Number(item.report_count || 0), 0));
       const missingIssueKeys = rows
-        .filter(item => item.workflow_status === 'missing' && item.jira_key)
+        .filter(item => item.jira_key && (
+          item.workflow_status === 'missing'
+          || (Array.isArray(item.scope_statuses) && item.scope_statuses.some(scope => !Boolean(scope.has_report)))
+        ))
         .map(item => String(item.jira_key).trim().toUpperCase())
         .filter(Boolean);
       $('coverageOverviewEmpty').hidden = true;
       $('coverageSummary').innerHTML = `
         <section class="coverage-report-totals" aria-label="Issue report coverage">
-          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues with reports</span></div><strong>${withReports}</strong><small>${withPercent}% of ${rows.length} Issue(s)</small></div>
-          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues without reports</span>${missingIssueKeys.length && currentPermissions.run_sprint_review ? `<button class="secondary coverage-run-missing" type="button" data-coverage-run-missing="${escapeHtml(missingIssueKeys.join(','))}">Run remaining</button>` : ''}</div><strong>${withoutReports}</strong><small>${withoutPercent}% of ${rows.length} Issue(s)</small></div>
+          <div class="coverage-totals-title"><strong>Unique Issue coverage</strong><span>Each Jira Issue is counted once, even when it spans multiple releases.</span></div>
+          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues with reports</span></div><strong>${withReports}</strong><small>${withPercent}% of ${rows.length} unique Issue(s)</small></div>
+          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues without reports</span></div><strong>${withoutReports}</strong><small>${withoutPercent}% of ${rows.length} unique Issue(s)</small></div>
           <div class="coverage-ratio-track" aria-hidden="true"><span class="coverage-ratio-with" style="width:${withPercent}%"></span><span class="coverage-ratio-without" style="width:${withoutPercent}%"></span></div>
         </section>
+        <section class="coverage-scope-totals" aria-label="Application release report coverage">
+          <div class="coverage-totals-title"><strong>Required release-scope reports</strong><span>One required report per Jira Issue × Application + Release Line; ${generatedReportFiles} historical report file(s) generated.</span></div>
+          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Scope reports present</span></div><strong>${scopesWithReports}</strong><small>${scopeWithPercent}% of ${scopeTotal} required scope(s)</small></div>
+          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Scope reports missing</span>${missingIssueKeys.length && currentPermissions.run_sprint_review ? `<button class="secondary coverage-run-missing" type="button" data-coverage-run-missing="${escapeHtml(missingIssueKeys.join(','))}">Run remaining</button>` : ''}</div><strong>${scopesWithoutReports}</strong><small>${scopeWithoutPercent}% of ${scopeTotal} required scope(s)</small></div>
+          <div class="coverage-ratio-track" aria-hidden="true"><span class="coverage-ratio-with" style="width:${scopeWithPercent}%"></span><span class="coverage-ratio-without" style="width:${scopeWithoutPercent}%"></span></div>
+        </section>
         <section class="coverage-report-lifecycle" aria-label="Generated report review lifecycle">
-          <div class="coverage-lifecycle-head"><div><strong>Generated report lifecycle</strong><span>Issue counts by latest Review Cycle state</span></div><div class="coverage-operational"><span>Generating ${Number(reportCoverage.generating ?? counts.running ?? 0)}</span><span>Failed ${Number(reportCoverage.failed ?? counts.failed ?? 0)}</span></div></div>
+          <div class="coverage-lifecycle-head"><div><strong>Generated report lifecycle</strong><span>Unique Issue counts by latest Review Cycle state</span></div><div class="coverage-operational"><span>Generating ${Number(reportCoverage.generating ?? counts.running ?? 0)}</span><span>Failed ${Number(reportCoverage.failed ?? counts.failed ?? 0)}</span></div></div>
           <div class="coverage-lifecycle-grid">
             <div class="coverage-lifecycle-stat"><span>Handling</span><strong>${Number(breakdown.handling || 0)}</strong></div>
             <div class="coverage-lifecycle-stat"><span>Ready for Pass</span><strong>${Number(breakdown.ready || 0)}</strong></div>
@@ -10106,7 +10172,7 @@ __ADMIN_TRACE_SECTION__
                 </div>
                 <div class="coverage-application-track" aria-label="${escapeHtml(name)} release readiness ${percent}%"><span style="width:${percent}%"></span></div>
                 <div class="coverage-application-report-coverage">
-                  <span>Reports ${Number(application.issues_with_reports || 0)}/${Number(application.issue_count || 0)}</span>
+                  <span>Scope reports ${Number(application.issues_with_reports || 0)}/${Number(application.issue_count || 0)}</span>
                   <span>Without report ${Number(application.issues_without_reports || 0)}</span>
                 </div>
                 <div class="coverage-application-states" aria-label="Application Issue review states">
