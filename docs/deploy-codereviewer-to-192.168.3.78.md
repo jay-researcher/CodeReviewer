@@ -1,6 +1,6 @@
 # 部署 CodeReviewer 到 192.168.3.78
 
-更新日期：2026-07-21
+更新日期：2026-07-22
 
 本文记录本次真实部署结果。通用部署原则和完整生产建议参见 [CodeReviewer-RHEL9-Deployment-Guide.md](CodeReviewer-RHEL9-Deployment-Guide.md)。
 
@@ -9,17 +9,37 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `7.2.13` |
-| 部署制品 | `codereviewer-7.2.13-0779b3c.tgz`，SHA-256 `0d7f043d8dec58d4bb278729e989324d9382d378fc418a3d7277580c658cb075` |
+| CodeReviewer 版本 | `7.2.14` |
+| 部署制品 | `codereviewer-7.2.14-ee1c37e.tgz`，SHA-256 `b0399a647cf92a7fda545c101a7f3290243c3cb21b767fd76a6d24c54e8e3559` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `/api/version` 返回 `7.2.13`，`/api/health` 返回 `healthy` |
+| 健康检查 | `/api/version` 返回 `7.2.14`，`/api/health` 返回 `healthy` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 259 passed |
+| RHEL9 测试 | 262 passed |
+
+## 7.2.14 Sprint Overview 报告覆盖修复
+
+2026-07-22 将 Sprint Overview 报告 Key 解析和统计口径修复部署到生产，固定 GitHub `20260720` 分支提交 `ee1c37e8943408d21fe94179e9c6c960c2dfaa3a`。
+
+验收结果：
+
+- 下划线报告名 `ECHNL-5747_iTrade-Client-...md` 正确归属 `ECHNL-5747`，不再误识别为 `CLIENT-7`；
+- Overview 分别统计唯一 Jira Issue、必需的 `Issue × Application + Release Line` Scope 和历史报告文件；
+- Sprint 1.4.77 实时复算为 6/10 唯一 Issue、7/11 必需 Scope 已有报告、10 个历史报告文件；
+- iTrade Client 7.5.0 为 1/1、7.5.1 为 4/4，跨版本 Issue 分别计入两个 Scope；
+- 本地和 RHEL9 staging `262/262` 测试通过，外部及本机 `/api/version`、`/api/health` 通过；
+- 11 个生产账户凭据指纹、角色及启停状态一致；Workflow SQLite schema v3、`release_line` 列与历史行数完整。
+
+一致性备份与回滚：
+
+```text
+/var/backups/codereviewer/7.2.13-to-7.2.14-20260722-210106/system-backup.tgz
+/usr/local/sbin/codereviewer-rollback-20260722-210106
+```
 
 ## 7.2.13 验收反馈热更新
 
