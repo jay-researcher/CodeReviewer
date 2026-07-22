@@ -48,10 +48,9 @@ Trial Developer mapping:
 | Responsible | Developer accounts |
 | --- | --- |
 | `wen.yi` | `gerhard.guo`, `bryan.tan` |
-| `kevin.tan` | `vincentgr.wang` |
-| `kelvinh.wu` | `benyq.feng` |
+| `kevin.tan` | `vincentgr.wang`, `kelvinh.wu`, `benyq.feng` |
 
-`kelvinh.wu` and `luckxh.chen` are Auditors with self-owned responsible scopes.
+`kelvinh.wu` is a regular Developer in the `kevin.tan` responsible scope; `luckxh.chen` remains an Auditor with a self-owned responsible scope.
 
 ## Review Cycle and incremental boundary
 
@@ -175,7 +174,7 @@ SQLite is accessed through the workflow repository boundary. A future MongoDB or
 ## Local acceptance checklist
 
 1. Log in with each trial Developer and confirm Run Review is not visible.
-2. Confirm `gerhard.guo`/`bryan.tan` see only `wen.yi`, `vincentgr.wang` sees only `kevin.tan`, and `benyq.feng` sees only `kelvinh.wu`.
+2. Confirm `gerhard.guo`/`bryan.tan` see only `wen.yi`, while `vincentgr.wang`/`kelvinh.wu`/`benyq.feng` see only `kevin.tan`.
 3. Submit each handling type.
 4. Verify Developer Not an issue requires Leader approval.
 5. Verify fixed Critical/High cannot Pass before a clean Re-scan.

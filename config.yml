@@ -28,11 +28,11 @@ app:
         role: developer
         responsible: [kevin.tan]
       kelvinh.wu:
-        role: auditor
-        responsible: [kelvinh.wu]
+        role: developer
+        responsible: [kevin.tan]
       benyq.feng:
         role: developer
-        responsible: [kelvinh.wu]
+        responsible: [kevin.tan]
       luckxh.chen:
         role: auditor
         responsible: [luckxh.chen]

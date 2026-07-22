@@ -99,8 +99,8 @@ class WebRolesWorkflowTests(unittest.TestCase):
             "gerhard.guo": {"role": "developer", "responsible": ["wen.yi"]},
             "bryan.tan": {"role": "developer", "responsible": ["wen.yi"]},
             "vincentgr.wang": {"role": "developer", "responsible": ["kevin.tan"]},
-            "kelvinh.wu": {"role": "auditor", "responsible": ["kelvinh.wu"]},
-            "benyq.feng": {"role": "developer", "responsible": ["kelvinh.wu"]},
+            "kelvinh.wu": {"role": "developer", "responsible": ["kevin.tan"]},
+            "benyq.feng": {"role": "developer", "responsible": ["kevin.tan"]},
             "luckxh.chen": {"role": "auditor", "responsible": ["luckxh.chen"]},
         }
         with patch("code_reviewer.web_app._load_web_users", return_value={}), patch(
@@ -109,8 +109,8 @@ class WebRolesWorkflowTests(unittest.TestCase):
             self.assertEqual(_web_user_responsibles("gerhard.guo"), ["wen.yi"])
             self.assertEqual(_web_user_responsibles("bryan.tan"), ["wen.yi"])
             self.assertEqual(_web_user_responsibles("vincentgr.wang"), ["kevin.tan"])
-            self.assertEqual(_web_user_responsibles("kelvinh.wu"), ["kelvinh.wu"])
-            self.assertEqual(_web_user_responsibles("benyq.feng"), ["kelvinh.wu"])
+            self.assertEqual(_web_user_responsibles("kelvinh.wu"), ["kevin.tan"])
+            self.assertEqual(_web_user_responsibles("benyq.feng"), ["kevin.tan"])
             self.assertEqual(_web_user_responsibles("luckxh.chen"), ["luckxh.chen"])
 
     def test_high_finding_requires_clean_rescan_or_leader_not_issue_before_pass(self) -> None:

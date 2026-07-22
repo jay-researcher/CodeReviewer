@@ -224,10 +224,10 @@ class ReleaseProjectScopingTests(unittest.TestCase):
         self.assertEqual(by_path["web-sv-build/webfe/itrade-client"].responsible, "luckxh.chen")
 
         profiles = _configured_web_user_profiles()
-        self.assertEqual(profiles["kelvinh.wu"]["role"], "auditor")
-        self.assertEqual(profiles["kelvinh.wu"]["responsible"], ["kelvinh.wu"])
+        self.assertEqual(profiles["kelvinh.wu"]["role"], "developer")
+        self.assertEqual(profiles["kelvinh.wu"]["responsible"], ["kevin.tan"])
         self.assertEqual(profiles["benyq.feng"]["role"], "developer")
-        self.assertEqual(profiles["benyq.feng"]["responsible"], ["kelvinh.wu"])
+        self.assertEqual(profiles["benyq.feng"]["responsible"], ["kevin.tan"])
         self.assertEqual(profiles["luckxh.chen"]["role"], "auditor")
 
 

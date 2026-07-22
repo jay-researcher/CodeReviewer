@@ -6,6 +6,7 @@
 
 状态：已于 2026-07-22 部署到 `192.168.3.78:8765`，生产健康检查及数据完整性验证通过。
 
+- `kelvinh.wu` 已调整为普通 Developer，与 `benyq.feng` 一同使用 `kevin.tan` Responsible 范围。
 - 修复 Sprint Overview 将已有报告统计为 `without report` 的问题。
 - Overview 分别展示唯一 Issue 覆盖、应用/版本范围报告覆盖和历史生成文件数，跨版本 Issue 的发布准备度更清晰。
 - `Run remaining` 可发现仅部分应用或版本范围缺少报告的 Issue。
