@@ -1,6 +1,6 @@
 # 部署 CodeReviewer 到 192.168.3.78
 
-更新日期：2026-07-22
+更新日期：2026-07-23
 
 本文记录本次真实部署结果。通用部署原则和完整生产建议参见 [CodeReviewer-RHEL9-Deployment-Guide.md](CodeReviewer-RHEL9-Deployment-Guide.md)。
 
@@ -9,17 +9,37 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `7.2.14` |
-| 部署制品 | `codereviewer-7.2.14-ee1c37e.tgz`，SHA-256 `b0399a647cf92a7fda545c101a7f3290243c3cb21b767fd76a6d24c54e8e3559` |
+| CodeReviewer 版本 | `7.2.15` |
+| 部署制品 | `codereviewer-7.2.15-4a862db9bfc7.tgz`，SHA-256 `ae9f46c6b270e64bac32d7430fd4c073f72027876c6d1687cb473b555399ec61` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `/api/version` 返回 `7.2.14`，`/api/health` 返回 `healthy` |
+| 健康检查 | `/api/version` 返回 `7.2.15`，`/api/health` 返回 `healthy` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 262 passed |
+| RHEL9 测试 | 284 passed |
+
+## 7.2.15 Responsible、报告 Scope 与 Web 体验完善
+
+2026-07-23 将 7.2.15 部署到生产，固定 GitHub `20260720` 分支提交 `4a862db9bfc71fd7332d800ef50e78a1916bb479`。
+
+验收结果：
+
+- 本机和 RHEL9 staging 完整自动化测试均为 `284/284` 通过；
+- 外部及服务器本机 `/api/version=7.2.15`、`/api/health=healthy`，`codereviewer.service` 为 `active`；
+- Web Frontend Reviewer domain、Codex 300 秒真实活动超时、15 秒心跳、900 秒绝对上限，以及 DPS 两次审核和 42,000 字符重试策略均已合并到生产配置；生产端点、凭据、Linux 路径与其他运行策略保持不变；
+- 12 个生产账户的角色、凭据指纹与启停状态保持一致，`kelvinh.wu` 为普通 Developer；`web_users.json` 权限为 `0600`；
+- Workflow SQLite `integrity_check=ok`，schema 与历史计数在切换前后保持完整；
+- 发布归档 SHA-256、完整系统备份校验、一键回滚脚本语法及外部访问均验证通过。
+
+一致性备份与回滚：
+
+```text
+/var/backups/codereviewer/7.2.14-to-7.2.15-20260723-010925/system-backup.tgz
+/usr/local/sbin/codereviewer-rollback-20260723-010925
+```
 
 ## 7.2.14 Sprint Overview 报告覆盖修复
 
