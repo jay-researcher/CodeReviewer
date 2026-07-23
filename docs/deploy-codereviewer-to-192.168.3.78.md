@@ -9,17 +9,40 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `7.2.15` |
-| 部署制品 | `codereviewer-7.2.15-4a862db9bfc7.tgz`，SHA-256 `ae9f46c6b270e64bac32d7430fd4c073f72027876c6d1687cb473b555399ec61` |
+| CodeReviewer 版本 | `7.2.16` |
+| 部署制品 | `codereviewer-7.2.16-331fcb1ad023.tgz`，SHA-256 `3e71d7f9240a33df6773696785d4fd5de67cad0d5c5795a04666c9922d4f380f` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `/api/version` 返回 `7.2.15`，`/api/health` 返回 `healthy` |
+| 健康检查 | `/api/version` 返回 `7.2.16`，`/api/health` 返回 `healthy` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 284 passed |
+| RHEL9 测试 | 291 passed |
+
+## 7.2.16 Cycle 口径与 Sprint 工作流闭环
+
+2026-07-23 将 7.2.16 部署到生产，发布制品固定 `20260720` 分支提交 `331fcb1ad023dc29873dbbac4802ca00d8da3dfa`。
+
+验收结果：
+
+- RHEL9 隔离 staging 使用合并后的生产配置执行 `291/291` 测试通过，`requirements.txt` 未变化，生产虚拟环境未修改；
+- 外部及服务器本机 `/api/version=7.2.16`、`/api/health=healthy`，登录页返回 HTTP 200，`codereviewer.service` 已启用且为 `active`；
+- `review.discovery.require_strong_history_reference=true` 与 `COMPANY_GIT_VERSION` Release Gate 路由已进入生产配置；生产端点、凭据、Linux 路径及其他运行策略保持不变；
+- 12 个生产账户的角色、凭据指纹及启停状态保持一致；`web_users.json` 为 `0600 codereviewer:codereviewer`，EnvironmentFile 为 `0640 root:codereviewer`；
+- Workflow SQLite `integrity_check=ok`，schema v3；38 个 Issue、38 个 Legacy Cycle、59 个 Run、226 个 Finding 及其他历史表计数在切换前后保持完整；
+- 本次部署未自动执行 Sprint Scan 或生成报告。既有 Legacy Cycle 继续用于审计；用户扫描当前 Sprint 后才会建立 Live Cycle，并由 `Current cycles` 视图与 Legacy 历史分开统计；
+- 制品与完整系统备份 SHA-256、归档可读性、一键回滚脚本语法、未认证 Manager API 的 HTTP 401 保护及静态资源均验证通过。
+
+两次预切换检查曾在停服前安全终止：第一次发现生产配置合并白名单遗漏新增 review policy，第二次发现 YAML 重复 `review.discovery` 会覆盖强引用开关。两项均补齐回归后重新生成制品，生产 7.2.15 在此期间未中断。
+
+一致性备份与回滚：
+
+```text
+/var/backups/codereviewer/7.2.15-to-7.2.16-20260723-101219/system-backup.tgz
+/usr/local/sbin/codereviewer-rollback-20260723-101219
+```
 
 ## 7.2.15 Responsible、报告 Scope 与 Web 体验完善
 
