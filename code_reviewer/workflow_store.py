@@ -610,6 +610,17 @@ class WorkflowStore:
     def _json(value: Any, default: Any) -> str:
         return json.dumps(default if value is None else value, ensure_ascii=False, sort_keys=True)
 
+    @staticmethod
+    def _scope_signature(value: Any) -> tuple[str, ...]:
+        items = value if isinstance(value, list) else []
+        return tuple(
+            sorted(
+                json.dumps(item, ensure_ascii=False, sort_keys=True)
+                for item in items
+                if isinstance(item, dict)
+            )
+        )
+
     def upsert_sprint_membership(
         self,
         *,
@@ -707,8 +718,14 @@ class WorkflowStore:
                        ORDER BY cycle_number DESC LIMIT 1""",
                     (jira_key, sprint_id),
                 ).fetchone()
+            created_cycle = not bool(existing)
+            scope_changed = False
             if existing:
                 cycle_id = str(existing["cycle_id"])
+                if mr_scope is not None:
+                    scope_changed = self._scope_signature(mr_scope) != self._scope_signature(
+                        json.loads(str(existing["mr_scope_json"]) or "[]")
+                    )
                 db.execute(
                     """UPDATE review_cycles SET sprint_name=CASE WHEN ?<>'' THEN ? ELSE sprint_name END,
                        sprint_state=?, cycle_closed_at=COALESCE(?, cycle_closed_at), status_transition_json=?,
@@ -746,9 +763,18 @@ class WorkflowStore:
                         release_gate_status, int(backfilled), now, now,
                     ),
                 )
-            db.execute(
-                "UPDATE review_issues SET current_cycle_id=?, updated_at=? WHERE jira_key=?", (cycle_id, now, jira_key)
-            )
+            if sprint_id != "legacy" and (created_cycle or scope_changed):
+                issue_status = "no-review-required" if pass_status == "not-required" else "not-reviewed"
+                db.execute(
+                    """UPDATE review_issues SET current_cycle_id=?, status=?, latest_run_id=NULL,
+                       passed_run_id=NULL, updated_at=? WHERE jira_key=?""",
+                    (cycle_id, issue_status, now, jira_key),
+                )
+            else:
+                db.execute(
+                    "UPDATE review_issues SET current_cycle_id=?, updated_at=? WHERE jira_key=?",
+                    (cycle_id, now, jira_key),
+                )
             if sprint_id != "legacy":
                 membership = db.execute(
                     "SELECT id FROM sprint_memberships WHERE jira_key=? AND sprint_id=?", (jira_key, sprint_id)
@@ -889,8 +915,12 @@ class WorkflowStore:
                 {},
             )
             mr_scope = [scope for scope in (item.get("mr_scope") or []) if isinstance(scope, dict)]
-            same_scope = json.dumps(existing_cycle.get("mr_scope") or [], sort_keys=True) == json.dumps(
-                mr_scope, sort_keys=True
+            same_scope = self._scope_signature(existing_cycle.get("mr_scope")) == self._scope_signature(mr_scope)
+            cycle_pass_status = (
+                "not-required"
+                if not mr_scope
+                else str(existing_cycle.get("pass_status") or "pending") if same_scope
+                else "pending"
             )
             cycle = self.upsert_review_cycle(
                 jira_key=jira_key,
@@ -909,7 +939,7 @@ class WorkflowStore:
                     "scope_reconciled_at": now,
                 },
                 mr_scope=mr_scope,
-                pass_status=str(existing_cycle.get("pass_status") or "pending") if same_scope else "pending",
+                pass_status=cycle_pass_status,
                 release_gate_status=str(existing_cycle.get("release_gate_status") or "pending") if same_scope else "pending",
                 summary=str(item.get("summary") or ""),
             )
@@ -1737,12 +1767,12 @@ class WorkflowStore:
             issue = db.execute("SELECT * FROM review_issues WHERE jira_key=?", (jira_key.upper(),)).fetchone()
             if not issue:
                 return None
-            cycles = [
-                self._decoded_row(row, ("status_transition_json", "mr_scope_json"))
-                for row in db.execute(
-                    "SELECT * FROM review_cycles WHERE jira_key=? ORDER BY cycle_number DESC", (jira_key.upper(),)
-                )
-            ]
+            # The list and detail views must consume the same Cycle projection.
+            # Raw review_cycles rows omit application progress, Run counts and
+            # readiness, which previously made a real required scope look empty
+            # after the user opened the Issue detail.
+            issue_summary = self._issue_summary(db, issue)
+            cycles = list(issue_summary.get("cycles") or [])
             requested_cycle_id = cycle_id.strip()
             selected_cycle = next(
                 (cycle for cycle in cycles if str(cycle.get("cycle_id") or "") == requested_cycle_id),
@@ -2259,7 +2289,8 @@ class WorkflowStore:
         if not application_progress and bool(status_transition.get("scope_authoritative")):
             return {
                 "ready": False,
-                "message": "No review-required scope is active for this Cycle.",
+                "not_required": True,
+                "message": "No review is required for this Cycle. It is excluded from Review Pass readiness.",
                 "pending_blockers": [],
                 "scope_gaps": [],
                 "cycle_id": target_cycle_id,

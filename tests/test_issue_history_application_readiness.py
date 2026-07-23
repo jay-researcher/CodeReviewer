@@ -151,6 +151,31 @@ class IssueHistoryApplicationReadinessTests(unittest.TestCase):
         self.assertEqual(0, current["iTrade Client"]["pending_blockers"])
         self.assertEqual(1, current["Services Terminal"]["pending_blockers"])
 
+    def test_scope_reordering_does_not_reset_the_current_review(self) -> None:
+        scope = [
+            {"application": "WVAdmin", "iid": 23},
+            {"application": "DPS", "iid": 24},
+        ]
+        cycle = self._cycle(sprint_id="10087-order", scope=scope)
+        run_id = self._register(
+            cycle,
+            application="WVAdmin",
+            report="ECHNL-7280_scope-order.md",
+            findings=[],
+        )
+
+        self.store.upsert_review_cycle(
+            jira_key="ECHNL-7280",
+            sprint_id="10087-order",
+            sprint_name="Sprint 10087-order",
+            sprint_state="active",
+            mr_scope=list(reversed(scope)),
+        )
+
+        summary = self._summary()
+        self.assertEqual(run_id, summary["latest_run_id"])
+        self.assertEqual(str(cycle["cycle_id"]), summary["current_cycle_id"])
+
     def test_explicit_application_run_does_not_create_false_unmapped_scope(self) -> None:
         cycle = self._cycle(sprint_id="10088", scope=[])
         self._register(
@@ -354,6 +379,10 @@ class IssueHistoryApplicationReadinessTests(unittest.TestCase):
             report="ECHNL-7280_old-cycle.md",
             findings=[],
         )
+        self.store.manual_pass(
+            "ECHNL-7280", "wen.yi", "auditor", "Old Cycle reviewed",
+            cycle_id=str(old_cycle["cycle_id"]),
+        )
         current_cycle = self._cycle(
             sprint_id="10094",
             scope=[{"application": "DPS", "iid": 72}],
@@ -363,8 +392,19 @@ class IssueHistoryApplicationReadinessTests(unittest.TestCase):
         current_detail = self.store.issue_detail("ECHNL-7280", cycle_id=str(current_cycle["cycle_id"]))
         self.assertEqual(old_run, old_detail["latest_run_group"]["id"])
         self.assertEqual([], current_detail["runs"])
+        self.assertEqual(
+            ["DPS"],
+            [
+                progress["application"]
+                for progress in current_detail["selected_cycle"]["application_progress"]
+            ],
+        )
         self.assertFalse(current_detail["pass_readiness"]["ready"])
         self.assertIn("this Cycle", current_detail["pass_readiness"]["message"])
+        summary = self._summary()
+        self.assertEqual("not-reviewed", summary["status"])
+        self.assertIsNone(summary["latest_run_id"])
+        self.assertIsNone(summary["passed_run_id"])
         with self.assertRaisesRegex(ValueError, "current Review Cycle"):
             self.store.manual_pass(
                 "ECHNL-7280", "wen.yi", "auditor", "Historical pass",
@@ -401,8 +441,18 @@ class IssueHistoryApplicationReadinessTests(unittest.TestCase):
         current = self.store.list_issues(view_all=True)[0]["current_cycle"]
         self.assertEqual([], current["mr_scope"])
         self.assertEqual([], current["application_progress"])
+        self.assertEqual("not-required", current["pass_status"])
         self.assertFalse(current["pass_readiness"]["ready"])
-        self.assertIn("No review-required scope", current["pass_readiness"]["message"])
+        self.assertTrue(current["pass_readiness"]["not_required"])
+        self.assertIn("No review is required", current["pass_readiness"]["message"])
+        summary = self._summary()
+        self.assertEqual("no-review-required", summary["status"])
+        self.assertIsNone(summary["latest_run_id"])
+        with self.assertRaisesRegex(ValueError, "No review is required"):
+            self.store.manual_pass(
+                "ECHNL-7280", "wen.yi", "auditor", "Do not fake a Pass",
+                cycle_id=str(cycle["cycle_id"]),
+            )
 
         moved = self.store.reconcile_sprint_scope(sprint_ref="10095", issues=[])
         self.assertEqual([str(cycle["cycle_id"])], moved["closed_cycles"])

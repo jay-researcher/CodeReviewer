@@ -2082,6 +2082,8 @@ def _review_scope_from_discovery(item: dict[str, object]) -> ReviewScope:
 def _application_review_progress(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     scoped: dict[tuple[str, str], list[dict[str, object]]] = {}
     for row in rows:
+        if str(row.get("workflow_status") or "") == "not-required":
+            continue
         statuses = row.get("scope_statuses")
         if isinstance(statuses, list) and statuses:
             for item in statuses:
@@ -2332,7 +2334,13 @@ def build_review_coverage(
         jobs = jobs_by_issue.get(key, [])
         active_jobs = [item for item in jobs if str(item.get("status") or "") in {"queued", "running", "pausing", "paused", "stopping"}]
         failed_jobs = [item for item in jobs if str(item.get("status") or "") in {"failed", "canceled"}]
-        if active_jobs:
+        workflow_issue = workflow_issues.get(key) or {}
+        current_cycle = workflow_issue.get("current_cycle") if isinstance(workflow_issue.get("current_cycle"), dict) else {}
+        no_review_required = str(current_cycle.get("pass_status") or "") == "not-required"
+        if no_review_required:
+            workflow_status = "not-required"
+            report_review_status = "not-required"
+        elif active_jobs:
             workflow_status = "running"
         elif report_states:
             workflow_status = _aggregate_coverage_report_status(report_states)
@@ -2340,8 +2348,6 @@ def build_review_coverage(
             workflow_status = "failed"
         else:
             workflow_status = "missing"
-        workflow_issue = workflow_issues.get(key) or {}
-        current_cycle = workflow_issue.get("current_cycle") if isinstance(workflow_issue.get("current_cycle"), dict) else {}
         # Live discovery defines required scope. Reports are evidence and must
         # never create a required application or delivery version by themselves.
         review_scopes = set(row.get("review_scopes") or set())
@@ -2400,6 +2406,7 @@ def build_review_coverage(
                 "scope_statuses": scope_statuses,
                 "project_paths": sorted(row.get("project_paths") or [], key=str.lower),
                 "workflow_status": workflow_status,
+                "no_review_required": no_review_required,
                 "report_review_status": report_review_status,
                 "report_count": len(report_states),
                 "running_jobs": len(active_jobs),
@@ -2416,7 +2423,7 @@ def build_review_coverage(
             }
         )
 
-    order = {"running": 0, "failed": 1, "missing": 2, "pending": 3, "ready": 4, "passed": 5}
+    order = {"running": 0, "failed": 1, "missing": 2, "pending": 3, "ready": 4, "passed": 5, "not-required": 6}
     rows.sort(key=lambda item: (order.get(str(item.get("workflow_status") or ""), 9), str(item.get("jira_key") or "")))
     counts: dict[str, int] = {name: 0 for name in order}
     for row in rows:
@@ -2515,14 +2522,23 @@ def _aggregate_coverage_report_status(states: list[dict[str, object]]) -> str:
 def _coverage_report_summary(
     rows: list[dict[str, object]], counts: dict[str, int]
 ) -> dict[str, object]:
-    issues_with_reports = sum(1 for row in rows if int(row.get("report_count") or 0) > 0)
+    review_required_rows = [
+        row for row in rows
+        if str(row.get("workflow_status") or "") != "not-required"
+    ]
+    issues_with_reports = sum(
+        1 for row in review_required_rows if int(row.get("report_count") or 0) > 0
+    )
     return {
         "issues_with_reports": issues_with_reports,
-        "issues_without_reports": len(rows) - issues_with_reports,
+        "issues_without_reports": len(review_required_rows) - issues_with_reports,
+        "review_required_issues": len(review_required_rows),
+        "no_review_required": len(rows) - len(review_required_rows),
         "generated_breakdown": {
             "handling": sum(1 for row in rows if row.get("report_review_status") == "pending"),
             "ready": sum(1 for row in rows if row.get("report_review_status") == "ready"),
             "passed": sum(1 for row in rows if row.get("report_review_status") == "passed"),
+            "not_required": sum(1 for row in rows if row.get("report_review_status") == "not-required"),
         },
         "generating": counts.get("running", 0),
         "failed": counts.get("failed", 0),
@@ -5881,7 +5897,7 @@ def render_index(user: str = "") -> str:
     button:active:not(:disabled) { transform: translateY(1px); }
     button:focus-visible { outline: 0; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
     button:disabled {
-      cursor: wait;
+      cursor: not-allowed;
       opacity: 0.64;
     }
     button.secondary {
@@ -6440,6 +6456,9 @@ def render_index(user: str = "") -> str:
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
     }
+    .coverage-report-totals {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
     .coverage-totals-title {
       grid-column: 1 / -1;
       display: grid;
@@ -6528,7 +6547,7 @@ def render_index(user: str = "") -> str:
     }
     .coverage-lifecycle-grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 7px;
     }
     .coverage-lifecycle-stat {
@@ -6929,6 +6948,11 @@ def render_index(user: str = "") -> str:
     .workflow-badge.pending,
     .workflow-badge.failed { color: var(--danger); border-color: var(--danger); }
     .workflow-badge.running { color: var(--accent-strong); border-color: var(--accent); }
+    .workflow-badge.not-required {
+      color: #66558f;
+      border-color: #b9add2;
+      background: #f7f4fb;
+    }
     .confirm-dialog {
       width: min(var(--dialog-m), calc(100vw - 32px));
       max-height: min(720px, calc(100vh - 48px));
@@ -8223,6 +8247,11 @@ def render_index(user: str = "") -> str:
     .status-chip[data-status="passed"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
     .status-chip[data-status="handling"], .status-chip[data-status="rescan-required"] { color: #b54708; }
     .status-chip[data-status="awaiting-review"] { color: #175b92; border-color: #a9c8e5; background: #f2f8fd; }
+    .status-chip[data-status="no-review-required"] {
+      color: #66558f;
+      border-color: #b9add2;
+      background: #f7f4fb;
+    }
     .severity-chip.critical { color: #b42318; font-weight: 700; }
     .severity-chip.high { color: #c2410c; font-weight: 700; }
     .issue-overview { margin: 0 0 16px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: 0 5px 18px rgba(15, 23, 42, .05); }
@@ -10442,6 +10471,7 @@ __ADMIN_TRACE_SECTION__
       const reportCoverage = data.report_coverage || {};
       const withReports = Number(reportCoverage.issues_with_reports ?? rows.filter(item => Number(item.report_count || 0) > 0).length);
       const withoutReports = Number(reportCoverage.issues_without_reports ?? Math.max(0, rows.length - withReports));
+      const noReviewRequired = Number(reportCoverage.no_review_required ?? rows.filter(item => item.workflow_status === 'not-required').length);
       const reportTotal = withReports + withoutReports;
       const withPercent = reportTotal ? Math.round((withReports / reportTotal) * 100) : 0;
       const withoutPercent = reportTotal ? 100 - withPercent : 0;
@@ -10463,9 +10493,10 @@ __ADMIN_TRACE_SECTION__
       $('coverageOverviewEmpty').hidden = true;
       $('coverageSummary').innerHTML = `
         <section class="coverage-report-totals" aria-label="Issue report coverage">
-          <div class="coverage-totals-title"><strong>Unique Issue coverage</strong><span>Each Jira Issue is counted once, even when it spans multiple releases.</span></div>
-          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues with reports</span></div><strong>${withReports}</strong><small>${withPercent}% of ${rows.length} unique Issue(s)</small></div>
-          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues without reports</span></div><strong>${withoutReports}</strong><small>${withoutPercent}% of ${rows.length} unique Issue(s)</small></div>
+          <div class="coverage-totals-title"><strong>Unique Issue coverage</strong><span>Review-required Issues are counted separately from Issues with no active review scope.</span></div>
+          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues with reports</span></div><strong>${withReports}</strong><small>${withPercent}% of ${reportTotal} review-required Issue(s)</small></div>
+          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>Issues without reports</span></div><strong>${withoutReports}</strong><small>${withoutPercent}% of ${reportTotal} review-required Issue(s)</small></div>
+          <div class="coverage-report-total"><div class="coverage-report-total-head"><span>No review required</span></div><strong>${noReviewRequired}</strong><small>Excluded from Review Pass readiness</small></div>
           <div class="coverage-ratio-track" aria-hidden="true"><span class="coverage-ratio-with" style="width:${withPercent}%"></span><span class="coverage-ratio-without" style="width:${withoutPercent}%"></span></div>
         </section>
         <section class="coverage-scope-totals" aria-label="Application release report coverage">
@@ -10480,6 +10511,7 @@ __ADMIN_TRACE_SECTION__
             <div class="coverage-lifecycle-stat"><span>Handling</span><strong>${Number(breakdown.handling || 0)}</strong></div>
             <div class="coverage-lifecycle-stat"><span>Ready for Pass</span><strong>${Number(breakdown.ready || 0)}</strong></div>
             <div class="coverage-lifecycle-stat"><span>Review Pass</span><strong>${Number(breakdown.passed || 0)}</strong></div>
+            <div class="coverage-lifecycle-stat"><span>Not Required</span><strong>${Number(breakdown.not_required || 0)}</strong></div>
           </div>
         </section>`;
       $('coverageApplications').innerHTML = applicationProgress.length ? `
@@ -10542,7 +10574,7 @@ __ADMIN_TRACE_SECTION__
           </div>
           <div class="coverage-card-summary" title="${escapeHtml(item.summary || '-')}">${escapeHtml(item.summary || '-')}</div>
           <div class="coverage-card-owner" title="${escapeHtml(item.responsible || '-')}">Responsible · ${escapeHtml(item.responsible || '-')}</div>
-          <div class="coverage-card-applications" aria-label="Release applications">${(Array.isArray(item.applications) ? item.applications : ['Unmapped']).map((application) => `<span class="coverage-card-application">${escapeHtml(application || 'Unmapped')}</span>`).join('')}</div>
+          <div class="coverage-card-applications" aria-label="Release applications">${(item.no_review_required ? ['No active review scope'] : (Array.isArray(item.applications) ? item.applications : ['Unmapped'])).map((application) => `<span class="coverage-card-application">${escapeHtml(application || 'Unmapped')}</span>`).join('')}</div>
           <div class="coverage-card-cycle">${item.review_cycle_number
             ? `Cycle ${Number(item.review_cycle_number)} · Run ${Number(item.latest_run_number || 0) || '-'} · ${escapeHtml(item.review_cycle_sprint || 'Unknown Sprint')} · ${Number(item.review_snapshot_count || 0)} snapshot(s)`
             : 'No Review Cycle yet'}</div>
@@ -10594,7 +10626,7 @@ __ADMIN_TRACE_SECTION__
     }
 
     function coverageStatusLabel(value) {
-      return ({ missing: 'No report', running: 'Generating', pending: 'Handling', ready: 'Ready for Pass', passed: 'Review Pass', failed: 'Failed' })[value] || value || '-';
+      return ({ missing: 'No report', running: 'Generating', pending: 'Handling', ready: 'Ready for Pass', passed: 'Review Pass', failed: 'Failed', 'not-required': 'No Review Required' })[value] || value || '-';
     }
 
     function renderProjects(projects) {
@@ -12598,7 +12630,16 @@ function jiraKeyFromReportPath(reportPath) {
         const entries = group.entries;
         const issueKeys = new Set(entries.map(({issue}) => issue.jira_key));
         const total = issueKeys.size;
-        const passed = new Set(entries.filter(({issue, cycle}) => cycle.pass_status === 'passed' || (issue.current_cycle_id === cycle.cycle_id && issue.status === 'passed')).map(({issue}) => issue.jira_key)).size;
+        const reviewRequiredEntries = entries.filter(({cycle}) => {
+          const progress = Array.isArray(cycle.application_progress) ? cycle.application_progress : [];
+          return cycle.pass_status !== 'not-required' && progress.length > 0;
+        });
+        const reviewRequiredTotal = new Set(reviewRequiredEntries.map(({issue}) => issue.jira_key)).size;
+        const passed = new Set(
+          reviewRequiredEntries
+            .filter(({cycle}) => cycle.pass_status === 'passed')
+            .map(({issue}) => issue.jira_key)
+        ).size;
         const blockers = entries.reduce((sum, {cycle}) => sum + Number((((cycle.pass_readiness || {}).pending_blockers) || []).length), 0);
         const pending = entries.reduce((sum, {cycle}) => sum + Number((cycle.handling_counts || {}).pending || 0), 0);
         const snapshots = entries.reduce((sum, {cycle}) => sum + Number(cycle.review_snapshot_count || 0), 0);
@@ -12671,7 +12712,7 @@ function jiraKeyFromReportPath(reportPath) {
         const contextNote = contextKind === 'legacy'
           ? '<div class="sprint-overview-note">Imported evidence is retained for audit only and is excluded from current Sprint release readiness.</div>'
           : '<div class="sprint-overview-note">Every required application scope must have a current report before this Sprint can reach Review Pass.</div>';
-        return `<article class="sprint-overview-card" data-context="${contextKind}"><div class="sprint-overview-head"><div><div class="sprint-overview-eyebrow">${contextKind === 'legacy' ? 'Historical archive' : 'Live delivery'}</div><strong>${escapeHtml(group.sprintName)}</strong><div class="meta">Sprint ${escapeHtml(group.sprintId)} · ${escapeHtml(statusLabel(group.state))} · Unique Issues and required application scopes are counted separately.</div></div><span class="count-pill">${total} issues · ${scopeTotal} required scopes</span></div>${contextNote}<div class="sprint-coverage-summary" aria-label="Unique Issue report coverage"><div><span>Fully covered</span><strong>${coverageCounts.full}</strong></div><div><span>Partially covered</span><strong>${coverageCounts.partial}</strong></div><div><span>Without reports</span><strong>${coverageCounts.without}</strong></div><div><span>Unmapped</span><strong>${coverageCounts.unmapped}</strong></div><div><span>No required scope</span><strong>${coverageCounts.noScope}</strong></div></div><div class="sprint-overview-metrics"><div class="sprint-overview-metric"><span class="meta">Review Pass</span><strong>${passed}/${total}</strong></div><div class="sprint-overview-metric"><span class="meta">Blockers</span><strong>${blockers}</strong></div><div class="sprint-overview-metric"><span class="meta">Pending handling</span><strong>${pending}</strong></div></div><div class="sprint-application-grid">${appCards}</div><div class="sprint-overview-footer"><div class="meta">${snapshots} review snapshot(s) · ${entries.length} cycle membership(s)</div><button class="secondary" type="button" data-open-sprint="${escapeHtml(group.key)}" data-sprint-label="${escapeHtml(`${group.sprintName} (${group.sprintId})`)}">View sprint issues</button></div></article>`;
+        return `<article class="sprint-overview-card" data-context="${contextKind}"><div class="sprint-overview-head"><div><div class="sprint-overview-eyebrow">${contextKind === 'legacy' ? 'Historical archive' : 'Live delivery'}</div><strong>${escapeHtml(group.sprintName)}</strong><div class="meta">Sprint ${escapeHtml(group.sprintId)} · ${escapeHtml(statusLabel(group.state))} · Unique Issues and required application scopes are counted separately.</div></div><span class="count-pill">${total} issues · ${scopeTotal} required scopes</span></div>${contextNote}<div class="sprint-coverage-summary" aria-label="Unique Issue report coverage"><div><span>Fully covered</span><strong>${coverageCounts.full}</strong></div><div><span>Partially covered</span><strong>${coverageCounts.partial}</strong></div><div><span>Without reports</span><strong>${coverageCounts.without}</strong></div><div><span>Unmapped</span><strong>${coverageCounts.unmapped}</strong></div><div><span>No review required</span><strong>${coverageCounts.noScope}</strong></div></div><div class="sprint-overview-metrics"><div class="sprint-overview-metric"><span class="meta">Review Pass · required Issues</span><strong>${passed}/${reviewRequiredTotal}</strong></div><div class="sprint-overview-metric"><span class="meta">Blockers</span><strong>${blockers}</strong></div><div class="sprint-overview-metric"><span class="meta">Pending handling</span><strong>${pending}</strong></div></div><div class="sprint-application-grid">${appCards}</div><div class="sprint-overview-footer"><div class="meta">${snapshots} review snapshot(s) · ${entries.length} cycle membership(s)</div><button class="secondary" type="button" data-open-sprint="${escapeHtml(group.key)}" data-sprint-label="${escapeHtml(`${group.sprintName} (${group.sprintId})`)}">View sprint issues</button></div></article>`;
       }).join('')}</div>` : '<div class="markdown-preview empty">No persisted Sprint review data is available.</div>';
       $('issueReviewOverviewPanel').querySelectorAll('[data-open-sprint]').forEach(button => button.addEventListener('click', () => {
         issueReviewSprintFilter = button.dataset.openSprint || '';
@@ -12810,7 +12851,11 @@ function jiraKeyFromReportPath(reportPath) {
         const cycles = (item.cycles || []).length ? item.cycles : [item.current_cycle || {}];
         const cardCycle = cycles.find(cycle => issueCycleMatchesFilter(item, cycle)) || item.current_cycle || cycles[0] || {};
         const cycleProgress = Array.isArray(cardCycle.application_progress) ? cardCycle.application_progress : [];
-        const displayedStatus = scopeStatus || (cycleProgress.length ? (cardCycle.pass_status || item.status) : 'no-review-scope');
+        const displayedStatus = scopeStatus || (
+          cardCycle.pass_status === 'not-required'
+            ? 'no-review-required'
+            : cycleProgress.length ? (cardCycle.pass_status || item.status) : 'no-review-scope'
+        );
         const cycleCounts = cardCycle.handling_counts || {fixed:0, 'follow-up':0, 'not-issue':0, pending:0};
         return `<article class="issue-review-card${selected}" data-jira="${escapeHtml(item.jira_key)}" data-cycle="${escapeHtml(cardCycle.cycle_id || '')}" role="button" tabindex="0" aria-label="Open ${escapeHtml(item.jira_key)} Issue Review">
           <div class="issue-review-card-head"><strong class="issue-review-key">${escapeHtml(item.jira_key)}</strong><span class="status-chip" data-status="${escapeHtml(displayedStatus)}">${escapeHtml(statusLabel(displayedStatus))}</span></div>
@@ -12875,7 +12920,21 @@ function jiraKeyFromReportPath(reportPath) {
       );
       const selectedScopeProgress = Array.isArray(selectedCycle.application_progress) ? selectedCycle.application_progress : [];
       const selectedScopeLabels = selectedScopeProgress.map(item => String(item.scope_label || item.application || 'Unmapped'));
-      const cycleStatus = hasCompletedRun ? (selectedCycle.pass_status || issue.status) : 'awaiting-review';
+      const noReviewRequired = selectedCycle.pass_status === 'not-required' || Boolean(readiness.not_required);
+      const progressStates = selectedScopeProgress.map(item => String(item.state || ''));
+      const cycleStatus = noReviewRequired
+        ? 'no-review-required'
+        : !hasCompletedRun
+          ? 'awaiting-review'
+          : selectedCycle.pass_status === 'passed'
+            ? 'passed'
+            : progressStates.includes('failed')
+              ? 'failed'
+              : progressStates.includes('handling')
+                ? 'handling'
+                : progressStates.length && progressStates.every(state => state === 'ready-for-pass')
+                  ? 'ready-for-pass'
+                  : 'pending';
       const snapshots = data.review_snapshots || [];
       const canPass = Boolean((data.permissions || {}).manual_pass) && isCurrentCycle;
       const canReview = Boolean((data.permissions || {}).run_issue_review) && isCurrentCycle;
@@ -12889,12 +12948,15 @@ function jiraKeyFromReportPath(reportPath) {
       const criticalProgress = severityProgress('Critical');
       const highProgress = severityProgress('High');
       const mediumProgress = severityProgress('Medium');
+      const emptyCycleMarkup = noReviewRequired
+        ? `<div class="cycle-empty-state" role="status"><div class="cycle-empty-icon" aria-hidden="true">✓</div><div class="cycle-empty-copy"><strong>No Review Required</strong><span>No active review-required MR scope exists in this Cycle. This Issue is excluded from Review Pass readiness and is not treated as Passed.</span></div>${previousCycleWithRun ? `<button class="secondary small-action" type="button" data-open-history-cycle="${escapeHtml(previousCycleWithRun.cycle_id || '')}">View previous Cycle</button>` : ''}</div>`
+        : `<div class="cycle-empty-state" role="status"><div class="cycle-empty-icon" aria-hidden="true">↻</div><div class="cycle-empty-copy"><strong>No Review Run in this Cycle</strong><span>${selectedScopeLabels.length ? `${selectedScopeLabels.length} required scope(s): ${escapeHtml(selectedScopeLabels.join(' · '))}.` : 'Scope discovery has not produced a reviewable application yet.'} Historical reports are not counted here.</span></div>${previousCycleWithRun ? `<button class="secondary small-action" type="button" data-open-history-cycle="${escapeHtml(previousCycleWithRun.cycle_id || '')}">View previous Cycle</button>` : ''}</div>`;
       const metricsMarkup = hasCompletedRun ? `<div class="metric-grid">
           <button class="metric-card" type="button" data-jump-severity="critical" ${(severity.Critical || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">Critical</span><strong>${severity.Critical || 0}</strong></span><span class="metric-ratio"><span>${criticalProgress.handled} handled / ${criticalProgress.unhandled} unhandled</span><b>${criticalProgress.percent}%</b></span><span class="metric-bar" aria-label="Critical ${criticalProgress.percent}% handled"><span style="--completion:${criticalProgress.percent}%"></span></span></button>
           <button class="metric-card" type="button" data-jump-severity="high" ${(severity.High || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">High</span><strong>${severity.High || 0}</strong></span><span class="metric-ratio"><span>${highProgress.handled} handled / ${highProgress.unhandled} unhandled</span><b>${highProgress.percent}%</b></span><span class="metric-bar" aria-label="High ${highProgress.percent}% handled"><span style="--completion:${highProgress.percent}%"></span></span></button>
           <button class="metric-card" type="button" data-jump-severity="medium" ${(severity.Medium || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">Medium</span><strong>${severity.Medium || 0}</strong></span><span class="metric-ratio"><span>${mediumProgress.handled} handled / ${mediumProgress.unhandled} unhandled</span><b>${mediumProgress.percent}%</b></span><span class="metric-bar" aria-label="Medium ${mediumProgress.percent}% handled"><span style="--completion:${mediumProgress.percent}%"></span></span></button>
           <div class="metric-card metric-summary-card"><div class="metric-summary-row"><span class="meta">Manager exceptions</span><strong>${readiness.manager_exceptions || 0}</strong></div><button class="metric-summary-row" type="button" data-jump-blocker="true" ${(readiness.pending_blockers || []).length ? '' : 'disabled'}><span class="meta">Remaining blockers</span><strong>${(readiness.pending_blockers || []).length}</strong></button></div>
-        </div>` : `<div class="cycle-empty-state" role="status"><div class="cycle-empty-icon" aria-hidden="true">↻</div><div class="cycle-empty-copy"><strong>No Review Run in this Cycle</strong><span>${selectedScopeLabels.length ? `${selectedScopeLabels.length} required scope(s): ${escapeHtml(selectedScopeLabels.join(' · '))}.` : 'No review-required application scope is currently available.'} Historical reports are not counted here.</span></div>${previousCycleWithRun ? `<button class="secondary small-action" type="button" data-open-history-cycle="${escapeHtml(previousCycleWithRun.cycle_id || '')}">View previous Cycle</button>` : ''}</div>`;
+        </div>` : emptyCycleMarkup;
       const cycleHistory = selectedCycle.cycle_id ? [selectedCycle].map(cycle => {
         const cycleRuns = runs.filter(run => String(run.cycle_id || '') === String(cycle.cycle_id || ''));
         const cycleSnapshots = snapshots.filter(snapshot => String(snapshot.cycle_id || '') === String(cycle.cycle_id || ''));
@@ -12910,7 +12972,7 @@ function jiraKeyFromReportPath(reportPath) {
         <header class="issue-review-header">
           <div class="issue-review-primary">
             <div class="issue-review-identity"><div class="issue-review-title-line"><h2>${jiraUrl ? `<a class="jira-issue-link" href="${escapeHtml(jiraUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(issue.jira_key)} in Jira (new tab)">${escapeHtml(issue.jira_key)} <span aria-hidden="true">↗</span></a>` : escapeHtml(issue.jira_key)}</h2><span class="info-hint"><button class="information-icon" type="button" aria-label="Issue overview guidance" aria-expanded="false" aria-controls="issueOverviewHintPopover">i</button><span id="issueOverviewHintPopover" class="information-hint-popover" role="tooltip" hidden>Every status, metric and action uses the selected Cycle only. Historical Runs stay available from the Cycle selector.</span></span></div><p class="issue-review-summary-title" title="${escapeHtml(issue.summary || 'Issue Review')}">${escapeHtml(issue.summary || 'Issue Review')}</p><div class="meta issue-hero-meta"><span>Responsible: ${escapeHtml(issue.responsible || '-')}</span><span>${hasCompletedRun ? `Run ${escapeHtml(latest.run_number || '-')}` : 'No Run in this Cycle'}</span><span>Updated ${escapeHtml(formatDateTime(selectedCycle.updated_at || issue.updated_at))}</span></div></div>
-            <div class="issue-review-controls"><div class="issue-review-actions"><span class="status-chip" data-status="${escapeHtml(cycleStatus)}">${escapeHtml(statusLabel(cycleStatus))}</span>${canReview ? '<button id="issueRescanBtn" class="secondary" type="button">Re-scan Issue</button>' : ''}${canPass ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : 'disabled'}>Manual Pass</button>` : ''}</div></div>
+            <div class="issue-review-controls"><div class="issue-review-actions"><span class="status-chip" data-status="${escapeHtml(cycleStatus)}">${escapeHtml(statusLabel(cycleStatus))}</span>${canReview ? `<button id="issueRescanBtn" class="secondary" type="button">${hasCompletedRun ? 'Re-scan Issue' : (noReviewRequired ? 'Check Again' : 'Run Review')}</button>` : ''}${canPass && !noReviewRequired ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : `disabled title="${escapeHtml(readiness.message || 'Complete the current Cycle review first.')}"`}>Manual Pass</button>` : ''}</div></div>
           </div>
           <div class="issue-review-context">
             <div class="cycle-context-row"><label for="issueReviewCycleSelect">Delivery Cycle</label><select id="issueReviewCycleSelect">${cycles.map(cycle => `<option value="${escapeHtml(cycle.cycle_id || '')}" ${String(cycle.cycle_id || '') === String(selectedCycle.cycle_id || '') ? 'selected' : ''}>Cycle ${escapeHtml(cycle.cycle_number || '-')} · ${escapeHtml(cycle.sprint_name || cycle.sprint_id || 'Legacy')} · ${cycle.cycle_closed_at ? 'Historical' : 'Current'}</option>`).join('')}</select><span class="status-chip" data-context="${contextKind}">${contextKind === 'live' ? 'Live Cycle' : (contextKind === 'legacy' ? 'Legacy Cycle' : 'Historical · read-only')}</span></div>
@@ -12920,7 +12982,7 @@ function jiraKeyFromReportPath(reportPath) {
         ${metricsMarkup}
         </section>
         <div class="workflow-tabs" role="tablist" aria-label="Issue Review details"><button class="workflow-tab active" type="button" role="tab" aria-selected="true" aria-controls="workflowProblemsPanel" data-workflow-tab="problems">Problems</button><button class="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflowDiscussPanel" data-workflow-tab="discuss">Discuss (${discussions.length})</button><button class="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflowHistoryPanel" data-workflow-tab="history">History (${runs.length})</button><button class="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflowPendingPanel" data-workflow-tab="pending">Pending Jira (${drafts.length})</button></div>
-        <section id="workflowProblemsPanel" class="workflow-section" role="tabpanel" data-workflow-panel="problems"><h3 class="workflow-section-title">Problem list · ${hasCompletedRun ? `Run ${escapeHtml(latest.run_number || '-')}` : 'Awaiting Review'}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role, pendingBlockerIds)).join('') : (hasCompletedRun ? '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>' : '<div class="markdown-preview empty">No current-Cycle report exists yet. Run the Issue review to create an authoritative report; historical findings are intentionally not shown here.</div>')}</section>
+        <section id="workflowProblemsPanel" class="workflow-section" role="tabpanel" data-workflow-panel="problems"><h3 class="workflow-section-title">Problem list · ${hasCompletedRun ? `Run ${escapeHtml(latest.run_number || '-')}` : (noReviewRequired ? 'Not Required' : 'Awaiting Review')}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role, pendingBlockerIds)).join('') : (hasCompletedRun ? '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>' : (noReviewRequired ? '<div class="markdown-preview empty">No Problems are expected because this Cycle has no active review-required scope. Historical findings remain available from the Cycle selector.</div>' : '<div class="markdown-preview empty">No current-Cycle report exists yet. Run the Issue review to create an authoritative report; historical findings are intentionally not shown here.</div>'))}</section>
         <section id="workflowDiscussPanel" class="workflow-section" role="tabpanel" data-workflow-panel="discuss" hidden><h3 class="workflow-section-title">Discuss</h3><div>${discussions.length ? discussions.map(item => `<div class="discussion-card"><strong>${escapeHtml(item.author)}</strong><span class="meta"> · ${escapeHtml(formatDateTime(item.created_at))}</span><p>${escapeHtml(item.message)}</p></div>`).join('') : '<div class="meta">No discussion yet.</div>'}</div><div class="finding-actions"><label for="issueDiscussionInput">Message <span class="required-mark" aria-hidden="true">*</span></label><textarea id="issueDiscussionInput" placeholder="Discuss this Review Run or ask for clarification." required aria-describedby="issueDiscussionError"></textarea><div id="issueDiscussionError" class="field-message" role="alert"></div><button id="sendIssueDiscussionBtn" class="secondary" type="button">Send</button></div></section>
         <section id="workflowHistoryPanel" class="workflow-section" role="tabpanel" data-workflow-panel="history" hidden><h3 class="workflow-section-title">History &amp; Snapshots</h3><p class="meta">Each Sprint Cycle contains its own Review Runs, Run Groups and immutable Snapshots.</p>${cycleHistory}</section>
         <section id="workflowPendingPanel" class="workflow-section" role="tabpanel" data-workflow-panel="pending" hidden><h3 class="workflow-section-title">Pending Jira</h3>${drafts.length ? drafts.map(renderDraftCard).join('') : '<div class="meta">No Jira follow-up drafts.</div>'}</section>`;

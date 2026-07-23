@@ -168,6 +168,14 @@ class UiAcceptance711Tests(unittest.TestCase):
         self.assertIn('class="metric-card metric-summary-card"', page)
         self.assertIn('class="cycle-empty-state"', page)
         self.assertIn('No Review Run in this Cycle', page)
+        self.assertIn('No Review Required', page)
+        self.assertIn("Review Pass · required Issues", page)
+        self.assertNotIn(
+            "cycle.pass_status === 'passed' || (issue.current_cycle_id === cycle.cycle_id && issue.status === 'passed')",
+            page,
+        )
+        self.assertIn("selectedCycle.pass_status === 'not-required'", page)
+        self.assertIn("hasCompletedRun ? 'Re-scan Issue' : (noReviewRequired ? 'Check Again' : 'Run Review')", page)
         self.assertRegex(
             page,
             r'(?s)@media \(max-width: \d+px\).*?\.issue-review-primary, \.issue-review-context\s*\{[^}]*grid-template-columns:\s*1fr',

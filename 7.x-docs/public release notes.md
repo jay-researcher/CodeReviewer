@@ -6,6 +6,13 @@
 
 状态：已于 2026-07-23 部署到 `192.168.3.78:8765`，生产健康检查、配置策略、账户、Workflow 历史数据及回滚入口验证通过。
 
+本机后续验收修订（尚未同步到 `192.168.3.78:8765`）：
+
+- 当前 Cycle 没有可审核 MR 时明确显示 `No Review Required`，不会误显示 Passed，也不会计入 Review Pass、Remaining 或待生成报告统计。
+- 当前 Cycle 有 Required Scope 但没有 Run 时，会显示真实应用范围和 `Run Review`；完成审核且无阻断后才允许 `Manual Pass`。
+- Issue 列表、详情和 Overview 使用同一份 Cycle 数据；切换 Sprint/Cycle 后不会再沿用上一 Cycle 的 Passed 或旧 Run 状态。
+- `No Review Required` 可使用 `Check Again` 重新发现 Scope；后续出现新 MR 时会恢复为 `Awaiting Review`。
+
 - Sprint Scan 会同步 Jira 当前 Sprint 与 MR 状态；Issue 移出 Sprint 或只剩关闭 MR 后，不再保留过期的待生成报告。
 - 手动 Scan 总是获取新数据；空 Sprint/Issue 范围不会混入其他历史报告。
 - Issues Review History 支持切换 Sprint 与 Delivery Cycle，Overview、Issue 列表和详情使用同一 Cycle 统计口径。

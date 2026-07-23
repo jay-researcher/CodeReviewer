@@ -137,19 +137,25 @@ class WebRolesWorkflowTests(unittest.TestCase):
         self.assertEqual(_aggregate_coverage_report_status([{"status": "passed"}, {"status": "pending"}]), "pending")
         self.assertEqual(_aggregate_coverage_report_status([{"status": "passed"}, {"status": "passed"}]), "passed")
 
-    def test_coverage_compares_reported_issues_and_three_review_lifecycle_states(self) -> None:
+    def test_coverage_excludes_no_review_required_from_report_denominator(self) -> None:
         summary = _coverage_report_summary(
             [
-                {"report_count": 2, "report_review_status": "pending"},
-                {"report_count": 1, "report_review_status": "ready"},
-                {"report_count": 1, "report_review_status": "passed"},
-                {"report_count": 0, "report_review_status": ""},
+                {"report_count": 2, "report_review_status": "pending", "workflow_status": "pending"},
+                {"report_count": 1, "report_review_status": "ready", "workflow_status": "ready"},
+                {"report_count": 1, "report_review_status": "passed", "workflow_status": "passed"},
+                {"report_count": 0, "report_review_status": "", "workflow_status": "missing"},
+                {"report_count": 1, "report_review_status": "not-required", "workflow_status": "not-required"},
             ],
             {"running": 1, "failed": 2},
         )
         self.assertEqual(summary["issues_with_reports"], 3)
         self.assertEqual(summary["issues_without_reports"], 1)
-        self.assertEqual(summary["generated_breakdown"], {"handling": 1, "ready": 1, "passed": 1})
+        self.assertEqual(summary["review_required_issues"], 4)
+        self.assertEqual(summary["no_review_required"], 1)
+        self.assertEqual(
+            summary["generated_breakdown"],
+            {"handling": 1, "ready": 1, "passed": 1, "not_required": 1},
+        )
         self.assertEqual(summary["generating"], 1)
         self.assertEqual(summary["failed"], 2)
 
@@ -316,8 +322,46 @@ class WebRolesWorkflowTests(unittest.TestCase):
         self.assertEqual(coverage["report_coverage"]["issues_without_reports"], 1)
         self.assertEqual(
             coverage["report_coverage"]["generated_breakdown"],
-            {"handling": 0, "ready": 0, "passed": 0},
+            {"handling": 0, "ready": 0, "passed": 0, "not_required": 0},
         )
+
+    def test_coverage_marks_authoritative_empty_cycle_not_required(self) -> None:
+        discovered = {
+            "jira_key": "ECHNL-1004",
+            "jira_summary": "No active MR scope",
+            "jira_status": "Development Done",
+            "items": [],
+            "issues_without_mrs": [{"jira_key": "ECHNL-1004", "summary": "No active MR scope"}],
+            "errors": [],
+        }
+        store = Mock()
+        store.list_issues.return_value = [
+            {
+                "jira_key": "ECHNL-1004",
+                "current_cycle": {
+                    "cycle_number": 2,
+                    "sprint_name": "Sprint 100",
+                    "pass_status": "not-required",
+                },
+                "cycle_count": 2,
+            }
+        ]
+        with (
+            patch("code_reviewer.web_app._web_user_permissions", return_value={"scan_coverage": True}),
+            patch("code_reviewer.web_app._web_user_role", return_value="manager"),
+            patch("code_reviewer.web_app.review_jira_issue_merge_requests", return_value=discovered),
+            patch("code_reviewer.web_app.list_reports", return_value=[]),
+            patch("code_reviewer.web_app.list_review_job_snapshots", return_value=[]),
+            patch("code_reviewer.web_app.workflow_store", return_value=store),
+        ):
+            coverage = build_review_coverage("admin", jira_keys="ECHNL-1004")
+
+        self.assertEqual("not-required", coverage["issues"][0]["workflow_status"])
+        self.assertTrue(coverage["issues"][0]["no_review_required"])
+        self.assertEqual(0, coverage["report_coverage"]["review_required_issues"])
+        self.assertEqual(1, coverage["report_coverage"]["no_review_required"])
+        self.assertEqual(0, coverage["report_coverage"]["issues_without_reports"])
+        self.assertEqual([], coverage["application_progress"])
 
 
 if __name__ == "__main__":
