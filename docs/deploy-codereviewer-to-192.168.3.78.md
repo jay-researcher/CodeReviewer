@@ -9,17 +9,37 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `7.2.16` |
-| 部署制品 | `codereviewer-7.2.16-331fcb1ad023.tgz`，SHA-256 `3e71d7f9240a33df6773696785d4fd5de67cad0d5c5795a04666c9922d4f380f` |
+| CodeReviewer 版本 | `7.2.16+b202607231300` |
+| 部署制品 | `codereviewer-7.2.16+b202607231300-33f0269.tgz`，SHA-256 `1763bc61d9328f2b4311cd1b8a6725d37e6542d07992e5bda7b5f2addd62db2b` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `/api/version` 返回 `7.2.16`，`/api/health` 返回 `healthy` |
+| 健康检查 | `/api/version` 返回 `7.2.16+b202607231300`，`/api/health` 返回 `healthy` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 291 passed |
+| RHEL9 测试 | 293 passed |
+
+## 7.2.16+b202607231300 空 Scope 闭环与 Workflow 数据重置
+
+2026-07-23 将构建 `7.2.16+b202607231300` 部署到生产，发布代码固定为 `20260720` 分支提交 `33f0269`，包含提交 `65c0ef0` 的 Cycle 空 Scope 闭环修复。
+
+- RHEL 9 隔离 staging 执行 `293/293` 通过，制品 SHA-256 与归档可读性验证通过；
+- 外部及服务器本机版本、健康、登录入口和未认证 Manager API 保护验证通过；
+- 按用户明确授权，先完整备份，再清除 `/var/lib/codereviewer/code-review` 中 102 个报告/Resume 文件，并重建 `/opt/codereviewer/current/data/codereviewer.db`；
+- 清理前 Workflow 包含 39 个 Issue、50 个 Cycle、59 个 Run、226 个 Finding；清理后 schema v3 完整性为 `ok`，16 个业务表全部为 0；
+- 生产配置、12 个账户、角色、凭据和服务权限保持不变；报告根目录只保留应用启动时创建的空周目录；
+- 后续必须从 Sprint Scan 开始，由 Jira 当前 Sprint 与实时 MR 重建 Live Cycle、Required Scope 和 Review Run。
+
+一致性备份与回滚：
+
+```text
+/var/backups/codereviewer/7.2.16-to-7.2.16+b202607231300-20260723-130100/system-backup.tgz
+/usr/local/sbin/codereviewer-rollback-20260723-130100
+```
+
+备份 SHA-256：`df9b9487c5153e276267c62ab18f04402ecb3ac86bfc9f9879adba4e9ea5133f`。
 
 ## 7.2.16 Cycle 口径与 Sprint 工作流闭环
 
