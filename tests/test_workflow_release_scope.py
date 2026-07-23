@@ -141,7 +141,7 @@ class WorkflowReleaseScopeTests(unittest.TestCase):
             (row["application"], row["release_line"]): row
             for row in summary["current_cycle"]["application_progress"]
         }
-        self.assertEqual(2, progress[("iTrade Client", "7.5.0")]["report_count"])
+        self.assertEqual(1, progress[("iTrade Client", "7.5.0")]["report_count"])
         self.assertEqual(1, progress[("iTrade Client", "7.5.1")]["report_count"])
         self.assertEqual(0, progress[("DPS", "DPS9")]["report_count"])
         self.assertEqual(
@@ -198,6 +198,40 @@ class WorkflowReleaseScopeTests(unittest.TestCase):
             {"High": 1, "Critical": 1, "Medium": 1},
             summary["severity_counts"],
         )
+
+    def test_same_scope_rescan_supersedes_earlier_report_in_reused_group(self) -> None:
+        cycle = self.store.upsert_review_cycle(
+            jira_key="ECHNL-7213",
+            sprint_id="10087",
+            mr_scope=[{"application": "DPS", "release_line": "DPS11"}],
+        )
+        group = self.store.create_run_group(cycle_id=str(cycle["cycle_id"]))
+        self._register(
+            "dps-old.md",
+            cycle_id=str(cycle["cycle_id"]),
+            run_group_id=str(group["id"]),
+            application="DPS",
+            release_line="DPS11",
+            findings=[{"index": "1", "severity": "Critical", "title": "Old finding"}],
+        )
+        latest_id = self._register(
+            "dps-rescan.md",
+            cycle_id=str(cycle["cycle_id"]),
+            run_group_id=str(group["id"]),
+            application="DPS",
+            release_line="DPS11",
+            findings=[{"index": "1", "severity": "High", "title": "Current finding"}],
+        )
+
+        detail = self.store.issue_detail("ECHNL-7213")
+        logical = detail["latest_run_group"]
+        self.assertEqual([latest_id], [run["id"] for run in logical["runs"]])
+        self.assertEqual(1, logical["finding_count"])
+        self.assertEqual("Current finding", logical["findings"][0]["title"])
+        progress = self.store.list_issues(view_all=True)[0]["current_cycle"]["application_progress"][0]
+        self.assertEqual(1, progress["report_count"])
+        self.assertEqual(1, progress["finding_count"])
+        self.assertEqual([latest_id], self.store.pass_readiness("ECHNL-7213")["run_ids"])
 
     def test_legacy_database_adds_release_line_without_losing_runs(self) -> None:
         legacy_path = self.root / "legacy.db"

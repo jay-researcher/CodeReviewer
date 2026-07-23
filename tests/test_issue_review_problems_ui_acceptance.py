@@ -81,11 +81,11 @@ class IssueReviewProblemsUiAcceptanceTests(unittest.TestCase):
 
     def test_sprint_overview_distinguishes_unique_issues_and_application_scopes(self) -> None:
         page = self.page
-        self.assertIn('unique issues · ${scopeTotal} application scopes', page)
+        self.assertIn('${total} issues · ${scopeTotal} required scopes', page)
         self.assertIn('Fully covered', page)
         self.assertIn('Partially covered', page)
         self.assertIn('Without reports', page)
-        self.assertIn('Application cards count scopes; this summary counts unique Issues.', page)
+        self.assertIn('Unique Issues and required application scopes are counted separately.', page)
 
     def test_problem_action_uses_the_short_submit_label(self) -> None:
         renderer = self.finding_renderer
@@ -162,6 +162,16 @@ class IssueReviewProblemsUiAcceptanceTests(unittest.TestCase):
         self.assertIn('role="tabpanel"', page)
         self.assertRegex(page, r'function renderIssueReviewOverview\([^)]*\)')
         self.assertRegex(page, r'sprint', re.I)
+        self.assertIn('id="issueReviewSprintSelect"', page)
+        self.assertIn('<option value="__current__">Current cycles</option>', page)
+        self.assertIn('All sprints &amp; history', page)
+        self.assertIn("let issueReviewSprintFilter = '__current__';", page)
+        self.assertIn('function issueCycleMatchesFilter', page)
+        self.assertIn('class="issue-history-nav"', page)
+        self.assertRegex(page, r'(?s)issue-history-tabs.*?issue-context-bar')
+        self.assertIn('id="issueReviewCycleSelect"', page)
+        self.assertIn('Historical · read-only', page)
+        self.assertIn('cycle_id:cycleId', page)
 
 
 if __name__ == "__main__":

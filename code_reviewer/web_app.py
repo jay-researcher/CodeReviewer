@@ -350,10 +350,12 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/issue-reviews/"):
             jira_key = unquote(parsed.path.removeprefix("/api/issue-reviews/")).strip().upper()
+            query = parse_qs(parsed.query)
+            cycle_id = _text((query.get("cycle_id") or [""])[0]).strip()
             try:
                 _sync_workflow_history()
                 _require_issue_access(user, jira_key)
-                detail = workflow_store().issue_detail(jira_key)
+                detail = workflow_store().issue_detail(jira_key, cycle_id=cycle_id)
                 if not detail:
                     self._send_json({"ok": False, "error": "Issue review was not found."}, status=HTTPStatus.NOT_FOUND)
                 else:
@@ -734,9 +736,10 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
             _require_issue_access(user, jira_key)
             result = workflow_store().manual_pass(
                 jira_key, user, _web_user_role(user), _text(payload.get("note")),
+                cycle_id=_text(payload.get("cycle_id")).strip(),
                 idempotency_key=self.headers.get("Idempotency-Key", "").strip(),
             )
-            cycle_id = _current_cycle_id(jira_key)
+            cycle_id = str(result.get("cycle_id") or "")
             if cycle_id:
                 result["review_snapshot"] = workflow_store().create_review_snapshot(
                     cycle_id=cycle_id,
@@ -1362,6 +1365,7 @@ def create_coverage_job(payload: dict[str, object], user: str) -> tuple[dict[str
     if (scope["sprint"] or scope["jira_filter"]) and not permissions["scan_coverage"]:
         raise PermissionError("Your role cannot scan Sprint or Jira Filter coverage.")
     scope_key = _coverage_scope_key(user, scope)
+    force_refresh = bool(payload.get("force_refresh"))
     now = time.time()
     with WEB_COVERAGE_JOBS_LOCK:
         candidates = sorted(
@@ -1379,6 +1383,8 @@ def create_coverage_job(payload: dict[str, object], user: str) -> tuple[dict[str
             if status in {"queued", "running"}:
                 return existing, True
             if (
+                not force_refresh
+                and
                 status == "done"
                 and now - float(existing.get("finished_at") or existing.get("updated_at") or 0)
                 <= COVERAGE_RESULT_CACHE_SECONDS
@@ -2231,7 +2237,10 @@ def build_review_coverage(
         if responsible:
             row["responsibles"].update(_split_people(responsible))
         row["applications"].add(review_scope.application)
-        row["review_scopes"].add((review_scope.application, review_scope.release_line))
+        discovered_release_line = (
+            "" if review_scope.release_line.casefold().startswith("unmapped") else review_scope.release_line
+        )
+        row["review_scopes"].add((review_scope.application, discovered_release_line))
         project_path = str(item.get("gitlab_project") or item.get("project_path") or "").strip()
         if project_path:
             row["project_paths"].add(project_path)
@@ -2245,6 +2254,26 @@ def build_review_coverage(
             if key:
                 issue_rows.setdefault(key, _coverage_issue_row(key, summary=str(item.get("summary") or "")))
 
+    scope_reconciliation: dict[str, object] = {}
+    if sprint and not bool(discovery.get("discovery_truncated")):
+        discovered_mrs_by_issue: dict[str, list[dict[str, object]]] = {}
+        for item in discovery.get("items") or []:
+            if isinstance(item, dict) and item.get("jira_key"):
+                discovered_mrs_by_issue.setdefault(str(item["jira_key"]).upper(), []).append(item)
+        reconciliation_issues = []
+        for item in discovery.get("scope_issues") or []:
+            if not isinstance(item, dict) or not item.get("jira_key"):
+                continue
+            key = str(item["jira_key"]).upper()
+            reconciliation_issues.append({**item, "jira_key": key, "mr_scope": discovered_mrs_by_issue.get(key, [])})
+        try:
+            scope_reconciliation = workflow_store().reconcile_sprint_scope(
+                sprint_ref=sprint,
+                issues=reconciliation_issues,
+            )
+        except Exception as exc:
+            scope_reconciliation = {"error": str(exc), "sprint_ref": sprint}
+
     scoped_keys = set(issue_rows)
     _emit_coverage_progress(
         progress,
@@ -2252,7 +2281,12 @@ def build_review_coverage(
         "Matching generated reports and active Review jobs.",
         total=len(scoped_keys),
     )
-    reports = list_reports(user=user, days=0 if scoped_keys else _default_report_history_days())
+    # An explicit scan that currently resolves to no Issues is an empty scope,
+    # not permission to fall back to unrelated recent global history.
+    explicit_scope = bool(requested_keys or sprint or jira_filter)
+    reports = [] if explicit_scope and not scoped_keys else list_reports(
+        user=user, days=0 if scoped_keys else _default_report_history_days()
+    )
     reports_by_issue: dict[str, list[dict[str, object]]] = {}
     for report in reports:
         key = _jira_key_from_report_name(str(report.get("relative_path") or report.get("name") or ""))
@@ -2262,7 +2296,7 @@ def build_review_coverage(
         issue_rows.setdefault(key, _coverage_issue_row(key))
 
     jobs_by_issue: dict[str, list[dict[str, object]]] = {}
-    for job in list_review_job_snapshots(user, limit=500):
+    for job in ([] if explicit_scope and not scoped_keys else list_review_job_snapshots(user, limit=500)):
         payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
         key = str(payload.get("jira_key") or "").upper()
         if not key or (scoped_keys and key not in scoped_keys):
@@ -2308,16 +2342,11 @@ def build_review_coverage(
             workflow_status = "missing"
         workflow_issue = workflow_issues.get(key) or {}
         current_cycle = workflow_issue.get("current_cycle") if isinstance(workflow_issue.get("current_cycle"), dict) else {}
+        # Live discovery defines required scope. Reports are evidence and must
+        # never create a required application or delivery version by themselves.
         review_scopes = set(row.get("review_scopes") or set())
-        review_scopes.update(
-            (
-                str(item.get("application") or "Unmapped"),
-                str(item.get("release_line") or ""),
-            )
-            for item in report_states
-        )
         if not review_scopes:
-            review_scopes = {("Unmapped", "")}
+            review_scopes = {("Unmapped", "")} if int(row.get("mr_count") or 0) else set()
         scope_statuses: list[dict[str, object]] = []
         for application, release_line in sorted(
             review_scopes,
@@ -2330,7 +2359,7 @@ def build_review_coverage(
                 item
                 for item in report_states
                 if str(item.get("application") or "Unmapped") == application
-                and str(item.get("release_line") or "") == release_line
+                and (not release_line or str(item.get("release_line") or "") == release_line)
             ]
             if active_jobs:
                 scope_status = "running"
@@ -2406,6 +2435,7 @@ def build_review_coverage(
         "application_progress": application_progress,
         "issues": rows,
         "discovery_errors": discovery.get("discovery_errors") or [],
+        "scope_reconciliation": scope_reconciliation,
     }
 
 
@@ -3740,11 +3770,29 @@ def _workflow_cycle_from_history_entry(
         review_mode = "issue"
     related_mrs = metadata.get("related_merge_requests")
     mr_scope = [item for item in related_mrs if isinstance(item, dict)] if isinstance(related_mrs, list) else []
+    incoming_group_id = str(metadata.get("run_group_id") or "").strip()
+    incoming_stable_fingerprint = str(metadata.get("review_stable_fingerprint") or "").strip()
     for existing_cycle in store.list_cycles(jira_key):
         if str(existing_cycle.get("sprint_id") or "") != sprint_id or existing_cycle.get("cycle_closed_at"):
             continue
         existing_scope = existing_cycle.get("mr_scope_json") or existing_cycle.get("mr_scope") or []
-        if isinstance(existing_scope, list):
+        cycle_detail = store.cycle_detail(str(existing_cycle.get("cycle_id") or "")) or {}
+        groups = cycle_detail.get("run_groups") if isinstance(cycle_detail, dict) else []
+        latest_group = groups[-1] if isinstance(groups, list) and groups else {}
+        latest_group_id = str(latest_group.get("id") or "")
+        latest_stable_fingerprint = str(latest_group.get("stable_fingerprint") or "").strip()
+        # Multiple application reports in one logical Run Group are siblings
+        # and must be unioned. A new Run Group is a fresh live snapshot and
+        # replaces the old scope so moved/closed MRs cannot linger forever.
+        fingerprint_matches = not (
+            incoming_stable_fingerprint
+            and latest_stable_fingerprint
+            and incoming_stable_fingerprint != latest_stable_fingerprint
+        )
+        should_union = not incoming_group_id or (
+            incoming_group_id == latest_group_id and fingerprint_matches
+        )
+        if should_union and isinstance(existing_scope, list):
             by_revision: dict[str, dict[str, object]] = {}
             for item in [*existing_scope, *mr_scope]:
                 if not isinstance(item, dict):
@@ -3824,7 +3872,8 @@ def _sync_workflow_history(limit: int = 10000) -> None:
         else:
             report_scope = ReviewScope("Unmapped", "Unmapped release line")
         if run_group_id:
-            store.create_run_group(
+            requested_group_id = run_group_id
+            group = store.create_run_group(
                 cycle_id=cycle_id,
                 review_mode="issue",
                 status="completed",
@@ -3832,6 +3881,22 @@ def _sync_workflow_history(limit: int = 10000) -> None:
                 run_group_id=run_group_id,
                 created_at=str(entry.get("reviewed_at") or ""),
             )
+            existing_stable = str(group.get("stable_fingerprint") or "").strip()
+            incoming_stable = str(metadata.get("review_stable_fingerprint") or "").strip()
+            if existing_stable and incoming_stable and existing_stable != incoming_stable:
+                # Older report metadata could accidentally reuse a completed
+                # Run Group id for a later re-scan. Preserve the history, but
+                # give the new revision its own logical group so findings do
+                # not aggregate across attempts.
+                group = store.create_run_group(
+                    cycle_id=cycle_id,
+                    review_mode="issue",
+                    status="completed",
+                    stable_fingerprint=incoming_stable,
+                    created_at=str(entry.get("reviewed_at") or ""),
+                )
+                run_group_id = str(group.get("id") or "")
+                metadata["superseded_run_group_id"] = requested_group_id
         store.register_run(
             jira_key=jira_key,
             report_path=str(report_path),
@@ -8045,14 +8110,26 @@ def render_index(user: str = "") -> str:
       box-shadow: 0 24px 80px rgba(0,0,0,.28);
     }
     .issue-review-dialog { grid-template-rows: auto auto 1fr; }
-    .issue-history-tabs { display: flex; gap: 6px; padding: 8px 20px 0; border-bottom: 1px solid var(--line); }
-    .issue-history-tab { min-height: 38px; border: 0; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); }
+    .issue-history-nav {
+      min-width: 0; min-height: 56px; display: flex; align-items: stretch; gap: 18px; padding: 0 20px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(100deg, color-mix(in srgb, var(--accent) 5%, var(--panel)), var(--panel) 62%);
+    }
+    .issue-history-tabs { flex: 0 0 auto; display: flex; align-items: stretch; gap: 6px; padding: 0; border: 0; }
+    .issue-history-tab { min-height: 48px; padding: 0 13px; border: 0; border-radius: 0; background: transparent; color: var(--muted); }
     .issue-history-tab.active { color: var(--accent-strong); border-bottom: 2px solid var(--accent); }
     .issue-history-overview { grid-row: 3; min-width: 0; min-height: 0; overflow: auto; padding: 20px; background: color-mix(in srgb, var(--bg) 55%, var(--panel)); }
     .issue-history-overview[hidden],
     .workflow-body[hidden] { display: none; }
     .sprint-overview-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
-    .sprint-overview-card { display: grid; gap: 12px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 3px 12px rgba(15,23,42,.04); }
+    .sprint-overview-card { position: relative; display: grid; gap: 14px; min-width: 0; overflow: hidden; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: 0 5px 18px rgba(15,23,42,.05); }
+    .sprint-overview-card::before { content: ""; position: absolute; inset: 0 0 auto; height: 3px; background: linear-gradient(90deg, var(--accent), #21a179 58%, transparent); }
+    .sprint-overview-card[data-context="legacy"] { border-style: dashed; background: color-mix(in srgb, #f7f4fc 48%, var(--panel)); box-shadow: none; }
+    .sprint-overview-card[data-context="legacy"]::before { background: linear-gradient(90deg, #8774ad, transparent 65%); }
+    .sprint-overview-eyebrow { margin-bottom: 4px; color: var(--accent-strong); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .sprint-overview-card[data-context="legacy"] .sprint-overview-eyebrow { color: #65548b; }
+    .sprint-overview-note { display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 5%, var(--panel)); color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .sprint-overview-note::before { content: "i"; width: 18px; height: 18px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid currentColor; border-radius: 50%; font-size: 11px; font-weight: 800; }
     .sprint-overview-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
     .sprint-overview-footer button { width: auto; min-width: 148px; }
     .sprint-overview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -8060,7 +8137,7 @@ def render_index(user: str = "") -> str:
     .sprint-overview-head .meta,
     .sprint-overview-footer .meta { font-size: 13px; }
     .sprint-overview-head .count-pill { font-size: 12px; }
-    .sprint-coverage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .sprint-coverage-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
     .sprint-coverage-summary > div { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--line) 72%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--bg) 74%, var(--panel)); }
     .sprint-coverage-summary span { display: block; color: var(--muted); font-size: 12px; }
     .sprint-coverage-summary strong { display: block; margin-top: 3px; font-size: 18px; }
@@ -8088,6 +8165,7 @@ def render_index(user: str = "") -> str:
     .sprint-application-card[data-ready="true"] { border-color: color-mix(in srgb, var(--ok) 42%, var(--line)); background: color-mix(in srgb, var(--ok) 5%, var(--panel)); }
     .sprint-application-card[data-application="Unmapped"] { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); }
     @media (max-width: 1180px) { .sprint-application-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 1100px) { .sprint-coverage-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @media (max-width: 860px) { .sprint-coverage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 660px) { .sprint-application-grid, .sprint-coverage-summary { grid-template-columns: 1fr; } }
     .cycle-history-card > .timeline-card { margin: 10px 0 0 14px; background: color-mix(in srgb, var(--bg) 55%, var(--panel)); }
@@ -8097,6 +8175,20 @@ def render_index(user: str = "") -> str:
       padding: 16px 20px; border-bottom: 1px solid var(--line);
     }
     .workflow-head h2, .workflow-head p { margin: 0; }
+    .issue-context-bar {
+      min-width: 0; margin-left: auto; display: flex; align-items: center; justify-content: flex-end;
+      gap: 9px; padding: 7px 0; border: 0; background: transparent;
+    }
+    .issue-context-bar label { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-weight: 600; }
+    .issue-context-bar select { width: clamp(200px, 20vw, 300px); min-height: 36px; border-color: #b9cee6; background: color-mix(in srgb, var(--accent) 3%, var(--panel)); box-shadow: 0 2px 7px rgba(15,23,42,.04); }
+    .issue-context-summary { min-width: 0; display: flex; align-items: center; gap: 7px; padding-left: 2px; white-space: nowrap; }
+    .issue-context-summary .meta { overflow: hidden; max-width: 190px; text-overflow: ellipsis; }
+    .cycle-context-row { min-width: 0; display: flex; align-items: center; gap: 9px; }
+    .cycle-context-row label { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-weight: 600; }
+    .cycle-context-row select { width: clamp(250px, 34vw, 440px); min-height: 34px; }
+    .status-chip[data-context="live"] { color: #08783f; border-color: #8bc8a8; background: #f2fbf6; }
+    .status-chip[data-context="historical"] { color: #65748a; border-color: #c6cfda; background: #f7f8fa; }
+    .status-chip[data-context="legacy"] { color: #65548b; border-color: #c8bbe4; background: #f7f4fc; }
     .workflow-body { grid-row: 3; min-height: 0; display: grid; grid-template-columns: minmax(340px, 38%) 1fr; }
     .workflow-list-pane { min-height: 0; overflow: auto; padding: 16px; border-right: 1px solid var(--line); }
     .workflow-detail-pane { min-height: 0; overflow: auto; padding: 20px; background: color-mix(in srgb, var(--bg) 55%, var(--panel)); container-name: issue-detail; container-type: inline-size; }
@@ -8130,14 +8222,20 @@ def render_index(user: str = "") -> str:
     }
     .status-chip[data-status="passed"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
     .status-chip[data-status="handling"], .status-chip[data-status="rescan-required"] { color: #b54708; }
+    .status-chip[data-status="awaiting-review"] { color: #175b92; border-color: #a9c8e5; background: #f2f8fd; }
     .severity-chip.critical { color: #b42318; font-weight: 700; }
     .severity-chip.high { color: #c2410c; font-weight: 700; }
     .issue-overview { margin: 0 0 16px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: 0 5px 18px rgba(15, 23, 42, .05); }
-    .issue-review-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 10px 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+    .issue-review-header { display: grid; gap: 13px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+    .issue-review-primary { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 18px; }
+    .issue-review-context { min-width: 0; display: grid; grid-template-columns: minmax(0, auto) minmax(260px, 1fr); align-items: center; gap: 14px; padding-top: 11px; border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent); }
     .issue-review-identity { min-width: 0; }
-    .issue-review-controls { display: grid; justify-items: end; gap: 10px; }
-    .issue-review-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
-    .issue-review-header h2 { margin: 0; font-size: 21px; line-height: 1.34; overflow-wrap: anywhere; }
+    .issue-review-title-line { min-width: 0; display: flex; align-items: center; gap: 9px; }
+    .issue-review-summary-title { max-width: 920px; margin: 5px 0 0; overflow: hidden; color: var(--text); font-size: 18px; font-weight: 700; line-height: 1.38; text-overflow: ellipsis; white-space: nowrap; }
+    .issue-review-controls { min-width: max-content; }
+    .issue-review-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: nowrap; }
+    .issue-review-actions button { min-height: 36px; }
+    .issue-review-header h2 { min-width: 0; margin: 0; font-size: 21px; line-height: 1.34; overflow-wrap: anywhere; }
     .issue-review-header .status-chip { margin-top: 2px; }
     .issue-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
     .issue-hero-copy { min-width: 0; }
@@ -8158,9 +8256,14 @@ def render_index(user: str = "") -> str:
     .metric-ratio { display: flex; justify-content: space-between; gap: 8px; margin-top: 7px; color: var(--muted); font-size: 12px; }
     .metric-bar { position: relative; display: block; width: 100%; height: 6px; min-height: 6px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--line) 70%, transparent); }
     .metric-bar > span { position: absolute; inset: 0 auto 0 0; display: block; width: var(--completion, 0%); max-width: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--ok)); transition: width .25s ease; }
-    .issue-readiness { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--bg) 55%, var(--panel)); }
+    .issue-readiness { display: flex; align-items: center; justify-self: end; gap: 8px; min-width: 0; max-width: 520px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--bg) 55%, var(--panel)); }
     .issue-readiness-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: #d97706; }
     .issue-readiness.ready .issue-readiness-dot { background: var(--ok); }
+    .cycle-empty-state { margin: 14px 0 0; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 13px; padding: 16px; border: 1px dashed #b9cee6; border-radius: 10px; background: linear-gradient(105deg, color-mix(in srgb, var(--accent) 6%, var(--panel)), var(--panel) 70%); }
+    .cycle-empty-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: color-mix(in srgb, var(--accent) 12%, var(--panel)); color: var(--accent-strong); font-size: 20px; }
+    .cycle-empty-copy strong { display: block; font-size: 15px; }
+    .cycle-empty-copy span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .cycle-empty-state button { white-space: nowrap; }
     .metric-summary-card { display: grid; grid-template-rows: repeat(2, minmax(0, 1fr)); padding: 0; }
     .metric-summary-row {
       width: 100%;
@@ -8182,14 +8285,22 @@ def render_index(user: str = "") -> str:
     .metric-summary-row + .metric-summary-row { border-top: 1px solid var(--line); }
     .metric-summary-row strong { flex: 0 0 auto; font-size: 18px; }
     @container issue-detail (max-width: 760px) {
-      .issue-review-header { grid-template-columns: 1fr; }
-      .issue-review-controls { justify-items: start; }
+      .issue-review-primary, .issue-review-context { grid-template-columns: 1fr; }
+      .issue-review-controls { min-width: 0; }
       .issue-review-actions { justify-content: flex-start; }
+      .issue-readiness { justify-self: stretch; max-width: none; }
+      .cycle-context-row { flex-wrap: wrap; }
+      .cycle-context-row select { width: min(100%, 440px); }
       .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cycle-empty-state { grid-template-columns: 42px minmax(0, 1fr); }
+      .cycle-empty-state button { grid-column: 2; justify-self: start; }
     }
     @container issue-detail (max-width: 420px) {
       .metric-grid { grid-template-columns: 1fr; }
       .issue-review-actions > button { flex: 1 1 auto; }
+      .issue-review-summary-title { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+      .cycle-empty-state { grid-template-columns: 1fr; }
+      .cycle-empty-state button { grid-column: 1; }
     }
     .workflow-tabs {
       display: flex;
@@ -8525,9 +8636,13 @@ def render_index(user: str = "") -> str:
     .user-reset-confirmation { margin-top: 12px; }
     .user-reset-confirmation input { margin-top: 7px; }
     @media (max-width: 900px) {
-      .issue-review-header { grid-template-columns: 1fr; }
-      .issue-review-controls { justify-items: start; }
+      .issue-history-nav { align-items: stretch; flex-wrap: wrap; gap: 4px 12px; padding-top: 7px; }
+      .issue-context-bar { flex: 1 1 100%; margin-left: 0; justify-content: flex-start; overflow-x: auto; }
+      .issue-context-bar select { width: min(240px, 55vw); }
+      .issue-review-primary, .issue-review-context { grid-template-columns: 1fr; }
+      .issue-review-controls { min-width: 0; }
       .issue-review-actions { justify-content: flex-start; }
+      .issue-readiness { justify-self: stretch; max-width: none; }
       .workflow-modal { padding: 8px; }
       .workflow-dialog { height: calc(100vh - 16px); }
       .workflow-body { grid-template-columns: 1fr; }
@@ -8692,7 +8807,10 @@ __ADMIN_TRACE_SECTION__
         <div><h2 id="issueReviewTitle">Issues Review History</h2><p class="meta">ECHNL Issue lifecycle, handling, re-scan and Pass readiness.</p></div>
         <div class="actions"><button id="refreshIssueReviewsBtn" class="secondary small-action" type="button">Refresh</button><button id="closeIssueReviewsBtn" class="icon-action" type="button" aria-label="Close">&#x2715;</button></div>
       </div>
-      <div class="issue-history-tabs" role="tablist" aria-label="Issues Review History views"><button id="issueOverviewTab" class="issue-history-tab active" data-issue-review-view="overview" type="button" role="tab" aria-selected="true" aria-controls="issueReviewOverviewPanel">Overview</button><button id="issueListTab" class="issue-history-tab" data-issue-review-view="issues" type="button" role="tab" aria-selected="false" aria-controls="issueReviewIssuesView">Issues</button></div>
+      <div class="issue-history-nav">
+        <div class="issue-history-tabs" role="tablist" aria-label="Issues Review History views"><button id="issueOverviewTab" class="issue-history-tab active" data-issue-review-view="overview" type="button" role="tab" aria-selected="true" aria-controls="issueReviewOverviewPanel">Overview</button><button id="issueListTab" class="issue-history-tab" data-issue-review-view="issues" type="button" role="tab" aria-selected="false" aria-controls="issueReviewIssuesView">Issues</button></div>
+        <div class="issue-context-bar" aria-label="Review history context"><label for="issueReviewSprintSelect">Sprint view</label><select id="issueReviewSprintSelect" aria-label="Select Sprint context"><option value="__current__">Current cycles</option></select><div id="issueReviewContextSummary" class="issue-context-summary"><span class="status-chip" data-context="live">Live</span><span class="meta">Current cycles only</span></div></div>
+      </div>
       <section id="issueReviewOverviewPanel" class="issue-history-overview" role="tabpanel"><div class="markdown-preview empty">Loading Sprint overview...</div></section>
       <div id="issueReviewIssuesView" class="workflow-body" role="tabpanel" hidden>
         <section class="workflow-list-pane">
@@ -10303,7 +10421,7 @@ __ADMIN_TRACE_SECTION__
         const data = await fetchJson('/api/review-coverage-jobs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jira, sprint, jira_filter: jiraFilter })
+          body: JSON.stringify({ jira, sprint, jira_filter: jiraFilter, force_refresh: true })
         });
         const job = data.job || {};
         applyCoverageJob(job, { reused: Boolean(data.reused) });
@@ -12398,8 +12516,56 @@ function jiraKeyFromReportPath(reportPath) {
     let currentJiraDraft = null;
     let atlaskitAdfUnmount = null;
     let issueReviewView = 'overview';
-    let issueReviewSprintFilter = '';
+    let issueReviewSprintFilter = '__current__';
     let issueReviewApplicationFilter = '';
+    let selectedIssueReviewCycle = '';
+
+    function issueSprintKey(cycle = {}) {
+      const sprintId = String(cycle.sprint_id || 'legacy');
+      const sprintName = String(cycle.sprint_name || (sprintId === 'legacy' ? 'Legacy / Unknown Sprint' : sprintId));
+      return `${sprintId}|${sprintName}`;
+    }
+
+    function issueCycleIsLive(issue = {}, cycle = {}) {
+      const currentCycleId = String(issue.current_cycle_id || issue.current_cycle?.cycle_id || '');
+      return Boolean(currentCycleId)
+        && String(cycle.cycle_id || '') === currentCycleId
+        && !cycle.cycle_closed_at
+        && String(cycle.sprint_id || 'legacy') !== 'legacy';
+    }
+
+    function issueCycleMatchesFilter(issue = {}, cycle = {}) {
+      if (issueReviewSprintFilter === '__current__') return issueCycleIsLive(issue, cycle);
+      if (issueReviewSprintFilter === '__all__') return true;
+      return issueSprintKey(cycle) === issueReviewSprintFilter;
+    }
+
+    function syncIssueReviewContextControls() {
+      const select = $('issueReviewSprintSelect');
+      if (!select) return;
+      const sprints = new Map();
+      issueReviews.forEach(issue => (issue.cycles || []).forEach(cycle => {
+        const key = issueSprintKey(cycle);
+        if (!sprints.has(key)) sprints.set(key, cycle);
+      }));
+      const hasLiveCycles = issueReviews.some(issue => (issue.cycles || []).some(cycle => issueCycleIsLive(issue, cycle)));
+      if (issueReviewSprintFilter === '__current__' && !hasLiveCycles) issueReviewSprintFilter = '__all__';
+      select.innerHTML = `<option value="__current__" ${hasLiveCycles ? '' : 'disabled'}>Current cycles</option><option value="__all__">All sprints &amp; history</option>` + [...sprints.entries()]
+        .sort((left, right) => {
+          if (String(left[1].sprint_id || '') === 'legacy') return 1;
+          if (String(right[1].sprint_id || '') === 'legacy') return -1;
+          return String(right[1].sprint_id || '').localeCompare(String(left[1].sprint_id || ''), undefined, {numeric:true});
+        })
+        .map(([key, cycle]) => `<option value="${escapeHtml(key)}">${escapeHtml(cycle.sprint_name || cycle.sprint_id || 'Legacy / Unknown Sprint')} · ${escapeHtml(statusLabel(cycle.sprint_state || 'unknown'))}</option>`).join('');
+      select.value = issueReviewSprintFilter;
+      const selected = sprints.get(issueReviewSprintFilter);
+      const currentOnly = issueReviewSprintFilter === '__current__';
+      const allHistory = issueReviewSprintFilter === '__all__';
+      const context = currentOnly ? 'live' : (allHistory ? 'historical' : (String(selected?.sprint_id || '') === 'legacy' ? 'legacy' : (selected?.cycle_closed_at ? 'historical' : 'live')));
+      const contextLabel = currentOnly ? 'Live' : (allHistory ? 'All history' : (context === 'legacy' ? 'Legacy' : (context === 'historical' ? 'Historical' : 'Live Sprint')));
+      const contextMeta = currentOnly ? 'Current cycles only' : (allHistory ? 'Live and historical cycles' : (selected?.sprint_name || selected?.sprint_id || 'Cycle-scoped statistics'));
+      $('issueReviewContextSummary').innerHTML = `<span class="status-chip" data-context="${context}">${contextLabel}</span><span class="meta">${escapeHtml(contextMeta)}</span>`;
+    }
 
     function setIssueReviewView(view) {
       issueReviewView = view === 'issues' ? 'issues' : 'overview';
@@ -12418,7 +12584,7 @@ function jiraKeyFromReportPath(reportPath) {
       const groups = new Map();
       issueReviews.forEach(issue => {
         const cycles = (issue.cycles || []).length ? issue.cycles : [issue.current_cycle || {}];
-        cycles.forEach(cycle => {
+        cycles.filter(cycle => issueCycleMatchesFilter(issue, cycle)).forEach(cycle => {
           const sprintId = String(cycle.sprint_id || 'legacy');
           const sprintName = String(cycle.sprint_name || (sprintId === 'legacy' ? 'Legacy / Unknown Sprint' : sprintId));
           const key = `${sprintId}|${sprintName}`;
@@ -12426,22 +12592,20 @@ function jiraKeyFromReportPath(reportPath) {
           groups.get(key).entries.push({issue, cycle});
         });
       });
-      const rows = [...groups.values()].sort((a, b) => b.sprintId.localeCompare(a.sprintId, undefined, {numeric:true}));
+      const rows = [...groups.values()]
+        .sort((a, b) => b.sprintId.localeCompare(a.sprintId, undefined, {numeric:true}));
       $('issueReviewOverviewPanel').innerHTML = rows.length ? `<div class="sprint-overview-grid">${rows.map(group => {
         const entries = group.entries;
         const issueKeys = new Set(entries.map(({issue}) => issue.jira_key));
         const total = issueKeys.size;
         const passed = new Set(entries.filter(({issue, cycle}) => cycle.pass_status === 'passed' || (issue.current_cycle_id === cycle.cycle_id && issue.status === 'passed')).map(({issue}) => issue.jira_key)).size;
-        const blockers = entries.reduce((sum, {issue, cycle}) => sum + (issue.current_cycle_id === cycle.cycle_id ? Number(((issue.pass_readiness || {}).pending_blockers || []).length) : 0), 0);
-        const pending = entries.reduce((sum, {issue, cycle}) => sum + (issue.current_cycle_id === cycle.cycle_id ? Number((issue.handling_counts || {}).pending || 0) : 0), 0);
+        const blockers = entries.reduce((sum, {cycle}) => sum + Number((((cycle.pass_readiness || {}).pending_blockers) || []).length), 0);
+        const pending = entries.reduce((sum, {cycle}) => sum + Number((cycle.handling_counts || {}).pending || 0), 0);
         const snapshots = entries.reduce((sum, {cycle}) => sum + Number(cycle.review_snapshot_count || 0), 0);
         const perApplication = new Map();
         const coverageByIssue = new Map([...issueKeys].map(key => [key, []]));
         entries.forEach(({issue, cycle}) => {
           let progress = Array.isArray(cycle.application_progress) ? cycle.application_progress : [];
-          if (!progress.length) {
-            progress = [{application:'Unmapped', state: issue.latest_run_id ? 'handling' : 'without-report', report_count:issue.latest_run_id ? 1 : 0}];
-          }
           progress.forEach(item => {
             const scopeLabel = String(item.scope_label || item.application || 'Unmapped');
             if (!perApplication.has(scopeLabel)) perApplication.set(scopeLabel, []);
@@ -12451,8 +12615,9 @@ function jiraKeyFromReportPath(reportPath) {
           });
         });
         const scopeTotal = [...perApplication.values()].reduce((sum, scoped) => sum + new Set(scoped.map(item => item.issue.jira_key)).size, 0);
-        const coverageCounts = {full:0, partial:0, without:0, unmapped:0};
+        const coverageCounts = {full:0, partial:0, without:0, unmapped:0, noScope:0};
         coverageByIssue.forEach(progress => {
+          if (!progress.length) { coverageCounts.noScope += 1; return; }
           const mapped = progress.filter(item => String(item.application || 'Unmapped') !== 'Unmapped');
           const unresolved = !mapped.length || progress.some(item => String(item.application || 'Unmapped') === 'Unmapped');
           if (unresolved) { coverageCounts.unmapped += 1; return; }
@@ -12467,7 +12632,10 @@ function jiraKeyFromReportPath(reportPath) {
           : name === 'DPS9' ? 3
           : name === 'DPS11' ? 4
           : name.startsWith('Unmapped') ? 6 : 5;
-        const applications = [...new Set([...defaultApplications, ...perApplication.keys()])].sort((left, right) => {
+        const applications = [...new Set([
+          ...(group.sprintId === 'legacy' ? [] : defaultApplications),
+          ...perApplication.keys(),
+        ])].sort((left, right) => {
           const rank = applicationRank(left) - applicationRank(right);
           return rank || left.localeCompare(right, undefined, {numeric:true});
         });
@@ -12499,15 +12667,23 @@ function jiraKeyFromReportPath(reportPath) {
             </span>
           </button>`;
         }).join('');
-        return `<article class="sprint-overview-card"><div class="sprint-overview-head"><div><strong>${escapeHtml(group.sprintName)}</strong><div class="meta">Sprint ${escapeHtml(group.sprintId)} · ${escapeHtml(statusLabel(group.state))} · Application cards count scopes; this summary counts unique Issues.</div></div><span class="count-pill">${total} unique issues · ${scopeTotal} application scopes</span></div><div class="sprint-coverage-summary" aria-label="Unique Issue report coverage"><div><span>Fully covered</span><strong>${coverageCounts.full}</strong></div><div><span>Partially covered</span><strong>${coverageCounts.partial}</strong></div><div><span>Without reports</span><strong>${coverageCounts.without}</strong></div><div><span>Unmapped</span><strong>${coverageCounts.unmapped}</strong></div></div><div class="sprint-overview-metrics"><div class="sprint-overview-metric"><span class="meta">Review Pass</span><strong>${passed}/${total}</strong></div><div class="sprint-overview-metric"><span class="meta">Blockers</span><strong>${blockers}</strong></div><div class="sprint-overview-metric"><span class="meta">Pending handling</span><strong>${pending}</strong></div></div><div class="sprint-application-grid">${appCards}</div><div class="sprint-overview-footer"><div class="meta">${snapshots} review snapshot(s) · ${entries.length} cycle membership(s)</div><button class="secondary" type="button" data-open-sprint="${escapeHtml(group.key)}" data-sprint-label="${escapeHtml(`${group.sprintName} (${group.sprintId})`)}">View sprint issues</button></div></article>`;
+        const contextKind = group.sprintId === 'legacy' ? 'legacy' : 'live';
+        const contextNote = contextKind === 'legacy'
+          ? '<div class="sprint-overview-note">Imported evidence is retained for audit only and is excluded from current Sprint release readiness.</div>'
+          : '<div class="sprint-overview-note">Every required application scope must have a current report before this Sprint can reach Review Pass.</div>';
+        return `<article class="sprint-overview-card" data-context="${contextKind}"><div class="sprint-overview-head"><div><div class="sprint-overview-eyebrow">${contextKind === 'legacy' ? 'Historical archive' : 'Live delivery'}</div><strong>${escapeHtml(group.sprintName)}</strong><div class="meta">Sprint ${escapeHtml(group.sprintId)} · ${escapeHtml(statusLabel(group.state))} · Unique Issues and required application scopes are counted separately.</div></div><span class="count-pill">${total} issues · ${scopeTotal} required scopes</span></div>${contextNote}<div class="sprint-coverage-summary" aria-label="Unique Issue report coverage"><div><span>Fully covered</span><strong>${coverageCounts.full}</strong></div><div><span>Partially covered</span><strong>${coverageCounts.partial}</strong></div><div><span>Without reports</span><strong>${coverageCounts.without}</strong></div><div><span>Unmapped</span><strong>${coverageCounts.unmapped}</strong></div><div><span>No required scope</span><strong>${coverageCounts.noScope}</strong></div></div><div class="sprint-overview-metrics"><div class="sprint-overview-metric"><span class="meta">Review Pass</span><strong>${passed}/${total}</strong></div><div class="sprint-overview-metric"><span class="meta">Blockers</span><strong>${blockers}</strong></div><div class="sprint-overview-metric"><span class="meta">Pending handling</span><strong>${pending}</strong></div></div><div class="sprint-application-grid">${appCards}</div><div class="sprint-overview-footer"><div class="meta">${snapshots} review snapshot(s) · ${entries.length} cycle membership(s)</div><button class="secondary" type="button" data-open-sprint="${escapeHtml(group.key)}" data-sprint-label="${escapeHtml(`${group.sprintName} (${group.sprintId})`)}">View sprint issues</button></div></article>`;
       }).join('')}</div>` : '<div class="markdown-preview empty">No persisted Sprint review data is available.</div>';
       $('issueReviewOverviewPanel').querySelectorAll('[data-open-sprint]').forEach(button => button.addEventListener('click', () => {
         issueReviewSprintFilter = button.dataset.openSprint || '';
         issueReviewApplicationFilter = button.dataset.application || '';
+        selectedIssueReview = null;
+        selectedIssueReviewCycle = '';
         $('issueReviewSearch').value = '';
         $('issueReviewScope').hidden = false;
         $('issueReviewScope').textContent = `${button.dataset.sprintLabel || 'Sprint'}${issueReviewApplicationFilter ? ` · ${issueReviewApplicationFilter}` : ''}`;
+        syncIssueReviewContextControls();
         setIssueReviewView('issues');
+        $('issueReviewDetail').innerHTML = '<div class="markdown-preview empty">Select an Issue in this Sprint to inspect its Cycle-scoped Review history.</div>';
       }));
     }
 
@@ -12525,6 +12701,7 @@ function jiraKeyFromReportPath(reportPath) {
       try {
         const data = await fetchJson('/api/issue-reviews');
         issueReviews = data.issues || [];
+        syncIssueReviewContextControls();
         renderIssueReviewOverview();
         renderIssueReviews();
         if (selectedIssueReview) await loadIssueReviewDetail(selectedIssueReview);
@@ -12603,10 +12780,9 @@ function jiraKeyFromReportPath(reportPath) {
       const query = ($('issueReviewSearch').value || '').trim().toLowerCase();
       const rows = issueReviews.filter(item => {
         const cycles = (item.cycles || []).length ? item.cycles : [item.current_cycle || {}];
-        const inSprint = !issueReviewSprintFilter || cycles.some(cycle => `${cycle.sprint_id || 'legacy'}|${cycle.sprint_name || (cycle.sprint_id === 'legacy' ? 'Legacy / Unknown Sprint' : cycle.sprint_id || 'legacy')}` === issueReviewSprintFilter);
+        const inSprint = cycles.some(cycle => issueCycleMatchesFilter(item, cycle));
         const inApplication = !issueReviewApplicationFilter || cycles.some(cycle => {
-          const cycleKey = `${cycle.sprint_id || 'legacy'}|${cycle.sprint_name || (cycle.sprint_id === 'legacy' ? 'Legacy / Unknown Sprint' : cycle.sprint_id || 'legacy')}`;
-          if (issueReviewSprintFilter && cycleKey !== issueReviewSprintFilter) return false;
+          if (!issueCycleMatchesFilter(item, cycle)) return false;
           const progress = Array.isArray(cycle.application_progress) ? cycle.application_progress : [];
           if (!progress.length) return issueReviewApplicationFilter === 'Unmapped';
           return progress.some(entry => String(entry.scope_label || entry.application || 'Unmapped') === issueReviewApplicationFilter);
@@ -12620,30 +12796,32 @@ function jiraKeyFromReportPath(reportPath) {
         return;
       }
       $('issueReviewList').innerHTML = `<div class="issue-review-cards">${rows.map(item => {
-        const counts = item.handling_counts || {};
         const selected = selectedIssueReview === item.jira_key ? ' selected' : '';
         let scopeStatus = '';
         if (issueReviewApplicationFilter) {
           const cycles = (item.cycles || []).length ? item.cycles : [item.current_cycle || {}];
           for (const cycle of cycles) {
-            const cycleKey = `${cycle.sprint_id || 'legacy'}|${cycle.sprint_name || (cycle.sprint_id === 'legacy' ? 'Legacy / Unknown Sprint' : cycle.sprint_id || 'legacy')}`;
-            if (issueReviewSprintFilter && cycleKey !== issueReviewSprintFilter) continue;
+            if (!issueCycleMatchesFilter(item, cycle)) continue;
             const progress = Array.isArray(cycle.application_progress) ? cycle.application_progress : [];
             const matched = progress.find(entry => String(entry.scope_label || entry.application || 'Unmapped') === issueReviewApplicationFilter);
             if (matched) { scopeStatus = String(matched.state || ''); break; }
           }
         }
-        const displayedStatus = scopeStatus || item.status;
-        return `<article class="issue-review-card${selected}" data-jira="${escapeHtml(item.jira_key)}" role="button" tabindex="0" aria-label="Open ${escapeHtml(item.jira_key)} Issue Review">
+        const cycles = (item.cycles || []).length ? item.cycles : [item.current_cycle || {}];
+        const cardCycle = cycles.find(cycle => issueCycleMatchesFilter(item, cycle)) || item.current_cycle || cycles[0] || {};
+        const cycleProgress = Array.isArray(cardCycle.application_progress) ? cardCycle.application_progress : [];
+        const displayedStatus = scopeStatus || (cycleProgress.length ? (cardCycle.pass_status || item.status) : 'no-review-scope');
+        const cycleCounts = cardCycle.handling_counts || {fixed:0, 'follow-up':0, 'not-issue':0, pending:0};
+        return `<article class="issue-review-card${selected}" data-jira="${escapeHtml(item.jira_key)}" data-cycle="${escapeHtml(cardCycle.cycle_id || '')}" role="button" tabindex="0" aria-label="Open ${escapeHtml(item.jira_key)} Issue Review">
           <div class="issue-review-card-head"><strong class="issue-review-key">${escapeHtml(item.jira_key)}</strong><span class="status-chip" data-status="${escapeHtml(displayedStatus)}">${escapeHtml(statusLabel(displayedStatus))}</span></div>
           <div class="issue-review-summary">${escapeHtml(item.summary || 'No summary')}</div>
-          <div class="meta">${escapeHtml(item.responsible || '-')} · Run ${escapeHtml(item.run_number || '-')} · ${escapeHtml(item.finding_count || 0)} findings${scopeStatus && scopeStatus !== item.status ? ` · Issue ${escapeHtml(statusLabel(item.status))}` : ''}</div>
-          <div class="issue-review-progress"><span class="handling-chip">Fixed ${counts.fixed || 0}</span><span class="handling-chip">Jira ${counts['follow-up'] || 0}</span><span class="handling-chip">Not issue ${counts['not-issue'] || 0}</span><span class="handling-chip">Pending ${counts.pending || 0}</span></div>
+          <div class="meta">${escapeHtml(item.responsible || '-')} · Cycle ${escapeHtml(cardCycle.cycle_number || '-')} · Run ${escapeHtml(cardCycle.run_number || '-')} · ${escapeHtml(cardCycle.finding_count || 0)} findings · ${cycleProgress.length} scope(s)${cardCycle.cycle_closed_at ? ' · Historical' : ''}</div>
+          <div class="issue-review-progress"><span class="handling-chip">Fixed ${cycleCounts.fixed || 0}</span><span class="handling-chip">Jira ${cycleCounts['follow-up'] || 0}</span><span class="handling-chip">Not issue ${cycleCounts['not-issue'] || 0}</span><span class="handling-chip">Pending ${cycleCounts.pending || 0}</span></div>
           <div class="issue-review-card-foot"><span class="meta">Last updated</span><time class="meta issue-review-updated">${escapeHtml(formatDateTime(item.updated_at))}</time></div>
         </article>`;
       }).join('')}</div>`;
       document.querySelectorAll('.issue-review-card').forEach(card => {
-        const open = () => loadIssueReviewDetail(card.dataset.jira || '');
+        const open = () => loadIssueReviewDetail(card.dataset.jira || '', card.dataset.cycle || '');
         card.addEventListener('click', open);
         card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
       });
@@ -12659,15 +12837,18 @@ function jiraKeyFromReportPath(reportPath) {
       return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
     }
 
-    async function loadIssueReviewDetail(jiraKey) {
+    async function loadIssueReviewDetail(jiraKey, cycleId = selectedIssueReviewCycle) {
       setIssueReviewView('issues');
       selectedIssueReview = jiraKey;
+      selectedIssueReviewCycle = cycleId || '';
       document.querySelectorAll('.issue-review-card').forEach(card => {
         card.classList.toggle('selected', card.dataset.jira === jiraKey);
       });
       $('issueReviewDetail').innerHTML = '<div class="markdown-preview empty">Loading Issue Review...</div>';
       try {
-        const data = await fetchJson(`/api/issue-reviews/${encodeURIComponent(jiraKey)}`);
+        const query = selectedIssueReviewCycle ? `?cycle_id=${encodeURIComponent(selectedIssueReviewCycle)}` : '';
+        const data = await fetchJson(`/api/issue-reviews/${encodeURIComponent(jiraKey)}${query}`);
+        selectedIssueReviewCycle = String((data.selected_cycle || {}).cycle_id || '');
         renderIssueReviewDetail(data);
       } catch (error) {
         $('issueReviewDetail').innerHTML = `<div class="status error">${escapeHtml(error.message)}</div>`;
@@ -12684,9 +12865,20 @@ function jiraKeyFromReportPath(reportPath) {
       const discussions = data.discussions || [];
       const drafts = data.drafts || [];
       const cycles = data.cycles || [];
+      const selectedCycle = data.selected_cycle || cycles.find(cycle => String(cycle.cycle_id || '') === selectedIssueReviewCycle) || {};
+      const isCurrentCycle = String(selectedCycle.cycle_id || '') === String(issue.current_cycle_id || '') && !selectedCycle.cycle_closed_at;
+      const contextKind = String(selectedCycle.sprint_id || '') === 'legacy' ? 'legacy' : (isCurrentCycle ? 'live' : 'historical');
+      const hasCompletedRun = Boolean(latest && latest.id);
+      const previousCycleWithRun = cycles.find(cycle =>
+        String(cycle.cycle_id || '') !== String(selectedCycle.cycle_id || '')
+        && Number(cycle.run_number || 0) > 0
+      );
+      const selectedScopeProgress = Array.isArray(selectedCycle.application_progress) ? selectedCycle.application_progress : [];
+      const selectedScopeLabels = selectedScopeProgress.map(item => String(item.scope_label || item.application || 'Unmapped'));
+      const cycleStatus = hasCompletedRun ? (selectedCycle.pass_status || issue.status) : 'awaiting-review';
       const snapshots = data.review_snapshots || [];
-      const canPass = Boolean((data.permissions || {}).manual_pass);
-      const canReview = Boolean((data.permissions || {}).run_issue_review);
+      const canPass = Boolean((data.permissions || {}).manual_pass) && isCurrentCycle;
+      const canReview = Boolean((data.permissions || {}).run_issue_review) && isCurrentCycle;
       const jiraUrl = String(data.jira_url || '');
       const severityProgress = level => {
         const scoped = findings.filter(item => String(item.severity || '').toLowerCase() === level.toLowerCase());
@@ -12697,7 +12889,13 @@ function jiraKeyFromReportPath(reportPath) {
       const criticalProgress = severityProgress('Critical');
       const highProgress = severityProgress('High');
       const mediumProgress = severityProgress('Medium');
-      const cycleHistory = cycles.length ? cycles.map(cycle => {
+      const metricsMarkup = hasCompletedRun ? `<div class="metric-grid">
+          <button class="metric-card" type="button" data-jump-severity="critical" ${(severity.Critical || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">Critical</span><strong>${severity.Critical || 0}</strong></span><span class="metric-ratio"><span>${criticalProgress.handled} handled / ${criticalProgress.unhandled} unhandled</span><b>${criticalProgress.percent}%</b></span><span class="metric-bar" aria-label="Critical ${criticalProgress.percent}% handled"><span style="--completion:${criticalProgress.percent}%"></span></span></button>
+          <button class="metric-card" type="button" data-jump-severity="high" ${(severity.High || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">High</span><strong>${severity.High || 0}</strong></span><span class="metric-ratio"><span>${highProgress.handled} handled / ${highProgress.unhandled} unhandled</span><b>${highProgress.percent}%</b></span><span class="metric-bar" aria-label="High ${highProgress.percent}% handled"><span style="--completion:${highProgress.percent}%"></span></span></button>
+          <button class="metric-card" type="button" data-jump-severity="medium" ${(severity.Medium || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">Medium</span><strong>${severity.Medium || 0}</strong></span><span class="metric-ratio"><span>${mediumProgress.handled} handled / ${mediumProgress.unhandled} unhandled</span><b>${mediumProgress.percent}%</b></span><span class="metric-bar" aria-label="Medium ${mediumProgress.percent}% handled"><span style="--completion:${mediumProgress.percent}%"></span></span></button>
+          <div class="metric-card metric-summary-card"><div class="metric-summary-row"><span class="meta">Manager exceptions</span><strong>${readiness.manager_exceptions || 0}</strong></div><button class="metric-summary-row" type="button" data-jump-blocker="true" ${(readiness.pending_blockers || []).length ? '' : 'disabled'}><span class="meta">Remaining blockers</span><strong>${(readiness.pending_blockers || []).length}</strong></button></div>
+        </div>` : `<div class="cycle-empty-state" role="status"><div class="cycle-empty-icon" aria-hidden="true">↻</div><div class="cycle-empty-copy"><strong>No Review Run in this Cycle</strong><span>${selectedScopeLabels.length ? `${selectedScopeLabels.length} required scope(s): ${escapeHtml(selectedScopeLabels.join(' · '))}.` : 'No review-required application scope is currently available.'} Historical reports are not counted here.</span></div>${previousCycleWithRun ? `<button class="secondary small-action" type="button" data-open-history-cycle="${escapeHtml(previousCycleWithRun.cycle_id || '')}">View previous Cycle</button>` : ''}</div>`;
+      const cycleHistory = selectedCycle.cycle_id ? [selectedCycle].map(cycle => {
         const cycleRuns = runs.filter(run => String(run.cycle_id || '') === String(cycle.cycle_id || ''));
         const cycleSnapshots = snapshots.filter(snapshot => String(snapshot.cycle_id || '') === String(cycle.cycle_id || ''));
         const runCards = cycleRuns.length ? cycleRuns.map(run => `<div class="timeline-card"><strong>Run ${escapeHtml(run.run_number)}</strong><div class="meta">Run Group ${escapeHtml(run.run_group_id || '-')} · Cycle ${escapeHtml(cycle.cycle_number || '-')} · ${escapeHtml(formatDateTime(run.created_at))}</div><div class="meta">${escapeHtml(run.conclusion || 'Completed')} · ${escapeHtml(run.report_path || '')}</div><div>${(run.findings || []).filter(item => item.lineage_state === 'new').length} New · ${(run.findings || []).filter(item => item.lineage_state === 'persisting').length} Persisting</div></div>`).join('') : '<div class="meta">No Review Runs in this Cycle.</div>';
@@ -12709,16 +12907,20 @@ function jiraKeyFromReportPath(reportPath) {
       )));
       $('issueReviewDetail').innerHTML = `
         <section class="issue-overview" aria-label="Issue review overview">
-        <header class="issue-review-header"><div class="issue-review-identity"><div class="issue-hero-title-row"><h2>${jiraUrl ? `<a class="jira-issue-link" href="${escapeHtml(jiraUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(issue.jira_key)} in Jira (new tab)">${escapeHtml(issue.jira_key)} <span aria-hidden="true">↗</span></a>` : escapeHtml(issue.jira_key)} · ${escapeHtml(issue.summary || 'Issue Review')}</h2><span class="info-hint"><button class="information-icon" type="button" aria-label="Issue overview guidance" aria-expanded="false" aria-controls="issueOverviewHintPopover">i</button><span id="issueOverviewHintPopover" class="information-hint-popover" role="tooltip" hidden>Metrics use the latest logical Review Run. Click a severity card to jump to its first Problem.</span></span></div><div class="meta issue-hero-meta"><span>Responsible: ${escapeHtml(issue.responsible || '-')}</span><span>Latest Run ${escapeHtml(latest.run_number || '-')}</span><span>Updated ${escapeHtml(formatDateTime(issue.updated_at))}</span></div></div><div class="issue-review-controls"><div class="issue-review-actions"><span class="status-chip" data-status="${escapeHtml(issue.status)}">${escapeHtml(statusLabel(issue.status))}</span>${canReview ? '<button id="issueRescanBtn" class="secondary" type="button">Re-scan Issue</button>' : ''}${canPass ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : 'disabled'}>Manual Pass</button>` : ''}</div><div class="issue-readiness ${readiness.ready ? 'ready' : ''}" role="status"><span class="issue-readiness-dot" aria-hidden="true"></span><span class="meta">${escapeHtml(readiness.message || '')}</span></div></div></header>
-        <div class="metric-grid">
-          <button class="metric-card" type="button" data-jump-severity="critical" ${(severity.Critical || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">Critical</span><strong>${severity.Critical || 0}</strong></span><span class="metric-ratio"><span>${criticalProgress.handled} handled / ${criticalProgress.unhandled} unhandled</span><b>${criticalProgress.percent}%</b></span><span class="metric-bar" aria-label="Critical ${criticalProgress.percent}% handled"><span style="--completion:${criticalProgress.percent}%"></span></span></button>
-          <button class="metric-card" type="button" data-jump-severity="high" ${(severity.High || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">High</span><strong>${severity.High || 0}</strong></span><span class="metric-ratio"><span>${highProgress.handled} handled / ${highProgress.unhandled} unhandled</span><b>${highProgress.percent}%</b></span><span class="metric-bar" aria-label="High ${highProgress.percent}% handled"><span style="--completion:${highProgress.percent}%"></span></span></button>
-          <button class="metric-card" type="button" data-jump-severity="medium" ${(severity.Medium || 0) ? '' : 'disabled'}><span class="metric-card-head"><span class="meta">Medium</span><strong>${severity.Medium || 0}</strong></span><span class="metric-ratio"><span>${mediumProgress.handled} handled / ${mediumProgress.unhandled} unhandled</span><b>${mediumProgress.percent}%</b></span><span class="metric-bar" aria-label="Medium ${mediumProgress.percent}% handled"><span style="--completion:${mediumProgress.percent}%"></span></span></button>
-          <div class="metric-card metric-summary-card"><div class="metric-summary-row"><span class="meta">Manager exceptions</span><strong>${readiness.manager_exceptions || 0}</strong></div><button class="metric-summary-row" type="button" data-jump-blocker="true" ${(readiness.pending_blockers || []).length ? '' : 'disabled'}><span class="meta">Remaining blockers</span><strong>${(readiness.pending_blockers || []).length}</strong></button></div>
-        </div>
+        <header class="issue-review-header">
+          <div class="issue-review-primary">
+            <div class="issue-review-identity"><div class="issue-review-title-line"><h2>${jiraUrl ? `<a class="jira-issue-link" href="${escapeHtml(jiraUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(issue.jira_key)} in Jira (new tab)">${escapeHtml(issue.jira_key)} <span aria-hidden="true">↗</span></a>` : escapeHtml(issue.jira_key)}</h2><span class="info-hint"><button class="information-icon" type="button" aria-label="Issue overview guidance" aria-expanded="false" aria-controls="issueOverviewHintPopover">i</button><span id="issueOverviewHintPopover" class="information-hint-popover" role="tooltip" hidden>Every status, metric and action uses the selected Cycle only. Historical Runs stay available from the Cycle selector.</span></span></div><p class="issue-review-summary-title" title="${escapeHtml(issue.summary || 'Issue Review')}">${escapeHtml(issue.summary || 'Issue Review')}</p><div class="meta issue-hero-meta"><span>Responsible: ${escapeHtml(issue.responsible || '-')}</span><span>${hasCompletedRun ? `Run ${escapeHtml(latest.run_number || '-')}` : 'No Run in this Cycle'}</span><span>Updated ${escapeHtml(formatDateTime(selectedCycle.updated_at || issue.updated_at))}</span></div></div>
+            <div class="issue-review-controls"><div class="issue-review-actions"><span class="status-chip" data-status="${escapeHtml(cycleStatus)}">${escapeHtml(statusLabel(cycleStatus))}</span>${canReview ? '<button id="issueRescanBtn" class="secondary" type="button">Re-scan Issue</button>' : ''}${canPass ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : 'disabled'}>Manual Pass</button>` : ''}</div></div>
+          </div>
+          <div class="issue-review-context">
+            <div class="cycle-context-row"><label for="issueReviewCycleSelect">Delivery Cycle</label><select id="issueReviewCycleSelect">${cycles.map(cycle => `<option value="${escapeHtml(cycle.cycle_id || '')}" ${String(cycle.cycle_id || '') === String(selectedCycle.cycle_id || '') ? 'selected' : ''}>Cycle ${escapeHtml(cycle.cycle_number || '-')} · ${escapeHtml(cycle.sprint_name || cycle.sprint_id || 'Legacy')} · ${cycle.cycle_closed_at ? 'Historical' : 'Current'}</option>`).join('')}</select><span class="status-chip" data-context="${contextKind}">${contextKind === 'live' ? 'Live Cycle' : (contextKind === 'legacy' ? 'Legacy Cycle' : 'Historical · read-only')}</span></div>
+            <div class="issue-readiness ${readiness.ready ? 'ready' : ''}" role="status"><span class="issue-readiness-dot" aria-hidden="true"></span><span class="meta">${escapeHtml(readiness.message || '')}</span></div>
+          </div>
+        </header>
+        ${metricsMarkup}
         </section>
         <div class="workflow-tabs" role="tablist" aria-label="Issue Review details"><button class="workflow-tab active" type="button" role="tab" aria-selected="true" aria-controls="workflowProblemsPanel" data-workflow-tab="problems">Problems</button><button class="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflowDiscussPanel" data-workflow-tab="discuss">Discuss (${discussions.length})</button><button class="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflowHistoryPanel" data-workflow-tab="history">History (${runs.length})</button><button class="workflow-tab" type="button" role="tab" aria-selected="false" aria-controls="workflowPendingPanel" data-workflow-tab="pending">Pending Jira (${drafts.length})</button></div>
-        <section id="workflowProblemsPanel" class="workflow-section" role="tabpanel" data-workflow-panel="problems"><h3 class="workflow-section-title">Problem list · Run ${escapeHtml(latest.run_number || '-')}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role, pendingBlockerIds)).join('') : '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>'}</section>
+        <section id="workflowProblemsPanel" class="workflow-section" role="tabpanel" data-workflow-panel="problems"><h3 class="workflow-section-title">Problem list · ${hasCompletedRun ? `Run ${escapeHtml(latest.run_number || '-')}` : 'Awaiting Review'}</h3>${findings.length ? findings.map(finding => renderWorkflowFinding(finding, data.role, pendingBlockerIds)).join('') : (hasCompletedRun ? '<div class="markdown-preview empty">No findings in the latest Run. This Issue is ready for Leader review.</div>' : '<div class="markdown-preview empty">No current-Cycle report exists yet. Run the Issue review to create an authoritative report; historical findings are intentionally not shown here.</div>')}</section>
         <section id="workflowDiscussPanel" class="workflow-section" role="tabpanel" data-workflow-panel="discuss" hidden><h3 class="workflow-section-title">Discuss</h3><div>${discussions.length ? discussions.map(item => `<div class="discussion-card"><strong>${escapeHtml(item.author)}</strong><span class="meta"> · ${escapeHtml(formatDateTime(item.created_at))}</span><p>${escapeHtml(item.message)}</p></div>`).join('') : '<div class="meta">No discussion yet.</div>'}</div><div class="finding-actions"><label for="issueDiscussionInput">Message <span class="required-mark" aria-hidden="true">*</span></label><textarea id="issueDiscussionInput" placeholder="Discuss this Review Run or ask for clarification." required aria-describedby="issueDiscussionError"></textarea><div id="issueDiscussionError" class="field-message" role="alert"></div><button id="sendIssueDiscussionBtn" class="secondary" type="button">Send</button></div></section>
         <section id="workflowHistoryPanel" class="workflow-section" role="tabpanel" data-workflow-panel="history" hidden><h3 class="workflow-section-title">History &amp; Snapshots</h3><p class="meta">Each Sprint Cycle contains its own Review Runs, Run Groups and immutable Snapshots.</p>${cycleHistory}</section>
         <section id="workflowPendingPanel" class="workflow-section" role="tabpanel" data-workflow-panel="pending" hidden><h3 class="workflow-section-title">Pending Jira</h3>${drafts.length ? drafts.map(renderDraftCard).join('') : '<div class="meta">No Jira follow-up drafts.</div>'}</section>`;
@@ -12733,6 +12935,8 @@ function jiraKeyFromReportPath(reportPath) {
         });
       };
       $('issueReviewDetail').querySelectorAll('[data-workflow-tab]').forEach(tab => tab.addEventListener('click', () => activateWorkflowTab(tab.dataset.workflowTab || 'problems')));
+      if ($('issueReviewCycleSelect')) $('issueReviewCycleSelect').addEventListener('change', event => loadIssueReviewDetail(issue.jira_key, event.target.value));
+      $('issueReviewDetail').querySelectorAll('[data-open-history-cycle]').forEach(button => button.addEventListener('click', () => loadIssueReviewDetail(issue.jira_key, button.dataset.openHistoryCycle || '')));
       $('issueReviewDetail').querySelectorAll('[data-handle-finding]').forEach(button => button.addEventListener('click', () => submitWorkflowHandling(button.dataset.handleFinding || '', button)));
       $('issueReviewDetail').querySelectorAll('[data-expand-finding]').forEach(button => button.addEventListener('click', () => {
         const summary = $(`finding-summary-${button.dataset.expandFinding}`);
@@ -12776,7 +12980,7 @@ function jiraKeyFromReportPath(reportPath) {
         $('jira').value = issue.jira_key;
         runReview();
       });
-      if ($('issuePassBtn')) $('issuePassBtn').addEventListener('click', () => manualWorkflowPass(issue.jira_key));
+      if ($('issuePassBtn')) $('issuePassBtn').addEventListener('click', () => manualWorkflowPass(issue.jira_key, selectedCycle.cycle_id || ''));
       if ($('sendIssueDiscussionBtn')) $('sendIssueDiscussionBtn').addEventListener('click', () => sendWorkflowDiscussion(issue.jira_key, latest.id || ''));
     }
 
@@ -12875,13 +13079,13 @@ function jiraKeyFromReportPath(reportPath) {
       });
     }
 
-    async function manualWorkflowPass(jiraKey) {
+    async function manualWorkflowPass(jiraKey, cycleId = selectedIssueReviewCycle) {
       const note = window.prompt('Manual Pass note', 'All configured blocking findings have been reviewed.') || '';
       if (!note.trim()) return;
       const requestId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
       await singleFlight(`pass:${jiraKey}`, $('issuePassBtn'), async () => {
-        await fetchJson('/api/workflow/pass', {method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':requestId}, body:JSON.stringify({jira_key:jiraKey, note})});
-        await loadIssueReviewDetail(jiraKey);
+        await fetchJson('/api/workflow/pass', {method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':requestId}, body:JSON.stringify({jira_key:jiraKey, cycle_id:cycleId, note})});
+        await loadIssueReviewDetail(jiraKey, cycleId);
         await loadIssueReviews();
       });
     }
@@ -13395,11 +13599,29 @@ function jiraKeyFromReportPath(reportPath) {
     $('refreshIssueReviewsBtn').addEventListener('click', loadIssueReviews);
     $('issueOverviewTab').addEventListener('click', () => setIssueReviewView('overview'));
     $('issueListTab').addEventListener('click', () => setIssueReviewView('issues'));
-    $('issueReviewSearch').addEventListener('input', () => {
-      issueReviewSprintFilter = '';
+    $('issueReviewSprintSelect').addEventListener('change', event => {
+      issueReviewSprintFilter = event.target.value || '__current__';
       issueReviewApplicationFilter = '';
-      $('issueReviewScope').hidden = true;
-      $('issueReviewScope').textContent = '';
+      selectedIssueReviewCycle = '';
+      $('issueReviewScope').hidden = issueReviewSprintFilter === '__current__';
+      $('issueReviewScope').textContent = event.target.options[event.target.selectedIndex]?.textContent || '';
+      syncIssueReviewContextControls();
+      renderIssueReviewOverview();
+      renderIssueReviews();
+      if (selectedIssueReview) {
+        const selectedIssue = issueReviews.find(item => item.jira_key === selectedIssueReview);
+        const selectedCycle = (selectedIssue?.cycles || []).find(cycle => issueCycleMatchesFilter(selectedIssue || {}, cycle));
+        if (selectedCycle) loadIssueReviewDetail(selectedIssueReview, selectedCycle.cycle_id || '');
+        else {
+          selectedIssueReview = null;
+          $('issueReviewDetail').innerHTML = '<div class="markdown-preview empty">Select an Issue in this Sprint to inspect its Cycle-scoped Review history.</div>';
+        }
+      }
+    });
+    $('issueReviewSearch').addEventListener('input', () => {
+      issueReviewApplicationFilter = '';
+      selectedIssueReviewCycle = '';
+      syncIssueReviewContextControls();
       renderIssueReviews();
     });
     $('issueReviewModal').addEventListener('click', event => { if (event.target === $('issueReviewModal')) closeIssueReviews(); });

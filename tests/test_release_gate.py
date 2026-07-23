@@ -201,6 +201,10 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(_ignored_branch_type("DPS11_Config-1.4.74(11.2.83.3)"), "COMPANY_CONFIG")
         self.assertEqual(_ignored_branch_type("dps11_scr-1.4.74"), "SCR")
         self.assertEqual(_ignored_branch_type("DPS11_GIT_VERSION-1.4.74"), "")
+        company_git_version = _jira_sprint_branch_type_exclusion(
+            {"source_branch": "Company_GIT_VERSION-1.4.76(11.2.83)"}
+        )
+        self.assertEqual("GIT_VERSION", company_git_version["ignored_branch_type"])
 
     def test_git_version_is_excluded_only_from_jira_sprint_consolidation(self) -> None:
         exclusion = _jira_sprint_branch_type_exclusion(

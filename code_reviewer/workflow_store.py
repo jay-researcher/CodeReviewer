@@ -39,13 +39,14 @@ class WorkflowRepository(Protocol):
     """Framework/database-neutral contract used by Web and future Flutter clients."""
 
     def list_issues(self, *, responsibles: list[str] | None = None, view_all: bool = False) -> list[dict[str, Any]]: ...
-    def issue_detail(self, jira_key: str) -> dict[str, Any] | None: ...
+    def issue_detail(self, jira_key: str, cycle_id: str = "") -> dict[str, Any] | None: ...
     def cycle_detail(self, cycle_id: str) -> dict[str, Any] | None: ...
     def list_drafts(self, jira_key: str = "") -> list[dict[str, Any]]: ...
     def list_cycles(self, jira_key: str) -> list[dict[str, Any]]: ...
     def list_sprint_memberships(self, jira_key: str) -> list[dict[str, Any]]: ...
     def upsert_sprint_membership(self, **kwargs: Any) -> dict[str, Any]: ...
     def upsert_review_cycle(self, **kwargs: Any) -> dict[str, Any]: ...
+    def reconcile_sprint_scope(self, **kwargs: Any) -> dict[str, Any]: ...
     def create_run_group(self, **kwargs: Any) -> dict[str, Any]: ...
     def create_description_snapshot(self, **kwargs: Any) -> dict[str, Any]: ...
     def create_review_snapshot(self, **kwargs: Any) -> dict[str, Any]: ...
@@ -816,6 +817,143 @@ class WorkflowStore:
                 )
             ]
 
+    def reconcile_sprint_scope(
+        self,
+        *,
+        sprint_ref: str,
+        issues: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Reconcile one live Jira Sprint scan into persisted Review Cycles.
+
+        ``issues`` is the complete reviewable Jira membership returned by the
+        selected Sprint query. Its MR list is authoritative, including an empty
+        list when previously linked MRs are now closed or otherwise out of
+        review scope.
+        """
+        ref = sprint_ref.strip()
+        if not ref:
+            raise ValueError("Sprint reference is required.")
+        now = utc_now()
+        current_jira_keys: set[str] = set()
+        selected_sprint_ids: set[str] = set()
+        selected_sprint_names: set[str] = set()
+        updated_cycles: list[str] = []
+        for item in issues:
+            if not isinstance(item, dict):
+                continue
+            jira_key = str(item.get("jira_key") or "").strip().upper()
+            if not jira_key:
+                continue
+            memberships = [
+                membership for membership in (item.get("sprint_memberships") or [])
+                if isinstance(membership, dict)
+            ]
+            selected = next(
+                (
+                    membership for membership in memberships
+                    if str(membership.get("id") or "").strip() == ref
+                    or str(membership.get("name") or "").strip().casefold() == ref.casefold()
+                ),
+                None,
+            )
+            if not selected:
+                selected = next(
+                    (
+                        membership for membership in memberships
+                        if str(membership.get("id") or "").strip()
+                        == str(item.get("current_sprint_id") or "").strip()
+                    ),
+                    memberships[-1] if memberships else {},
+                )
+            sprint_id = str(selected.get("id") or item.get("current_sprint_id") or ref).strip()
+            sprint_name = str(selected.get("name") or item.get("sprint_name") or ref).strip()
+            sprint_state = str(selected.get("state") or item.get("current_sprint_state") or "unknown")
+            current_jira_keys.add(jira_key)
+            selected_sprint_ids.add(sprint_id)
+            selected_sprint_names.add(sprint_name.casefold())
+            self.upsert_sprint_membership(
+                jira_key=jira_key,
+                sprint_id=sprint_id,
+                sprint_name=sprint_name,
+                sprint_state=sprint_state,
+                joined_at=str(selected.get("joined_at") or ""),
+                source=selected,
+                summary=str(item.get("summary") or ""),
+            )
+            existing_cycle = next(
+                (
+                    cycle for cycle in self.list_cycles(jira_key)
+                    if str(cycle.get("sprint_id") or "") == sprint_id
+                    and not cycle.get("cycle_closed_at")
+                ),
+                {},
+            )
+            mr_scope = [scope for scope in (item.get("mr_scope") or []) if isinstance(scope, dict)]
+            same_scope = json.dumps(existing_cycle.get("mr_scope") or [], sort_keys=True) == json.dumps(
+                mr_scope, sort_keys=True
+            )
+            cycle = self.upsert_review_cycle(
+                jira_key=jira_key,
+                sprint_id=sprint_id,
+                sprint_name=sprint_name,
+                sprint_state=sprint_state,
+                review_mode=str(existing_cycle.get("review_mode") or "issue"),
+                status_transition={
+                    **(
+                        existing_cycle.get("status_transition")
+                        if isinstance(existing_cycle.get("status_transition"), dict)
+                        else {}
+                    ),
+                    "scope_authoritative": True,
+                    "scope_source": "sprint-scan",
+                    "scope_reconciled_at": now,
+                },
+                mr_scope=mr_scope,
+                pass_status=str(existing_cycle.get("pass_status") or "pending") if same_scope else "pending",
+                release_gate_status=str(existing_cycle.get("release_gate_status") or "pending") if same_scope else "pending",
+                summary=str(item.get("summary") or ""),
+            )
+            updated_cycles.append(str(cycle.get("cycle_id") or ""))
+
+        closed_cycles: list[str] = []
+        with self._lock, self.connect() as db:
+            candidates = db.execute(
+                "SELECT cycle_id, jira_key, sprint_id, sprint_name FROM review_cycles WHERE cycle_closed_at IS NULL"
+            ).fetchall()
+            for cycle in candidates:
+                matches_selected_sprint = (
+                    str(cycle["sprint_id"] or "") in selected_sprint_ids
+                    or str(cycle["sprint_name"] or "").casefold() in selected_sprint_names
+                    or str(cycle["sprint_id"] or "") == ref
+                    or str(cycle["sprint_name"] or "").casefold() == ref.casefold()
+                )
+                if not matches_selected_sprint or str(cycle["jira_key"] or "") in current_jira_keys:
+                    continue
+                cycle_id = str(cycle["cycle_id"])
+                db.execute(
+                    "UPDATE review_cycles SET cycle_closed_at=?, sprint_state='left', updated_at=? WHERE cycle_id=?",
+                    (now, now, cycle_id),
+                )
+                db.execute(
+                    "UPDATE sprint_memberships SET left_at=COALESCE(left_at, ?), updated_at=? WHERE jira_key=? AND sprint_id=?",
+                    (now, now, cycle["jira_key"], cycle["sprint_id"]),
+                )
+                issue = db.execute(
+                    "SELECT current_cycle_id FROM review_issues WHERE jira_key=?", (cycle["jira_key"],)
+                ).fetchone()
+                if issue and str(issue["current_cycle_id"] or "") == cycle_id:
+                    db.execute(
+                        "UPDATE review_issues SET status='not-reviewed', current_cycle_id=NULL, updated_at=? WHERE jira_key=?",
+                        (now, cycle["jira_key"]),
+                    )
+                closed_cycles.append(cycle_id)
+        return {
+            "sprint_ref": ref,
+            "issue_count": len(current_jira_keys),
+            "updated_cycles": updated_cycles,
+            "closed_cycles": closed_cycles,
+        }
+
     def register_run(
         self,
         *,
@@ -1089,9 +1227,9 @@ class WorkflowStore:
                 {"handling_id": handling_id, "reason": reason.strip(), "severity": row["severity"], "draft_id": draft["id"]},
             )
 
-    def pass_readiness(self, jira_key: str) -> dict[str, Any]:
+    def pass_readiness(self, jira_key: str, cycle_id: str = "") -> dict[str, Any]:
         with self.connect() as db:
-            return self._pass_readiness(db, jira_key)
+            return self._pass_readiness(db, jira_key, cycle_id)
 
     def manual_pass(
         self,
@@ -1100,17 +1238,19 @@ class WorkflowStore:
         actor_role: str,
         note: str,
         *,
+        cycle_id: str = "",
         idempotency_key: str = "",
     ) -> dict[str, Any]:
         if actor_role not in {"auditor", "manager"}:
             raise PermissionError("Only Auditor or Manager can record Review Pass.")
-        operation = f"manual-pass:{jira_key.upper()}"
+        requested_cycle_id = cycle_id.strip()
+        operation = f"manual-pass:{jira_key.upper()}:{requested_cycle_id or 'current'}"
         if idempotency_key:
             with self._lock, self.connect() as db:
                 repeated = self._idempotent_result(db, operation, idempotency_key)
                 if repeated is not None:
                     return dict(repeated)
-        readiness = self.pass_readiness(jira_key)
+        readiness = self.pass_readiness(jira_key, requested_cycle_id)
         if not readiness["ready"]:
             raise ValueError(str(readiness["message"]))
         now = utc_now()
@@ -1119,26 +1259,40 @@ class WorkflowStore:
             repeated = self._idempotent_result(db, operation, idempotency_key)
             if repeated is not None:
                 return dict(repeated)
-            cycle_id = str(
-                db.execute("SELECT current_cycle_id FROM review_issues WHERE jira_key=?", (jira_key.upper(),)).fetchone()[0]
-                or ""
-            )
+            issue = db.execute(
+                "SELECT current_cycle_id FROM review_issues WHERE jira_key=?", (jira_key.upper(),)
+            ).fetchone()
+            current_cycle_id = str(issue["current_cycle_id"] or "") if issue else ""
+            target_cycle_id = str(readiness.get("cycle_id") or "")
+            if not target_cycle_id or target_cycle_id != current_cycle_id:
+                raise ValueError("Only the current Review Cycle can be marked Pass.")
+            cycle = db.execute(
+                "SELECT cycle_closed_at FROM review_cycles WHERE cycle_id=? AND jira_key=?",
+                (target_cycle_id, jira_key.upper()),
+            ).fetchone()
+            if not cycle or cycle["cycle_closed_at"]:
+                raise ValueError("Historical or closed Review Cycles are read-only.")
             db.execute(
                 """INSERT INTO pass_records(id, jira_key, run_id, actor, note, policy_json, created_at,
                    cycle_id, run_group_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     pass_id, jira_key.upper(), readiness["run_id"], actor, note.strip(),
-                    json.dumps(readiness, ensure_ascii=False), now, cycle_id or None,
+                    json.dumps(readiness, ensure_ascii=False), now, target_cycle_id,
                     readiness.get("run_group_id") or None,
                 ),
             )
             db.execute(
-                "UPDATE review_issues SET status='passed', passed_run_id=latest_run_id, updated_at=? WHERE jira_key=?",
-                (now, jira_key.upper()),
+                "UPDATE review_issues SET status='passed', passed_run_id=?, updated_at=? WHERE jira_key=?",
+                (readiness["run_id"], now, jira_key.upper()),
             )
-            if cycle_id:
-                db.execute("UPDATE review_cycles SET pass_status='passed', updated_at=? WHERE cycle_id=?", (now, cycle_id))
-            self._audit(db, jira_key.upper(), actor, "manual-pass", {"pass_id": pass_id, "run_id": readiness["run_id"]})
+            db.execute(
+                "UPDATE review_cycles SET pass_status='passed', updated_at=? WHERE cycle_id=?",
+                (now, target_cycle_id),
+            )
+            self._audit(
+                db, jira_key.upper(), actor, "manual-pass",
+                {"pass_id": pass_id, "run_id": readiness["run_id"], "cycle_id": target_cycle_id},
+            )
             result = {"pass_id": pass_id, **readiness}
             self._remember_idempotent(db, operation, idempotency_key, result, now)
             return result
@@ -1519,6 +1673,34 @@ class WorkflowStore:
             people.update(scope_people(row["responsible_scope"]))
         return people
 
+    @staticmethod
+    def _latest_runs_per_scope(run_rows: list[Any]) -> list[Any]:
+        """Keep one authoritative report per application/release scope.
+
+        A Run Group may contain sibling reports for different applications, but
+        a re-scan of the same application scope supersedes its earlier report.
+        Historic imports have occasionally reused a Run Group id; summing every
+        row in that group makes stale findings and report counts look current.
+        """
+        latest: dict[tuple[str, str], Any] = {}
+        for run in run_rows:
+            application = str(run["application"] or "Unmapped").strip() or "Unmapped"
+            release_line = str(run["release_line"] or "").strip()
+            key = (application, release_line)
+            previous = latest.get(key)
+            current_order = (int(run["run_number"] or 0), str(run["created_at"] or ""), str(run["id"] or ""))
+            previous_order = (
+                int(previous["run_number"] or 0),
+                str(previous["created_at"] or ""),
+                str(previous["id"] or ""),
+            ) if previous is not None else (-1, "", "")
+            if current_order >= previous_order:
+                latest[key] = run
+        return sorted(
+            latest.values(),
+            key=lambda run: (int(run["run_number"] or 0), str(run["created_at"] or "")),
+        )
+
     def list_issues(self, *, responsibles: list[str] | None = None, view_all: bool = False) -> list[dict[str, Any]]:
         with self.connect() as db:
             allowed: set[str] = set()
@@ -1550,12 +1732,35 @@ class WorkflowStore:
                 ]
             return [self._issue_summary(db, row) for row in rows]
 
-    def issue_detail(self, jira_key: str) -> dict[str, Any] | None:
+    def issue_detail(self, jira_key: str, cycle_id: str = "") -> dict[str, Any] | None:
         with self.connect() as db:
             issue = db.execute("SELECT * FROM review_issues WHERE jira_key=?", (jira_key.upper(),)).fetchone()
             if not issue:
                 return None
-            runs = [self._row(row) for row in db.execute("SELECT * FROM review_runs WHERE jira_key=? ORDER BY run_number DESC", (jira_key.upper(),))]
+            cycles = [
+                self._decoded_row(row, ("status_transition_json", "mr_scope_json"))
+                for row in db.execute(
+                    "SELECT * FROM review_cycles WHERE jira_key=? ORDER BY cycle_number DESC", (jira_key.upper(),)
+                )
+            ]
+            requested_cycle_id = cycle_id.strip()
+            selected_cycle = next(
+                (cycle for cycle in cycles if str(cycle.get("cycle_id") or "") == requested_cycle_id),
+                None,
+            ) if requested_cycle_id else next(
+                (cycle for cycle in cycles if str(cycle.get("cycle_id") or "") == str(issue["current_cycle_id"] or "")),
+                cycles[0] if cycles else None,
+            )
+            if requested_cycle_id and not selected_cycle:
+                raise KeyError("Review Cycle was not found for this Jira issue.")
+            selected_cycle_id = str((selected_cycle or {}).get("cycle_id") or "")
+            run_query = "SELECT * FROM review_runs WHERE jira_key=?"
+            run_params: list[object] = [jira_key.upper()]
+            if selected_cycle_id:
+                run_query += " AND cycle_id=?"
+                run_params.append(selected_cycle_id)
+            run_query += " ORDER BY run_number DESC"
+            runs = [self._row(row) for row in db.execute(run_query, run_params)]
             for run in runs:
                 run["severity_counts"] = json.loads(run.pop("severity_counts_json") or "{}")
                 findings = []
@@ -1568,11 +1773,12 @@ class WorkflowStore:
                 run["findings"] = findings
             latest_run = runs[0] if runs else {}
             latest_group_id = str(latest_run.get("run_group_id") or "")
-            latest_group_runs = [
+            latest_group_candidates = [
                 run
                 for run in runs
                 if latest_group_id and str(run.get("run_group_id") or "") == latest_group_id
             ] or ([latest_run] if latest_run else [])
+            latest_group_runs = self._latest_runs_per_scope(latest_group_candidates)
             latest_group_findings: list[dict[str, Any]] = []
             latest_group_severity: dict[str, int] = {}
             for run in latest_group_runs:
@@ -1597,13 +1803,19 @@ class WorkflowStore:
                 "finding_count": len(latest_group_findings),
                 "severity_counts": latest_group_severity,
             } if latest_run else {}
-            discussions = [self._row(row) for row in db.execute("SELECT * FROM discussions WHERE jira_key=? ORDER BY created_at", (jira_key.upper(),))]
-            drafts = self._drafts(db, jira_key.upper())
-            passes = [self._row(row) for row in db.execute("SELECT * FROM pass_records WHERE jira_key=? ORDER BY created_at DESC", (jira_key.upper(),))]
-            cycles = [
-                self._decoded_row(row, ("status_transition_json", "mr_scope_json"))
+            discussions = [
+                self._row(row)
                 for row in db.execute(
-                    "SELECT * FROM review_cycles WHERE jira_key=? ORDER BY cycle_number DESC", (jira_key.upper(),)
+                    "SELECT * FROM discussions WHERE jira_key=? AND (?='' OR cycle_id=?) ORDER BY created_at",
+                    (jira_key.upper(), selected_cycle_id, selected_cycle_id),
+                )
+            ]
+            drafts = self._drafts(db, jira_key.upper())
+            passes = [
+                self._row(row)
+                for row in db.execute(
+                    "SELECT * FROM pass_records WHERE jira_key=? AND (?='' OR cycle_id=?) ORDER BY created_at DESC",
+                    (jira_key.upper(), selected_cycle_id, selected_cycle_id),
                 )
             ]
             memberships = [
@@ -1615,25 +1827,29 @@ class WorkflowStore:
             run_groups = [
                 self._row(row)
                 for row in db.execute(
-                    "SELECT * FROM review_run_groups WHERE jira_key=? ORDER BY created_at DESC", (jira_key.upper(),)
+                    "SELECT * FROM review_run_groups WHERE jira_key=? AND (?='' OR cycle_id=?) ORDER BY created_at DESC",
+                    (jira_key.upper(), selected_cycle_id, selected_cycle_id),
                 )
             ]
             description_snapshots = [
                 self._description_snapshot(db, str(row["id"]))
                 for row in db.execute(
-                    "SELECT id FROM description_snapshots WHERE jira_key=? ORDER BY captured_at DESC", (jira_key.upper(),)
+                    "SELECT id FROM description_snapshots WHERE jira_key=? AND (?='' OR cycle_id=?) ORDER BY captured_at DESC",
+                    (jira_key.upper(), selected_cycle_id, selected_cycle_id),
                 )
             ]
             review_snapshots = [
                 self._review_snapshot(db, str(row["id"]))
                 for row in db.execute(
-                    "SELECT id FROM review_snapshots WHERE jira_key=? ORDER BY created_at DESC", (jira_key.upper(),)
+                    "SELECT id FROM review_snapshots WHERE jira_key=? AND (?='' OR cycle_id=?) ORDER BY created_at DESC",
+                    (jira_key.upper(), selected_cycle_id, selected_cycle_id),
                 )
             ]
             deferred_resources = [
                 self._decoded_row(row, ("evidence_json",))
                 for row in db.execute(
-                    "SELECT * FROM deferred_release_resources WHERE jira_key=? ORDER BY created_at", (jira_key.upper(),)
+                    "SELECT * FROM deferred_release_resources WHERE jira_key=? AND (?='' OR cycle_id=?) ORDER BY created_at",
+                    (jira_key.upper(), selected_cycle_id, selected_cycle_id),
                 )
             ]
             issue_item = self._row(issue)
@@ -1642,12 +1858,13 @@ class WorkflowStore:
                 key=str.casefold,
             )
             return {
-                "issue": issue_item, "cycles": cycles, "sprint_memberships": memberships,
+                "issue": issue_item, "cycles": cycles, "selected_cycle": selected_cycle,
+                "sprint_memberships": memberships,
                 "run_groups": run_groups, "runs": runs, "description_snapshots": description_snapshots,
                 "latest_run_group": latest_run_group,
                 "review_snapshots": review_snapshots, "deferred_resources": deferred_resources,
                 "discussions": discussions, "drafts": drafts, "passes": passes,
-                "pass_readiness": self._pass_readiness(db, jira_key),
+                "pass_readiness": self._pass_readiness(db, jira_key, selected_cycle_id),
             }
 
     def cycle_detail(self, cycle_id: str) -> dict[str, Any] | None:
@@ -1776,13 +1993,15 @@ class WorkflowStore:
             ).fetchone()
             logical_run_ids = [str(row["latest_run_id"])]
             if latest and latest["run_group_id"]:
+                group_rows = db.execute(
+                    """SELECT * FROM review_runs
+                       WHERE cycle_id=(SELECT cycle_id FROM review_runs WHERE id=?) AND run_group_id=?
+                       ORDER BY run_number""",
+                    (latest["id"], latest["run_group_id"]),
+                ).fetchall()
                 logical_run_ids = [
-                    str(run["id"])
-                    for run in db.execute(
-                        "SELECT id FROM review_runs WHERE run_group_id=? ORDER BY run_number",
-                        (latest["run_group_id"],),
-                    ).fetchall()
-                ]
+                    str(run["id"]) for run in self._latest_runs_per_scope(group_rows)
+                ] or logical_run_ids
             placeholders = ",".join("?" for _ in logical_run_ids)
             item["finding_count"] = int(
                 db.execute(
@@ -1820,6 +2039,43 @@ class WorkflowStore:
                 "SELECT COUNT(*) FROM review_snapshots WHERE cycle_id=?", (cycle["cycle_id"],)
             ).fetchone()[0])
             cycle["application_progress"] = self._cycle_application_progress(db, cycle)
+            cycle_latest = db.execute(
+                "SELECT id, run_group_id, run_number FROM review_runs WHERE cycle_id=? ORDER BY run_number DESC LIMIT 1",
+                (cycle["cycle_id"],),
+            ).fetchone()
+            cycle_run_ids: list[str] = []
+            if cycle_latest:
+                cycle_run_ids = [str(cycle_latest["id"])]
+                if cycle_latest["run_group_id"]:
+                    cycle_run_ids = [
+                        str(run["id"])
+                        for run in db.execute(
+                            "SELECT id FROM review_runs WHERE cycle_id=? AND run_group_id=? ORDER BY run_number",
+                            (cycle["cycle_id"], cycle_latest["run_group_id"]),
+                        )
+                    ] or cycle_run_ids
+            cycle_handling = {"fixed": 0, "follow-up": 0, "not-issue": 0, "pending": 0}
+            cycle_finding_count = 0
+            if cycle_run_ids:
+                cycle_placeholders = ",".join("?" for _ in cycle_run_ids)
+                cycle_findings = db.execute(
+                    f"""SELECT f.id, h.disposition FROM findings f
+                        LEFT JOIN finding_handlings h ON h.id=(
+                          SELECT id FROM finding_handlings x WHERE x.finding_id=f.id ORDER BY updated_at DESC LIMIT 1
+                        ) WHERE f.run_id IN ({cycle_placeholders})""",
+                    cycle_run_ids,
+                ).fetchall()
+                cycle_finding_count = len(cycle_findings)
+                for finding in cycle_findings:
+                    disposition = str(finding["disposition"] or "")
+                    if disposition in cycle_handling:
+                        cycle_handling[disposition] += 1
+                    else:
+                        cycle_handling["pending"] += 1
+            cycle["run_number"] = int(cycle_latest["run_number"] or 0) if cycle_latest else 0
+            cycle["finding_count"] = cycle_finding_count
+            cycle["handling_counts"] = cycle_handling
+            cycle["pass_readiness"] = self._pass_readiness(db, str(row["jira_key"]), str(cycle["cycle_id"]))
         current_cycle = next(
             (cycle for cycle in cycles if cycle.get("cycle_id") == item.get("current_cycle_id")), None
         )
@@ -1860,6 +2116,8 @@ class WorkflowStore:
         run_rows = db.execute(
             "SELECT * FROM review_runs WHERE cycle_id=? ORDER BY run_number", (cycle_id,)
         ).fetchall()
+        status_transition = cycle.get("status_transition") if isinstance(cycle.get("status_transition"), dict) else {}
+        legacy_scope_fallback = not bool(status_transition.get("scope_authoritative"))
         latest: dict[tuple[str, str, str], sqlite3.Row] = {}
         report_counts: dict[tuple[str, str, str], int] = {}
         run_scope_keys: dict[str, tuple[str, str, str]] = {}
@@ -1884,8 +2142,17 @@ class WorkflowStore:
                 release_line = release_line or candidate[1]
                 delivery_version = candidate[2]
             scope_key = (application, release_line, delivery_version)
-            expected.add(scope_key)
-            report_counts[scope_key] = report_counts.get(scope_key, 0) + 1
+            # Current Cycle discovery defines required scope. Runs are evidence
+            # for that scope and must not resurrect applications from an older
+            # Sprint or delivery version. Empty legacy Cycles retain the old
+            # run-derived fallback so existing history remains readable.
+            if not expected and legacy_scope_fallback:
+                expected.add(scope_key)
+            elif scope_key not in expected:
+                continue
+            # Presence is scoped, not revision-counted. Re-scans replace the
+            # previous report for this application/release scope.
+            report_counts[scope_key] = 1
             latest[scope_key] = run
             run_scope_keys[str(run["id"])] = scope_key
         group_running = bool(db.execute(
@@ -1907,14 +2174,12 @@ class WorkflowStore:
             current_runs: list[sqlite3.Row] = []
             if run:
                 current_group_id = str(run["run_group_id"] or "")
-                current_runs = [
+                current_runs = self._latest_runs_per_scope([
                     candidate
                     for candidate in run_rows
                     if run_scope_keys.get(str(candidate["id"])) == scope_key
                     and str(candidate["run_group_id"] or "") == current_group_id
-                ]
-                if not current_runs:
-                    current_runs = [run]
+                ]) or [run]
             finding_count = 0
             handled_count = 0
             pending_blockers = 0
@@ -1969,44 +2234,68 @@ class WorkflowStore:
             )
         return rows
 
-    def _pass_readiness(self, db: sqlite3.Connection, jira_key: str) -> dict[str, Any]:
+    def _pass_readiness(
+        self, db: sqlite3.Connection, jira_key: str, cycle_id: str = ""
+    ) -> dict[str, Any]:
         issue = db.execute("SELECT * FROM review_issues WHERE jira_key=?", (jira_key.upper(),)).fetchone()
-        if not issue or not issue["latest_run_id"]:
+        if not issue:
             return {"ready": False, "message": "No completed Review Run is available.", "pending_blockers": []}
         scope_gaps: list[dict[str, Any]] = []
-        cycle_id = str(issue["current_cycle_id"] or "")
-        if cycle_id:
+        target_cycle_id = cycle_id.strip() or str(issue["current_cycle_id"] or "")
+        cycle_row = None
+        if target_cycle_id:
             cycle_row = db.execute(
-                "SELECT * FROM review_cycles WHERE cycle_id=?",
-                (cycle_id,),
+                "SELECT * FROM review_cycles WHERE cycle_id=? AND jira_key=?",
+                (target_cycle_id, jira_key.upper()),
             ).fetchone()
-            if cycle_row:
-                cycle = self._decoded_row(
-                    cycle_row,
-                    ("status_transition_json", "mr_scope_json"),
+        if not cycle_row:
+            return {
+                "ready": False, "message": "The selected Review Cycle is unavailable.",
+                "pending_blockers": [], "scope_gaps": [], "cycle_id": target_cycle_id,
+            }
+        cycle = self._decoded_row(cycle_row, ("status_transition_json", "mr_scope_json"))
+        application_progress = self._cycle_application_progress(db, cycle)
+        status_transition = cycle.get("status_transition") if isinstance(cycle.get("status_transition"), dict) else {}
+        if not application_progress and bool(status_transition.get("scope_authoritative")):
+            return {
+                "ready": False,
+                "message": "No review-required scope is active for this Cycle.",
+                "pending_blockers": [],
+                "scope_gaps": [],
+                "cycle_id": target_cycle_id,
+                "is_current_cycle": target_cycle_id == str(issue["current_cycle_id"] or ""),
+            }
+        for progress in application_progress:
+            state = str(progress.get("state") or "")
+            if state in {"without-report", "generating", "failed"}:
+                scope_gaps.append(
+                    {
+                        "application": progress.get("application") or "Unmapped",
+                        "release_line": progress.get("release_line") or "",
+                        "delivery_version": progress.get("delivery_version") or "",
+                        "scope_label": progress.get("scope_label") or "Unmapped",
+                        "state": state,
+                    }
                 )
-                for progress in self._cycle_application_progress(db, cycle):
-                    state = str(progress.get("state") or "")
-                    if state in {"without-report", "generating", "failed"}:
-                        scope_gaps.append(
-                            {
-                                "application": progress.get("application") or "Unmapped",
-                                "release_line": progress.get("release_line") or "",
-                                "delivery_version": progress.get("delivery_version") or "",
-                                "scope_label": progress.get("scope_label") or "Unmapped",
-                                "state": state,
-                            }
-                        )
-        run_id = str(issue["latest_run_id"])
-        latest_run = db.execute("SELECT run_group_id FROM review_runs WHERE id=?", (run_id,)).fetchone()
+        latest_run = db.execute(
+            "SELECT * FROM review_runs WHERE cycle_id=? ORDER BY run_number DESC LIMIT 1",
+            (target_cycle_id,),
+        ).fetchone()
+        if not latest_run:
+            return {
+                "ready": False, "message": "No completed Review Run is available for this Cycle.",
+                "pending_blockers": [], "scope_gaps": scope_gaps, "cycle_id": target_cycle_id,
+            }
+        run_id = str(latest_run["id"])
         run_group_id = str(latest_run["run_group_id"] or "") if latest_run else ""
         run_ids = [run_id]
         if run_group_id:
+            group_rows = db.execute(
+                "SELECT * FROM review_runs WHERE cycle_id=? AND run_group_id=? ORDER BY run_number",
+                (target_cycle_id, run_group_id),
+            ).fetchall()
             run_ids = [
-                str(row["id"])
-                for row in db.execute(
-                    "SELECT id FROM review_runs WHERE run_group_id=? ORDER BY run_number", (run_group_id,)
-                )
+                str(row["id"]) for row in self._latest_runs_per_scope(group_rows)
             ] or [run_id]
         placeholders = ",".join("?" for _ in run_ids)
         findings = db.execute(f"SELECT * FROM findings WHERE run_id IN ({placeholders})", run_ids).fetchall()
@@ -2043,6 +2332,8 @@ class WorkflowStore:
             "run_id": run_id,
             "run_ids": run_ids,
             "run_group_id": run_group_id,
+            "cycle_id": target_cycle_id,
+            "is_current_cycle": target_cycle_id == str(issue["current_cycle_id"] or ""),
         }
 
     def _drafts(self, db: sqlite3.Connection, jira_key: str = "") -> list[dict[str, Any]]:
@@ -2151,7 +2442,7 @@ class WorkflowStore:
             "discussion_references": discussions,
             "pending_jira": self._drafts(db, jira_key),
             "passes": passes,
-            "pass_readiness": self._pass_readiness(db, jira_key),
+            "pass_readiness": self._pass_readiness(db, jira_key, cycle_id),
         }
 
     @staticmethod

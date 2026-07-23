@@ -2,6 +2,20 @@
 
 本页面仅展示面向用户的版本摘要。详细技术变更、验证结果及部署状态请参阅内部 7.x Release Notes。
 
+## 7.2.16 — 2026-07-23
+
+状态：仅部署到本机验收环境；`192.168.3.78:8765` 继续运行 7.2.15。
+
+- Sprint Scan 会同步 Jira 当前 Sprint 与 MR 状态；Issue 移出 Sprint 或只剩关闭 MR 后，不再保留过期的待生成报告。
+- 手动 Scan 总是获取新数据；空 Sprint/Issue 范围不会混入其他历史报告。
+- Issues Review History 支持切换 Sprint 与 Delivery Cycle，Overview、Issue 列表和详情使用同一 Cycle 统计口径。
+- 历史 Cycle 显示为只读；Re-scan 与 Manual Pass 只作用于当前 Live Cycle。
+- Manual Pass 不再复用其他 Sprint 的旧报告，必须完成当前 Cycle 的全部应用和精确交付版本 Scope。
+- 同一应用范围重新扫描后，只以最新报告计算问题数、报告数和 Pass；不会再把旧 Run 与新 Run 相加。
+- GitLab 历史搜索只接纳标题或源分支明确包含 Jira Key 的 MR，Release merge 与 `Company_GIT_VERSION` 不再误入普通 Issue Review。
+- 页面使用更克制的 Live、Historical、Legacy 视觉语义，帮助区分当前交付与历史证据。
+- 默认视图只展示 Current cycles；需要审计时再切换 All sprints & history。Issue 标题、操作、Delivery Cycle 与 Readiness 分层排列，没有当前报告时会显示明确的 Awaiting Review 空状态。
+
 ## 7.2.15 — 2026-07-22
 
 状态：已于 2026-07-23 部署到 `192.168.3.78:8765`，生产健康检查、配置策略、账户及历史数据完整性验证通过。

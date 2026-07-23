@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import re
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,10 @@ LLM_POLICY_KEYS = (
     "codex_progress_heartbeat_seconds",
     "dps_codex_max_retries",
     "dps_codex_retry_prompt_chars",
+)
+REVIEW_POLICY_PATHS = (
+    ("app", "review", "discovery", "require_strong_history_reference"),
+    ("app", "review", "release_gate", "branch_prefixes", "git_version"),
 )
 REQUIRED_SCOPE_PATHS = (
     ("dps9-repository",),
@@ -40,6 +45,25 @@ def _mapping_at(payload: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any
     if not isinstance(current, dict):
         raise RuntimeError(f"Scope path is not a mapping: {'.'.join(path)}")
     return current
+
+
+def _value_at(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
+    current: Any = payload
+    for segment in path:
+        if not isinstance(current, dict) or segment not in current:
+            raise RuntimeError(f"Template is missing required review policy: {'.'.join(path)}")
+        current = current[segment]
+    return current
+
+
+def _set_value_at(payload: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+    current: dict[str, Any] = payload
+    for segment in path[:-1]:
+        child = current.setdefault(segment, {})
+        if not isinstance(child, dict):
+            raise RuntimeError(f"Production review policy path is not a mapping: {'.'.join(path[:-1])}")
+        current = child
+    current[path[-1]] = deepcopy(value)
 
 
 def merge_release_scopes(production: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
@@ -68,6 +92,8 @@ def merge_release_scopes(production: dict[str, Any], template: dict[str, Any]) -
         if key not in template_llm:
             raise RuntimeError(f"Template is missing required LLM policy: app.llm.{key}")
         production_llm[key] = template_llm[key]
+    for path in REVIEW_POLICY_PATHS:
+        _set_value_at(production, path, _value_at(template, path))
     return production
 
 

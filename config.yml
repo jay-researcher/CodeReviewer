@@ -89,6 +89,7 @@ app:
           - DPS9_SCR
         git_version:
           - GIT_VERSION
+          - COMPANY_GIT_VERSION
           - WVADMIN_GIT_VERSION
           - ITRADE_CLIENT_GIT_VERSION
           - SERVICES_TERMINAL_GIT_VERSION
@@ -108,6 +109,10 @@ app:
     chunk_near_budget_max_mrs_per_chunk: 2
     chunk_max_mrs_per_chunk: 3
     discovery:
+      # GitLab history search also matches generated release notes. Only treat
+      # title/source-branch Jira references as fallback discovery evidence;
+      # Jira remote links and the development panel remain authoritative.
+      require_strong_history_reference: true
       gitlab_search_fallback: true
       history_discovery: true
       history_limit: 100

@@ -1885,6 +1885,20 @@ def _review_issue_collection_merge_requests(
             "excluded_state_mrs": discovered.get("excluded_state_mrs", []),
             "discovery_errors": discovered["errors"],
             "items": discovered["mrs"],
+            "discovery_truncated": len(discovered["mrs"]) >= limit,
+            "scope_issues": [
+                {
+                    "jira_key": issue.key,
+                    "summary": issue.summary,
+                    "jira_status": issue.status,
+                    "sprint_name": issue.sprint,
+                    "current_sprint_id": issue.current_sprint_id,
+                    "current_sprint_state": issue.current_sprint_state,
+                    "sprint_memberships": [membership.to_dict() for membership in issue.sprint_memberships],
+                    "components": list(issue.components),
+                }
+                for issue in issues
+            ],
         }
 
     target_output_dir = _batch_output_dir(output_dir)
@@ -3406,6 +3420,15 @@ def _discover_sprint_merge_requests(
         if should_search_gitlab:
             try:
                 for mr in gitlab.list_merge_requests_for_issue(issue.key, state=state, limit=history_limit):
+                    if (
+                        app_config_bool(
+                            "review.discovery.require_strong_history_reference",
+                            "SPRINT_MR_REQUIRE_STRONG_HISTORY_REFERENCE",
+                            True,
+                        )
+                        and not _gitlab_search_has_strong_issue_reference(issue.key, mr)
+                    ):
+                        continue
                     web_url = str(mr.get("web_url") or "")
                     if web_url:
                         records.append(_mr_record_from_gitlab_search(issue.key, mr))
@@ -3413,6 +3436,15 @@ def _discover_sprint_merge_requests(
                     known_urls = {str(record.get("mr_url") or "") for record in records}
                     known_urls.update(str(item.get("mr_url") or "") for item in excluded_state_mrs)
                     for mr in gitlab.list_merge_requests_for_issue(issue.key, state="all", limit=history_limit):
+                        if (
+                            app_config_bool(
+                                "review.discovery.require_strong_history_reference",
+                                "SPRINT_MR_REQUIRE_STRONG_HISTORY_REFERENCE",
+                                True,
+                            )
+                            and not _gitlab_search_has_strong_issue_reference(issue.key, mr)
+                        ):
+                            continue
                         web_url = str(mr.get("web_url") or "")
                         actual_state = str(mr.get("state") or "")
                         if not web_url or web_url in known_urls:
@@ -3577,6 +3609,25 @@ def _mr_record_from_gitlab_search(issue_key: str, mr: dict[str, Any]) -> dict[st
         "head_sha": str(mr.get("sha") or ""),
         "base_sha": str((mr.get("diff_refs") or {}).get("base_sha") or ""),
     }
+
+
+def _gitlab_search_has_strong_issue_reference(issue_key: str, mr: dict[str, Any]) -> bool:
+    """Reject broad history-search matches that only mention Jira in generated text.
+
+    GitLab's search can match descriptions and accumulated release notes. That
+    made release-branch and Company_GIT_VERSION MRs look like direct Issue MRs
+    even when neither their title nor source branch identified the Jira issue.
+    Jira links/development-panel records remain authoritative and bypass this
+    fallback-only guard.
+    """
+    key = issue_key.strip().upper()
+    if not key:
+        return False
+    pattern = re.compile(rf"(?<![A-Z0-9]){re.escape(key)}(?![A-Z0-9])", re.IGNORECASE)
+    return any(
+        pattern.search(str(mr.get(field) or ""))
+        for field in ("title", "source_branch")
+    )
 
 
 def _merge_request_records_for_issue(

@@ -152,19 +152,25 @@ class UiAcceptance711Tests(unittest.TestCase):
         self.assertRegex(
             page,
             r'(?s)<header class="issue-review-header">.*?'
+            r'<div class="issue-review-primary">.*?'
             r'<div class="issue-review-identity">.*?'
             r'<div class="issue-review-controls">.*?'
             r'<div class="issue-review-actions">.*?issueRescanBtn.*?issuePassBtn.*?'
-            r'issue-readiness.*?</header>.*?<div class="metric-grid">',
+            r'<div class="issue-review-context">.*?issueReviewCycleSelect.*?'
+            r'issue-readiness.*?</header>.*?metricsMarkup',
             "Issue identity, status/actions, and metrics need a stable visual hierarchy.",
         )
         self.assertIn('.issue-review-header {', page)
+        self.assertIn('.issue-review-primary {', page)
+        self.assertIn('.issue-review-context {', page)
         self.assertIn('.issue-review-actions {', page)
         self.assertIn('data-jump-severity="medium"', page)
         self.assertIn('class="metric-card metric-summary-card"', page)
+        self.assertIn('class="cycle-empty-state"', page)
+        self.assertIn('No Review Run in this Cycle', page)
         self.assertRegex(
             page,
-            r'(?s)@media \(max-width: \d+px\).*?\.issue-review-header\s*\{[^}]*grid-template-columns:\s*1fr',
+            r'(?s)@media \(max-width: \d+px\).*?\.issue-review-primary, \.issue-review-context\s*\{[^}]*grid-template-columns:\s*1fr',
         )
 
     def test_release_notes_has_bounded_scrollable_accessible_dialog(self) -> None:

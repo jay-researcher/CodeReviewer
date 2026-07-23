@@ -114,6 +114,21 @@ class CoverageAsyncJobTests(unittest.TestCase):
         self.assertTrue(reused)
         self.assertEqual(first["id"], second["id"])
 
+    def test_explicit_scan_bypasses_recent_completed_cache(self) -> None:
+        with (
+            patch.object(web_app, "_web_user_permissions", return_value={"scan_coverage": True}),
+            patch.object(web_app, "build_review_coverage", return_value={"issues": [], "counts": {}}),
+        ):
+            first, _ = web_app.create_coverage_job({"jira": "ECHNL-1001"}, "manager.user")
+            self._wait_for_status(str(first["id"]), {"done"})
+            second, reused = web_app.create_coverage_job(
+                {"jira": "ECHNL-1001", "force_refresh": True}, "manager.user"
+            )
+            self._wait_for_status(str(second["id"]), {"done"})
+
+        self.assertFalse(reused)
+        self.assertNotEqual(first["id"], second["id"])
+
     def test_sprint_scope_requires_coverage_permission(self) -> None:
         with patch.object(web_app, "_web_user_permissions", return_value={"scan_coverage": False}):
             with self.assertRaises(PermissionError):
@@ -175,6 +190,7 @@ class CoverageAsyncJobTests(unittest.TestCase):
     def test_rendered_ui_uses_background_job_and_long_scan_countdown(self) -> None:
         page = web_app.render_index("manager.user")
         self.assertIn("/api/review-coverage-jobs", page)
+        self.assertIn("force_refresh: true", page)
         self.assertIn("COVERAGE_LONG_SCAN_SECONDS = 30", page)
         self.assertIn("Timeout countdown", page)
         self.assertIn("Closing this window will not stop it.", page)

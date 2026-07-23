@@ -326,6 +326,90 @@ class IssueHistoryApplicationReadinessTests(unittest.TestCase):
         self.assertEqual("Services Terminal", row["application"])
         self.assertEqual(cycle["cycle_id"], row["cycle_id"])
 
+    def test_current_scope_is_not_expanded_by_an_unrelated_run(self) -> None:
+        cycle = self._cycle(
+            sprint_id="10092",
+            scope=[{"application": "DPS", "target_branch": "DPS11_Release"}],
+        )
+        self._register(
+            cycle,
+            application="WVAdmin",
+            report="ECHNL-7280_stale-wvadmin.md",
+            findings=[],
+        )
+
+        progress = self._progress_by_application(self._summary()["current_cycle"])
+        self.assertEqual({"DPS"}, set(progress))
+        self.assertIn(progress["DPS"]["state"], {"without-report", "generating"})
+        self.assertEqual(0, progress["DPS"]["report_count"])
+
+    def test_detail_and_pass_are_strictly_scoped_to_the_selected_cycle(self) -> None:
+        old_cycle = self._cycle(
+            sprint_id="10093",
+            scope=[{"application": "WVAdmin", "iid": 71}],
+        )
+        old_run = self._register(
+            old_cycle,
+            application="WVAdmin",
+            report="ECHNL-7280_old-cycle.md",
+            findings=[],
+        )
+        current_cycle = self._cycle(
+            sprint_id="10094",
+            scope=[{"application": "DPS", "iid": 72}],
+        )
+
+        old_detail = self.store.issue_detail("ECHNL-7280", cycle_id=str(old_cycle["cycle_id"]))
+        current_detail = self.store.issue_detail("ECHNL-7280", cycle_id=str(current_cycle["cycle_id"]))
+        self.assertEqual(old_run, old_detail["latest_run_group"]["id"])
+        self.assertEqual([], current_detail["runs"])
+        self.assertFalse(current_detail["pass_readiness"]["ready"])
+        self.assertIn("this Cycle", current_detail["pass_readiness"]["message"])
+        with self.assertRaisesRegex(ValueError, "current Review Cycle"):
+            self.store.manual_pass(
+                "ECHNL-7280", "wen.yi", "auditor", "Historical pass",
+                cycle_id=str(old_cycle["cycle_id"]),
+            )
+
+    def test_sprint_reconciliation_clears_closed_mr_scope_and_closes_moved_issue(self) -> None:
+        cycle = self._cycle(
+            sprint_id="10095",
+            scope=[{"application": "DPS", "mr_id": "81", "state": "opened"}],
+        )
+        self._register(
+            cycle,
+            application="DPS",
+            report="ECHNL-7280_before-mr-closed.md",
+            findings=[],
+        )
+        reconciled = self.store.reconcile_sprint_scope(
+            sprint_ref="10095",
+            issues=[
+                {
+                    "jira_key": "ECHNL-7280",
+                    "summary": "Application readiness",
+                    "current_sprint_id": "10095",
+                    "current_sprint_state": "active",
+                    "sprint_memberships": [
+                        {"id": "10095", "name": "Sprint 10095", "state": "active"}
+                    ],
+                    "mr_scope": [],
+                }
+            ],
+        )
+        self.assertEqual([str(cycle["cycle_id"])], reconciled["updated_cycles"])
+        current = self.store.list_issues(view_all=True)[0]["current_cycle"]
+        self.assertEqual([], current["mr_scope"])
+        self.assertEqual([], current["application_progress"])
+        self.assertFalse(current["pass_readiness"]["ready"])
+        self.assertIn("No review-required scope", current["pass_readiness"]["message"])
+
+        moved = self.store.reconcile_sprint_scope(sprint_ref="10095", issues=[])
+        self.assertEqual([str(cycle["cycle_id"])], moved["closed_cycles"])
+        closed = self.store.list_cycles("ECHNL-7280")[0]
+        self.assertTrue(closed["cycle_closed_at"])
+        self.assertEqual("left", closed["sprint_state"])
+
 
 if __name__ == "__main__":
     unittest.main()

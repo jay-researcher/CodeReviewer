@@ -26,6 +26,7 @@ from code_reviewer.review_service import (
     _chunk_review_inputs_if_needed,
     _chunk_review_reason,
     _combine_jira_issue_review_inputs,
+    _gitlab_search_has_strong_issue_reference,
     _ignored_branch_type,
     _missing_remote_branch_error,
     _review_fetched_inputs_for_issue,
@@ -1049,6 +1050,24 @@ group:
         self.assertEqual(_ignored_branch_type("git_version\\ECHNL-1"), "")
         self.assertEqual(_ignored_branch_type("feature/Git_Version-ECHNL-1"), "")
         self.assertEqual(_ignored_branch_type("gitversion/ECHNL-1"), "")
+
+    def test_gitlab_history_fallback_requires_title_or_branch_jira_reference(self) -> None:
+        self.assertTrue(_gitlab_search_has_strong_issue_reference(
+            "ECHNL-5655",
+            {"title": "Fix ECHNL-5655 audit log", "source_branch": "11.2.83"},
+        ))
+        self.assertTrue(_gitlab_search_has_strong_issue_reference(
+            "ECHNL-5655",
+            {"title": "Fix audit log", "source_branch": "bug/ECHNL-5655"},
+        ))
+        self.assertFalse(_gitlab_search_has_strong_issue_reference(
+            "ECHNL-5655",
+            {
+                "title": "Merged From Company_GIT_VERSION into 11.2.83",
+                "source_branch": "Company_GIT_VERSION-1.4.76(11.2.83)",
+                "description": "Generated release notes mention ECHNL-5655",
+            },
+        ))
 
     def test_same_application_release_line_merges_mrs_and_responsible_scope(self) -> None:
         result = ReviewResult(
