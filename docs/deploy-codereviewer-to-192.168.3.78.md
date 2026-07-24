@@ -9,17 +9,36 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `7.2.16+b202607231300` |
-| 部署制品 | `codereviewer-7.2.16+b202607231300-eed3029b08d7.tgz`，SHA-256 `2617db1a3947f28eec26a3c5df7ff372b3e5470908b31b73b6be7b13a12a9218` |
+| CodeReviewer 版本 | `7.2.16+b202607241318` |
+| 部署制品 | `codereviewer-7.2.16+b202607241318-869b907d336e.tgz`，SHA-256 `f2c4a0c7a62a29c335811d8c060f92879b7b60585bb9f1fee2d95e6379d6a7c1` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `/api/version` 返回 `7.2.16+b202607231300`，`/api/health` 返回 `healthy` |
+| 健康检查 | `/api/version` 返回 `7.2.16+b202607241318`，`/api/health` 返回 `healthy` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 294 passed |
+| RHEL9 测试 | 295 passed |
+
+## 7.2.16+b202607241318 Responsible 边界与滚动保护
+
+2026-07-24 将构建 `7.2.16+b202607241318` 部署到生产，发布代码固定为 `20260720` 分支提交 `869b907d336e229ec9f9158e4098dfb3788db51e`。
+
+- Repository Responsible、Component-driven Delivery Responsible 与 Web Reviewer 权限分层，不再在报告最终拆分阶段相互覆盖；
+- WVAdmin build/Web 公共仓库、MOMD/Trade Middle Office、AOP/LCA 的生产 Responsible 映射已逐项核对；
+- 部署配置合并支持递归同步仓库模块的 `responsible`，同时保留 Linux 路径、生产端点、凭据及其他 runtime 配置；
+- Run Review 自动折叠时保持 viewport；Progress 在拖动 scrollbar 未释放期间无限暂停自动跟随，释放后等待 60 秒才恢复；
+- RHEL9 staging 与生产切换后均执行 `295/295` 测试；Workflow SQLite `integrity_check=ok`，4 个 Issue、4 个 Cycle、7 个 Run、22 个 Finding 及 7 份报告保持完整。
+
+一致性备份与回滚：
+
+```text
+/var/backups/codereviewer/7.2.16+b202607231300-to-7.2.16+b202607241318-20260724-131848/system-backup.tgz
+/usr/local/sbin/codereviewer-rollback-20260724-131848
+```
+
+备份 SHA-256：`b75fe747b816b1e1e3e294b5bacc88e45183d36ea79a1cb3ecab11cc40e335`。
 
 ## 2026-07-24 Responsible Scope 热修复
 
