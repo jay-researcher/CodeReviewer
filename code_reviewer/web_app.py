@@ -9376,6 +9376,7 @@ __ADMIN_TRACE_SECTION__
       const button = $('runFormToggle');
       const summary = $('runFormSummary');
       if (!panel || !body || !button) return;
+      const viewport = { left: window.scrollX, top: window.scrollY };
       panel.classList.toggle('form-collapsed', collapsed);
       body.setAttribute('aria-hidden', collapsed ? 'true' : 'false');
       button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
@@ -9387,7 +9388,10 @@ __ADMIN_TRACE_SECTION__
           const progress = $('progressPanel');
           if (!progress) return;
           progress.focus({ preventScroll: true });
-          progress.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          // Collapsing the inputs removes content above Progress. Keep the
+          // browser viewport stable instead of pushing the page header and
+          // Run Review context out of view.
+          window.scrollTo({ ...viewport, behavior: 'auto' });
         });
       } else if (!collapsed && options.focusInput) {
         requestAnimationFrame(() => $('jira')?.focus({ preventScroll: true }));

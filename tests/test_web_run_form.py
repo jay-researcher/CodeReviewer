@@ -13,6 +13,10 @@ class WebRunFormTests(unittest.TestCase):
         self.assertIn('aria-controls="runFormBody"', page)
         self.assertIn('id="progressPanel" class="progress-panel" tabindex="-1"', page)
         self.assertIn("function setRunFormCollapsed(collapsed, options = {})", page)
+        self.assertIn("const viewport = { left: window.scrollX, top: window.scrollY };", page)
+        self.assertIn("progress.focus({ preventScroll: true });", page)
+        self.assertIn("window.scrollTo({ ...viewport, behavior: 'auto' });", page)
+        self.assertNotIn("progress.scrollIntoView(", page)
 
     def test_run_form_tracks_the_full_review_job_lifecycle(self) -> None:
         page = render_index("admin")
