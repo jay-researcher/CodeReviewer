@@ -37,7 +37,20 @@ class ResumeTracker:
         self.state = self._load()
 
     def is_done(self, key: str) -> bool:
-        return self.enabled and self.entry(key).get("status") == "done"
+        entry = self.entry(key)
+        if not self.enabled or entry.get("status") != "done":
+            return False
+        report_paths = self._summary_report_paths(entry.get("summary"))
+        return not report_paths or all(path.is_file() for path in report_paths)
+
+    def is_stale_done(self, key: str) -> bool:
+        entry = self.entry(key)
+        return bool(
+            self.enabled
+            and entry.get("status") == "done"
+            and self._summary_report_paths(entry.get("summary"))
+            and not self.is_done(key)
+        )
 
     def entry(self, key: str) -> dict[str, Any]:
         items = self.state.get("items")
@@ -51,6 +64,25 @@ class ResumeTracker:
         if isinstance(summary, dict):
             return {**summary, "resume_status": "skipped-completed"}
         return {"resume_status": "skipped-completed"}
+
+    def _summary_report_paths(self, summary: object) -> list[Path]:
+        if not isinstance(summary, dict):
+            return []
+        values: list[object] = [summary.get("report")]
+        reports = summary.get("reports")
+        if isinstance(reports, list):
+            values.extend(
+                item.get("path") if isinstance(item, dict) else item
+                for item in reports
+            )
+        paths: list[Path] = []
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            path = Path(text).expanduser()
+            paths.append(path if path.is_absolute() else self.output_dir / path)
+        return list(dict.fromkeys(paths))
 
     def mark_started(self, key: str, item: dict[str, Any] | None = None) -> None:
         if not self.enabled:

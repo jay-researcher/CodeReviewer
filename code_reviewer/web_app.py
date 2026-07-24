@@ -8226,9 +8226,11 @@ def render_index(user: str = "") -> str:
     .issue-context-bar select { width: 100%; min-height: 38px; border-color: #b9cee6; background: color-mix(in srgb, var(--accent) 3%, var(--panel)); box-shadow: 0 2px 7px rgba(15,23,42,.04); }
     .issue-context-summary { min-width: 0; display: flex; align-items: center; gap: 7px; padding-left: 2px; white-space: nowrap; }
     .issue-context-summary .meta { overflow: hidden; max-width: 190px; text-overflow: ellipsis; }
-    .cycle-context-row { min-width: 0; display: flex; align-items: center; gap: 9px; }
-    .cycle-context-row label { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-weight: 600; }
-    .cycle-context-row select { width: clamp(250px, 34vw, 440px); min-height: 34px; }
+    .cycle-context-row { min-width: 0; display: grid; grid-template-columns: minmax(300px, 440px) auto; align-items: end; gap: 10px; }
+    .cycle-context-field { min-width: 0; display: grid; gap: 6px; }
+    .cycle-context-field label { margin: 0; color: var(--muted); font-size: 12px; font-weight: 700; line-height: 1.2; }
+    .cycle-context-field select { width: 100%; min-height: 40px; padding-block: 8px; }
+    .cycle-context-row > .status-chip { min-height: 28px; display: inline-flex; align-items: center; margin: 0 0 6px; }
     .status-chip[data-context="live"] { color: #08783f; border-color: #8bc8a8; background: #f2fbf6; }
     .status-chip[data-context="historical"] { color: #65748a; border-color: #c6cfda; background: #f7f8fa; }
     .status-chip[data-context="legacy"] { color: #65548b; border-color: #c8bbe4; background: #f7f4fc; }
@@ -8313,6 +8315,9 @@ def render_index(user: str = "") -> str:
     .cycle-empty-copy strong { display: block; font-size: 15px; }
     .cycle-empty-copy span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.45; }
     .cycle-empty-state button { white-space: nowrap; }
+    .report-empty-state { display: grid; justify-items: start; gap: 5px; padding: 14px; border: 1px dashed var(--line); border-radius: 9px; background: color-mix(in srgb, var(--bg) 52%, var(--panel)); }
+    .report-empty-state strong { font-size: 13px; color: var(--text); }
+    .report-empty-state span { color: var(--muted); font-size: 12px; line-height: 1.45; }
     .metric-summary-card { display: grid; grid-template-rows: repeat(2, minmax(0, 1fr)); padding: 0; }
     .metric-summary-row {
       width: 100%;
@@ -8338,8 +8343,7 @@ def render_index(user: str = "") -> str:
       .issue-review-controls { min-width: 0; }
       .issue-review-actions { justify-content: flex-start; }
       .issue-readiness { justify-self: stretch; max-width: none; }
-      .cycle-context-row { flex-wrap: wrap; }
-      .cycle-context-row select { width: min(100%, 440px); }
+      .cycle-context-row { grid-template-columns: minmax(0, 1fr) auto; }
       .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .cycle-empty-state { grid-template-columns: 42px minmax(0, 1fr); }
       .cycle-empty-state button { grid-column: 2; justify-self: start; }
@@ -10745,7 +10749,8 @@ __ADMIN_TRACE_SECTION__
       updatePreviewNavigation();
       updateThreadNavigation();
       if (!reports.length) {
-        container.textContent = 'No reports found in the selected range.';
+        const query = ($('reportSearch')?.value || '').trim();
+        container.innerHTML = `<div class="report-empty-state"><strong>${query ? 'No matching reports' : 'No reports in this range'}</strong><span>${query ? `No report matches “${escapeHtml(query)}”. Clear the search or run the Issue review to generate a current report.` : 'Run an Issue review or expand the history range, then refresh this panel.'}</span></div>`;
         return;
       }
       container.innerHTML = reports.map((report) => `
@@ -13080,7 +13085,7 @@ function jiraKeyFromReportPath(reportPath) {
             <div class="issue-review-controls"><div class="issue-review-actions"><span class="status-chip" data-status="${escapeHtml(cycleStatus)}">${escapeHtml(statusLabel(cycleStatus))}</span>${canReview ? `<button id="issueRescanBtn" class="secondary" type="button">${hasCompletedRun ? 'Re-scan Issue' : (noReviewRequired ? 'Check Again' : 'Run Review')}</button>` : ''}${canPass && !noReviewRequired ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : `disabled title="${escapeHtml(readiness.message || 'Complete the current Cycle review first.')}"`}>Manual Pass</button>` : ''}</div></div>
           </div>
           <div class="issue-review-context">
-            <div class="cycle-context-row"><label for="issueReviewCycleSelect">Delivery Cycle</label><select id="issueReviewCycleSelect">${cycles.map(cycle => `<option value="${escapeHtml(cycle.cycle_id || '')}" ${String(cycle.cycle_id || '') === String(selectedCycle.cycle_id || '') ? 'selected' : ''}>Cycle ${escapeHtml(cycle.cycle_number || '-')} · ${escapeHtml(cycle.sprint_name || cycle.sprint_id || 'Legacy')} · ${cycle.cycle_closed_at ? 'Historical' : 'Current'}</option>`).join('')}</select><span class="status-chip" data-context="${contextKind}">${contextKind === 'live' ? 'Live Cycle' : (contextKind === 'legacy' ? 'Legacy Cycle' : 'Historical · read-only')}</span></div>
+            <div class="cycle-context-row"><div class="cycle-context-field"><label for="issueReviewCycleSelect">Delivery Cycle</label><select id="issueReviewCycleSelect">${cycles.map(cycle => `<option value="${escapeHtml(cycle.cycle_id || '')}" ${String(cycle.cycle_id || '') === String(selectedCycle.cycle_id || '') ? 'selected' : ''}>Cycle ${escapeHtml(cycle.cycle_number || '-')} · ${escapeHtml(cycle.sprint_name || cycle.sprint_id || 'Legacy')} · ${cycle.cycle_closed_at ? 'Historical' : 'Current'}</option>`).join('')}</select></div><span class="status-chip" data-context="${contextKind}">${contextKind === 'live' ? 'Live Cycle' : (contextKind === 'legacy' ? 'Legacy Cycle' : 'Historical · read-only')}</span></div>
             <div class="issue-readiness ${readiness.ready ? 'ready' : ''}" role="status"><span class="issue-readiness-dot" aria-hidden="true"></span><span class="meta">${escapeHtml(readiness.message || '')}</span></div>
           </div>
         </header>

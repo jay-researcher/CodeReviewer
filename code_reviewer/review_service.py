@@ -1963,6 +1963,16 @@ def _review_issue_collection_merge_requests(
             reviewed.append(item)
             skipped_completed += 1
             continue
+        if not force_rerun and tracker.is_stale_done(resume_key):
+            _progress(
+                progress,
+                "resume-stale",
+                f"Previous completion for {issue.key} has no report artifact; rebuilding",
+                index=issue_index,
+                total=len(grouped_items),
+                jira_key=issue.key,
+                stage="resume-artifact-validation",
+            )
         print(
             f"[{issue_index}/{len(grouped_items)}] Preparing consolidated review for {issue.key}: "
             f"{len(issue_items)} MR(s)",
@@ -2845,6 +2855,14 @@ def review_jira_issue_merge_requests(
         reviewed.append(item)
         skipped_completed = 1
     elif discovered["mrs"]:
+        if not force_rerun and tracker.is_stale_done(resume_key):
+            _progress(
+                progress,
+                "resume-stale",
+                f"Previous completion for {issue.key} has no report artifact; rebuilding",
+                jira_key=issue.key,
+                stage="resume-artifact-validation",
+            )
         tracker.mark_started(resume_key, resume_item)
         try:
             for index, item in enumerate(discovered["mrs"], 1):

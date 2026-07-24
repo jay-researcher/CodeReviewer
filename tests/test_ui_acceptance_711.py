@@ -167,6 +167,8 @@ class UiAcceptance711Tests(unittest.TestCase):
         self.assertIn('data-jump-severity="medium"', page)
         self.assertIn('class="metric-card metric-summary-card"', page)
         self.assertIn('class="cycle-empty-state"', page)
+        self.assertIn('class="cycle-context-field"', page)
+        self.assertIn('.cycle-context-field select { width: 100%; min-height: 40px;', page)
         self.assertIn('No Review Run in this Cycle', page)
         self.assertIn('No Review Required', page)
         self.assertIn("Review Pass · required Issues", page)

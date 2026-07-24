@@ -9,6 +9,34 @@ from code_reviewer.resume import ResumeTracker
 
 
 class ResumeTrackerTests(unittest.TestCase):
+    def test_done_entry_with_missing_report_is_stale_and_not_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            tracker = ResumeTracker("jira-issues", Path(temp), {"jira_keys": ["ECHNL-5745"]})
+            tracker.mark_done("issue", {"jira_key": "ECHNL-5745", "report": "missing.md"})
+
+            self.assertFalse(tracker.is_done("issue"))
+            self.assertTrue(tracker.is_stale_done("issue"))
+
+    def test_done_entry_with_existing_reports_can_be_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            first = output_dir / "first.md"
+            second = output_dir / "second.md"
+            first.write_text("first", encoding="utf-8")
+            second.write_text("second", encoding="utf-8")
+            tracker = ResumeTracker("jira-issues", output_dir, {"jira_keys": ["ECHNL-5745"]})
+            tracker.mark_done(
+                "issue",
+                {
+                    "jira_key": "ECHNL-5745",
+                    "report": str(first),
+                    "reports": [{"path": str(first)}, {"path": str(second)}],
+                },
+            )
+
+            self.assertTrue(tracker.is_done("issue"))
+            self.assertFalse(tracker.is_stale_done("issue"))
+
     def test_successful_retry_clears_stale_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             tracker = ResumeTracker("jira-issues", Path(temp), {"jira_keys": ["ECHNL-5651"]})
