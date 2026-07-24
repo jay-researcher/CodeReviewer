@@ -40,6 +40,20 @@
 /var/backups/codereviewer/legacy-cleanup-7.2.17-20260724-174132/codereviewer-pre-cleanup.db
 ```
 
+### 7.2.17 User Scope 数据补齐
+
+2026-07-24 修复旧账户仅能在 User Management 看到推断 Scope、运行时却无法访问 Projects/Reports 的数据不一致：
+
+- `kevin.tan` 显式持久化 `DPS → kevin.tan`，生产验证可见 29 个项目及 ECHNL-5750/5791 的 4 份报告；
+- 其余 9 个待迁移非 Manager 账户按原有效 Scope 持久化，待迁移数量归零；
+- 账户数量、密码指纹、角色、Active 状态均保持不变，服务继续为 `7.2.17 / healthy`；
+- 修复与全量迁移备份分别位于：
+
+```text
+/var/backups/codereviewer/user-scope-fix-kevin-20260724-182238/
+/var/backups/codereviewer/user-scope-migration-20260724-182636/
+```
+
 ## 7.2.16+b202607241318 Responsible 边界与滚动保护
 
 2026-07-24 将构建 `7.2.16+b202607241318` 部署到生产，发布代码固定为 `20260720` 分支提交 `869b907d336e229ec9f9158e4098dfb3788db51e`。
