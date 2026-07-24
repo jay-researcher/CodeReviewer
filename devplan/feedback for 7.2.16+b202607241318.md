@@ -5,7 +5,7 @@
   - Resume 的 `status=done` 不再直接等同于报告存在；如果 Resume 记录的单份或多份报告文件已被清理，当前 Run 自动标记为 stale 并重新审核，不再错误显示 `SKIP DONE`。
   - Progress 显示 `Previous completion ... has no report artifact; rebuilding`，明确说明自动重建原因。
   - Report History 空状态区分“No matching reports”和“No reports in this range”，提供清除搜索、运行 Issue Review或扩大历史范围的下一步指引。
-  - 验收结果：完整自动化测试 302 项通过、2 项跳过；本机 `127.0.0.1:8765` 健康，版本暂维持 `7.2.16+b202607241318`；尚未部署 3.78。
+  - 验收结果：完整自动化测试 306 项通过、2 项跳过；本机 `127.0.0.1:8765` 健康，版本暂维持 `7.2.16+b202607241318`；尚未部署 3.78。
 
 - User Management：将当前扁平的 `Responsible identifiers` 升级为 **Responsible per Application Scope**。
 
