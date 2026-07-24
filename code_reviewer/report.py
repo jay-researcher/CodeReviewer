@@ -243,6 +243,12 @@ def _report_metadata_comment(source: ReviewInput) -> str:
         "review_stable_fingerprint": metadata.get("review_stable_fingerprint", ""),
         "review_fingerprint_items": metadata.get("review_fingerprint_items", []),
         "review_stable_fingerprint_items": metadata.get("review_stable_fingerprint_items", []),
+        "workflow_cycle_required": bool(metadata.get("workflow_cycle_required")),
+        "current_review_scope": metadata.get("current_review_scope", {}),
+        "jira_current_sprint_id": metadata.get("jira_current_sprint_id", ""),
+        "jira_current_sprint_state": metadata.get("jira_current_sprint_state", ""),
+        "jira_sprint_memberships": metadata.get("jira_sprint_memberships", []),
+        "sprint": source.sprint,
     }
     compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"<!-- code_reviewer_metadata: {compact} -->"

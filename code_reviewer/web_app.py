@@ -4027,7 +4027,12 @@ def _workflow_cycle_from_history_entry(
     membership_rows = [item for item in memberships if isinstance(item, dict)] if isinstance(memberships, list) else []
     current_scope = metadata.get("current_review_scope") if isinstance(metadata.get("current_review_scope"), dict) else {}
     preferred_id = str(current_scope.get("sprint_id") or metadata.get("jira_current_sprint_id") or "").strip()
-    preferred_name = str(current_scope.get("sprint") or entry.get("sprint") or "").strip()
+    preferred_name = str(
+        current_scope.get("sprint")
+        or metadata.get("sprint")
+        or entry.get("sprint")
+        or ""
+    ).strip()
     selected: dict[str, object] = {}
     for membership in membership_rows:
         sprint_id = str(membership.get("id") or "").strip()
@@ -4047,9 +4052,32 @@ def _workflow_cycle_from_history_entry(
                 summary=summary,
                 responsible=responsible,
             )
+    cycle_required = bool(metadata.get("workflow_cycle_required"))
+    if not selected and not preferred_id and not preferred_name and cycle_required:
+        live_cycles = [
+            cycle
+            for cycle in store.list_cycles(jira_key)
+            if str(cycle.get("sprint_id") or "").strip().casefold() != "legacy"
+            and not cycle.get("cycle_closed_at")
+        ]
+        if len(live_cycles) == 1:
+            selected = {
+                "id": live_cycles[0].get("sprint_id"),
+                "name": live_cycles[0].get("sprint_name"),
+                "state": live_cycles[0].get("sprint_state"),
+            }
+        else:
+            raise ValueError(
+                f"Current delivery report {jira_key} has no unambiguous Sprint/Cycle identity; "
+                "refusing to register it as Legacy."
+            )
     sprint_id = str(selected.get("id") or preferred_id or "legacy")
     sprint_name = str(selected.get("name") or preferred_name or ("Legacy / Unknown Sprint" if sprint_id == "legacy" else ""))
     sprint_state = str(selected.get("state") or current_scope.get("sprint_state") or metadata.get("jira_current_sprint_state") or "unknown")
+    if cycle_required and sprint_id == "legacy":
+        raise ValueError(
+            f"Current delivery report {jira_key} cannot be registered in Legacy / Unknown Sprint."
+        )
     review_mode = str(metadata.get("workflow_review_mode") or current_scope.get("review_mode") or "issue")
     if review_mode not in {"issue", "batch-preview", "final-sprint"}:
         review_mode = "issue"

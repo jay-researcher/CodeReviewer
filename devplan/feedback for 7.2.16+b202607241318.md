@@ -5,7 +5,7 @@
   - Resume 的 `status=done` 不再直接等同于报告存在；如果 Resume 记录的单份或多份报告文件已被清理，当前 Run 自动标记为 stale 并重新审核，不再错误显示 `SKIP DONE`。
   - Progress 显示 `Previous completion ... has no report artifact; rebuilding`，明确说明自动重建原因。
   - Report History 空状态区分“No matching reports”和“No reports in this range”，提供清除搜索、运行 Issue Review或扩大历史范围的下一步指引。
-  - 验收结果：完整自动化测试 306 项通过、2 项跳过；本机 `127.0.0.1:8765` 健康，版本暂维持 `7.2.16+b202607241318`；尚未部署 3.78。
+  - 验收结果：完整自动化测试 308 项通过、2 项跳过；内嵌 JavaScript 语法校验通过；本机 `127.0.0.1:8765` 健康，版本暂维持 `7.2.16+b202607241318`；尚未部署 3.78。
 
 - User Management：将当前扁平的 `Responsible identifiers` 升级为 **Responsible per Application Scope**。
 
@@ -146,6 +146,8 @@
   - Sprint 扫描创建的空 Cycle 不再被视为“已审核”；只有同一 Sprint 且存在已持久化 Review Run 的 MR revision 才允许跳过。
   - Legacy / Unknown Sprint 的旧 Run 不再抑制当前命名 Sprint 的报告生成。
   - Resume key 纳入 Sprint 边界，同一 MR 在不同 Sprint 不会因旧 `done` 记录而跳过。
+  - 本周新报告在报告文件 metadata 与 History 中同时持久化 Sprint/Cycle 身份；即使 History 需要重建，也不会丢失交付归属。
+  - 标记为当前交付的报告若缺少 Sprint 身份，只允许绑定唯一的开放非 Legacy Cycle；无法唯一确定时拒绝登记，绝不自动降级到 `Legacy / Unknown Sprint`。
   - 因此 Sprint Review 后 Overview 不会再出现“任务完成但当前 Cycle 0 report、全部进度重置为 0%”的假完成状态。
   - Pass 不跨 Cycle 静默继承；当前 Cycle 必须存在完整应用级报告，再按现有 Pass 完整性规则处理。
 
@@ -156,7 +158,8 @@
   - Report History、无当前 Cycle Run、无匹配报告等空状态提供明确原因和下一步操作。
 
 - **本轮验收状态**
-  - 自动化测试：306 项通过，2 项跳过。
+  - 自动化测试：308 项通过，2 项跳过。
+  - 前端校验：内嵌 JavaScript 语法通过；登录页、登录 Challenge、Health、Version 本机 HTTP 冒烟通过。
   - 代码质量：`git diff --check` 通过。
   - 部署边界：仅部署本机 `127.0.0.1:8765`；未部署 `192.168.3.78`。
   - 版本策略：本机候选仍基于 `7.2.16+b202607241318`，待功能 Review 后再决定是否生成新的 3.78 部署版本。

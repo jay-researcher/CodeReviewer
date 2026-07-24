@@ -1589,6 +1589,14 @@ def _attach_review_scope_metadata(review_input: ReviewInput, issue: JiraIssue) -
     )
     review_input.metadata.update(
         {
+            "workflow_cycle_required": bool(
+                selected_sprint
+                or (
+                    (review_input.sprint or issue.sprint)
+                    and str(review_input.sprint or issue.sprint).strip().casefold()
+                    not in {"legacy", "legacy / unknown sprint", "unknown"}
+                )
+            ),
             "current_review_scope": {
                 "jira_key": issue.key,
                 "sprint": (selected_sprint.name if selected_sprint else "") or review_input.sprint or issue.sprint,

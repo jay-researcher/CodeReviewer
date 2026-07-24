@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from code_reviewer.web_app import _snapshot_completed_handling, _sync_workflow_history
+from code_reviewer.web_app import (
+    _snapshot_completed_handling,
+    _sync_workflow_history,
+    _workflow_cycle_from_history_entry,
+)
 from code_reviewer.workflow_store import WorkflowStore
 
 
@@ -20,6 +24,40 @@ REPORT = """# ECHNL-9001 Code Review Report
 
 
 class WorkflowWebIntegrationTests(unittest.TestCase):
+    def test_current_delivery_report_never_falls_back_to_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = WorkflowStore(Path(temp) / "workflow.sqlite3")
+            expected = store.upsert_review_cycle(
+                jira_key="ECHNL-9100",
+                sprint_id="10100",
+                sprint_name="e-Channel Sprint 1.4.78",
+                sprint_state="active",
+            )
+            cycle_id, sprint_id = _workflow_cycle_from_history_entry(
+                store,
+                {"reviewed_at": "2026-07-24T10:00:00"},
+                {"workflow_cycle_required": True},
+                "ECHNL-9100",
+                "Current delivery",
+                "wen.yi",
+            )
+            self.assertEqual(expected["cycle_id"], cycle_id)
+            self.assertEqual("10100", sprint_id)
+            self.assertNotEqual("legacy", sprint_id)
+
+    def test_ambiguous_current_delivery_report_is_rejected_not_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = WorkflowStore(Path(temp) / "workflow.sqlite3")
+            with self.assertRaisesRegex(ValueError, "refusing to register it as Legacy"):
+                _workflow_cycle_from_history_entry(
+                    store,
+                    {"reviewed_at": "2026-07-24T10:00:00"},
+                    {"workflow_cycle_required": True},
+                    "ECHNL-9101",
+                    "Current delivery",
+                    "wen.yi",
+                )
+
     def test_history_sync_persists_cycle_group_description_and_deferred_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

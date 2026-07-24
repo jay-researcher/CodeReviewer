@@ -1360,6 +1360,7 @@ group:
                 project="jira-issue",
                 jira_key="ECHNL-1",
                 mr_id="multi-mr-1",
+                sprint="e-Channel Sprint 1.4.78",
                 metadata={
                     "responsible": "wen.yi",
                     "web_report_owner": "wen.yi",
@@ -1367,6 +1368,12 @@ group:
                     "review_stable_fingerprint": "stable-hash",
                     "review_fingerprint_items": [{"mr_url": "https://gitlab.example.com/group/web/-/merge_requests/1"}],
                     "review_stable_fingerprint_items": [{"mr_url": "https://gitlab.example.com/group/web/-/merge_requests/1"}],
+                    "workflow_cycle_required": True,
+                    "current_review_scope": {
+                        "sprint_id": "10100",
+                        "sprint": "e-Channel Sprint 1.4.78",
+                        "sprint_state": "active",
+                    },
                 },
             ),
             findings=[],
@@ -1380,6 +1387,8 @@ group:
         self.assertIn("<!-- code_reviewer_metadata:", markdown)
         self.assertIn('"review_stable_fingerprint":"stable-hash"', markdown)
         self.assertIn('"web_report_owner":"wen.yi"', markdown)
+        self.assertIn('"workflow_cycle_required":true', markdown)
+        self.assertIn('"sprint_id":"10100"', markdown)
 
         with tempfile.TemporaryDirectory() as temp:
             first = save_report(result, Path(temp))
