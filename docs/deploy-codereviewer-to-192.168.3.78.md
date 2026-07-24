@@ -1,6 +1,6 @@
 # 部署 CodeReviewer 到 192.168.3.78
 
-更新日期：2026-07-23
+更新日期：2026-07-24
 
 本文记录本次真实部署结果。通用部署原则和完整生产建议参见 [CodeReviewer-RHEL9-Deployment-Guide.md](CodeReviewer-RHEL9-Deployment-Guide.md)。
 
@@ -10,7 +10,7 @@
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
 | CodeReviewer 版本 | `7.2.16+b202607231300` |
-| 部署制品 | `codereviewer-7.2.16+b202607231300-33f0269.tgz`，SHA-256 `1763bc61d9328f2b4311cd1b8a6725d37e6542d07992e5bda7b5f2addd62db2b` |
+| 部署制品 | `codereviewer-7.2.16+b202607231300-eed3029b08d7.tgz`，SHA-256 `2617db1a3947f28eec26a3c5df7ff372b3e5470908b31b73b6be7b13a12a9218` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
@@ -19,7 +19,26 @@
 | 访问地址 | <http://192.168.3.78:8765> |
 | 健康检查 | `/api/version` 返回 `7.2.16+b202607231300`，`/api/health` 返回 `healthy` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 293 passed |
+| RHEL9 测试 | 294 passed |
+
+## 2026-07-24 Responsible Scope 热修复
+
+生产版本号保持 `7.2.16+b202607231300`，代码更新到提交 `eed3029b08d76f2fb2b9680bea5f4f664cf53ff4`。
+
+- 最终报告拆分保留 Jira Component-driven Responsible，不再由 MR 项目 fallback owner 覆盖；
+- WVAdmin 项目的交付 Responsible fallback 统一为 `hieut.tran`，`wen.yi` 继续通过 Web Frontend Reviewer domain 审核 WVAdmin 与 Services Terminal；
+- 部署配置合并同步 `responsible` 字段，生产 Linux 路径、端点、凭据及其他运行配置保持不变；
+- ECHNL-5748 的 Jira Components 已确认为 `MOMD + WVAdmin`，规则推导为 `hieut.tran`；
+- ECHNL-5748/5749 的 4 份报告、4 个 Run、2 个 Issue 与当前 Cycle Scope 已迁移到 `hieut.tran`；Hieu 可见对应 Issue History 与报告，Wen 仍具有 reviewer domain 访问权；
+- 本机与 RHEL9 完整自动化回归均为 `294/294`，Workflow SQLite `integrity_check=ok`，生产 `/api/health=healthy`。
+
+部署与数据修复备份：
+
+```text
+/var/backups/codereviewer/7.2.16+b202607231300-to-7.2.16+b202607231300-20260724-121252/system-backup.tgz
+/usr/local/sbin/codereviewer-rollback-20260724-121252
+/var/backups/codereviewer/echln-5748-5749-responsible-repair-20260724-121501/
+```
 
 ## 7.2.16+b202607231300 空 Scope 闭环与 Workflow 数据重置
 
