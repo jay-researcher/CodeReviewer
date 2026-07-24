@@ -66,6 +66,20 @@ def _set_value_at(payload: dict[str, Any], path: tuple[str, ...], value: Any) ->
     current[path[-1]] = deepcopy(value)
 
 
+def _copy_scope_fields(target: dict[str, Any], source: dict[str, Any]) -> bool:
+    """Copy portable scope fields without replacing production runtime values."""
+    copied = False
+    for key in SCOPE_KEYS:
+        if key in source:
+            target[key] = deepcopy(source[key])
+            copied = True
+    for key, source_child in source.items():
+        target_child = target.get(key)
+        if isinstance(source_child, dict) and isinstance(target_child, dict):
+            copied = _copy_scope_fields(target_child, source_child) or copied
+    return copied
+
+
 def merge_release_scopes(production: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
     # Deliberately update only portable review-boundary and review-policy fields.
     # Endpoints, credentials, auto-fetch settings and Linux paths remain
@@ -73,11 +87,7 @@ def merge_release_scopes(production: dict[str, Any], template: dict[str, Any]) -
     for path in REQUIRED_SCOPE_PATHS:
         target = _mapping_at(production, path)
         source = _mapping_at(template, path)
-        copied = False
-        for key in SCOPE_KEYS:
-            if key in source:
-                target[key] = source[key]
-                copied = True
+        copied = _copy_scope_fields(target, source)
         if not copied:
             raise RuntimeError(f"Template has no release scope at: {'.'.join(path)}")
     production_app = _mapping_at(production, ("app",))

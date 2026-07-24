@@ -137,6 +137,14 @@ class DeploymentConfigMergeTests(unittest.TestCase):
                 },
             )
 
+        production["wvadmin-repository"]["momd"] = {
+            "responsible": "legacy.wvadmin.owner",
+            "local_working_copy": "/var/lib/codereviewer/git-repos/wvadmin-repository/momd",
+        }
+        template["wvadmin-repository"]["momd"] = {
+            "responsible": "hieut.tran",
+            "local_working_copy": "D:/template/wvadmin-repository/momd",
+        }
         merged = merge_release_scopes(production, template)
 
         app = merged["app"]
@@ -163,6 +171,14 @@ class DeploymentConfigMergeTests(unittest.TestCase):
             self.assertEqual("new", current["release_line"])
             self.assertEqual("release.owner", current["responsible"])
             self.assertEqual("/production/path", current["branch"])
+        self.assertEqual(
+            "hieut.tran",
+            merged["wvadmin-repository"]["momd"]["responsible"],
+        )
+        self.assertEqual(
+            "/var/lib/codereviewer/git-repos/wvadmin-repository/momd",
+            merged["wvadmin-repository"]["momd"]["local_working_copy"],
+        )
 
 
 if __name__ == "__main__":
