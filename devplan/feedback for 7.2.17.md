@@ -20,6 +20,9 @@
 ## 验收门槛
 
 - 本机完整自动化回归：308 项通过，2 项跳过。
-- 生产 RHEL9 staging 完整回归必须通过。
-- 部署前完整备份 Workflow DB、报告、账户、配置和 systemd。
-- 部署后校验版本、健康、SQLite `integrity_check`、账户指纹、本周报告文件及业务数据计数。
+- 生产 RHEL9 staging 完整回归：308/308 通过。
+- 部署前已完整备份 Workflow DB、报告、账户、配置和 systemd。
+- 部署后：外部与服务器本机均返回 `7.2.17 / healthy`；SQLite `integrity_check=ok`、外键检查为 0、12 个账户指纹不变。
+- 本周数据：16 个 Run、35 个 Finding、26 个 Handling、5 个 Pass 和 16 个报告路径全部保留；Legacy/Backfilled 业务记录为 0。
+- 发布备份：`/var/backups/codereviewer/7.2.16+b202607241318-to-7.2.17-20260724-173933/system-backup.tgz`。
+- 清理前数据库备份：`/var/backups/codereviewer/legacy-cleanup-7.2.17-20260724-174132/codereviewer-pre-cleanup.db`。

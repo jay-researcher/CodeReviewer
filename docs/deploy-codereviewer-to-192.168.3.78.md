@@ -9,17 +9,36 @@
 | 项目 | 结果 |
 | --- | --- |
 | 主机 | `192.168.3.78`，RHEL 9.4 |
-| CodeReviewer 版本 | `7.2.16+b202607241318` |
-| 部署制品 | `codereviewer-7.2.16+b202607241318-869b907d336e.tgz`，SHA-256 `f2c4a0c7a62a29c335811d8c060f92879b7b60585bb9f1fee2d95e6379d6a7c1` |
+| CodeReviewer 版本 | `7.2.17` |
+| 部署制品 | `codereviewer-7.2.17-975d039f56e0.tgz`，SHA-256 `535e3e42b667025c573d9b996ced805560d125c8e22dc547ecc6e402fb159e9b` |
 | Python | 3.11.13 |
 | Git | 2.52.0 |
 | Codebase Memory | 0.9.0，Linux 本地 CLI 模式 |
 | systemd | `codereviewer.service` 已启用且为 `active` |
 | 监听地址 | `0.0.0.0:8765` |
 | 访问地址 | <http://192.168.3.78:8765> |
-| 健康检查 | `/api/version` 返回 `7.2.16+b202607241318`，`/api/health` 返回 `healthy` |
+| 健康检查 | `/api/version` 返回 `7.2.17`，`/api/health` 返回 `healthy` |
 | 编译检查 | 通过 |
-| RHEL9 测试 | 295 passed |
+| RHEL9 测试 | 308 passed |
+
+## 7.2.17 Sprint/Cycle 归属修复与 Legacy 治理
+
+2026-07-24 将 `7.2.17` 功能提交 `975d039f56e01957a1fb65768653f7e97389af37` 部署到生产。
+
+- 新报告持久化 Jira 当前 Sprint/Cycle 身份，当前交付报告无法唯一匹配 Cycle 时拒绝登记，不再静默回退 Legacy；
+- 误归 Legacy 的本周报告、Finding、Handling 与 Pass 迁入 `e-Channel Sprint 1.4.78` 或 `Ad hoc Review · 2026-W30`；
+- Scope 一致的 ECHNL-5749/5750 保留 Passed；ECHNL-5748 因当前 Scope 增加 MR，保留既有证据并回到 Pending；
+- 清理后保留 15 个 Cycle、16 个 Run、35 个 Finding、26 个 Handling、5 个 Pass，16 个报告路径均存在；
+- `Legacy` Cycle、Snapshot/Release Resource 中的 Legacy Sprint 与全部 `backfilled=1` 业务记录均为 0；
+- SQLite `integrity_check=ok`、外键检查为 0，12 个账户及凭据指纹保持不变。
+
+发布与数据治理备份：
+
+```text
+/var/backups/codereviewer/7.2.16+b202607241318-to-7.2.17-20260724-173933/system-backup.tgz
+/usr/local/sbin/codereviewer-rollback-20260724-173933
+/var/backups/codereviewer/legacy-cleanup-7.2.17-20260724-174132/codereviewer-pre-cleanup.db
+```
 
 ## 7.2.16+b202607241318 Responsible 边界与滚动保护
 
