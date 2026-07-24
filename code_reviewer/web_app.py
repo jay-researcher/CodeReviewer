@@ -8218,11 +8218,12 @@ def render_index(user: str = "") -> str:
     }
     .workflow-head h2, .workflow-head p { margin: 0; }
     .issue-context-bar {
-      min-width: 0; margin-left: auto; display: flex; align-items: center; justify-content: flex-end;
-      gap: 9px; padding: 7px 0; border: 0; background: transparent;
+      min-width: 0; height: 100%; margin-left: auto; display: grid;
+      grid-template-columns: auto minmax(280px, 340px) minmax(190px, auto);
+      align-items: center; justify-content: end; gap: 10px; padding: 0; border: 0; background: transparent;
     }
-    .issue-context-bar label { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-weight: 600; }
-    .issue-context-bar select { width: clamp(200px, 20vw, 300px); min-height: 36px; border-color: #b9cee6; background: color-mix(in srgb, var(--accent) 3%, var(--panel)); box-shadow: 0 2px 7px rgba(15,23,42,.04); }
+    .issue-context-bar label { color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .issue-context-bar select { width: 100%; min-height: 38px; border-color: #b9cee6; background: color-mix(in srgb, var(--accent) 3%, var(--panel)); box-shadow: 0 2px 7px rgba(15,23,42,.04); }
     .issue-context-summary { min-width: 0; display: flex; align-items: center; gap: 7px; padding-left: 2px; white-space: nowrap; }
     .issue-context-summary .meta { overflow: hidden; max-width: 190px; text-overflow: ellipsis; }
     .cycle-context-row { min-width: 0; display: flex; align-items: center; gap: 9px; }
@@ -8235,7 +8236,8 @@ def render_index(user: str = "") -> str:
     .workflow-list-pane { min-height: 0; overflow: auto; padding: 16px; border-right: 1px solid var(--line); }
     .workflow-detail-pane { min-height: 0; overflow: auto; padding: 20px; background: color-mix(in srgb, var(--bg) 55%, var(--panel)); container-name: issue-detail; container-type: inline-size; }
     .workflow-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
-    .workflow-toolbar input { flex: 1; }
+    .workflow-toolbar input { flex: 1; min-width: 180px; }
+    .workflow-toolbar .filter-reset { flex: 0 0 auto; white-space: nowrap; }
     .issue-review-cards { display: grid; gap: 10px; }
     .issue-review-card {
       display: grid; gap: 10px; padding: 13px 14px; cursor: pointer;
@@ -8684,8 +8686,8 @@ def render_index(user: str = "") -> str:
     .user-reset-confirmation input { margin-top: 7px; }
     @media (max-width: 900px) {
       .issue-history-nav { align-items: stretch; flex-wrap: wrap; gap: 4px 12px; padding-top: 7px; }
-      .issue-context-bar { flex: 1 1 100%; margin-left: 0; justify-content: flex-start; overflow-x: auto; }
-      .issue-context-bar select { width: min(240px, 55vw); }
+      .issue-context-bar { width: 100%; height: auto; margin-left: 0; grid-template-columns: auto minmax(220px, 1fr); justify-content: stretch; padding: 7px 0; }
+      .issue-context-summary { grid-column: 2; }
       .issue-review-primary, .issue-review-context { grid-template-columns: 1fr; }
       .issue-review-controls { min-width: 0; }
       .issue-review-actions { justify-content: flex-start; }
@@ -8861,7 +8863,7 @@ __ADMIN_TRACE_SECTION__
       <section id="issueReviewOverviewPanel" class="issue-history-overview" role="tabpanel"><div class="markdown-preview empty">Loading Sprint overview...</div></section>
       <div id="issueReviewIssuesView" class="workflow-body" role="tabpanel" hidden>
         <section class="workflow-list-pane">
-          <div class="workflow-toolbar"><input id="issueReviewSearch" placeholder="Search ECHNL, summary, responsible"><span id="issueReviewScope" class="meta" hidden></span><span id="issueReviewCount" class="count-pill">0</span></div>
+          <div class="workflow-toolbar"><input id="issueReviewSearch" placeholder="Search Jira, summary, Responsible, Sprint"><span id="issueReviewScope" class="meta" hidden></span><button id="resetIssueReviewFiltersBtn" class="secondary small-action filter-reset" type="button" hidden>Reset filters</button><span id="issueReviewCount" class="count-pill">0</span></div>
           <div id="issueReviewList" class="meta">Loading Issue Reviews...</div>
         </section>
         <section id="issueReviewDetail" class="workflow-detail-pane"><div class="markdown-preview empty">Select an ECHNL Issue to inspect its Review history.</div></section>
@@ -12652,21 +12654,56 @@ function jiraKeyFromReportPath(reportPath) {
       }));
       const hasLiveCycles = issueReviews.some(issue => (issue.cycles || []).some(cycle => issueCycleIsLive(issue, cycle)));
       if (issueReviewSprintFilter === '__current__' && !hasLiveCycles) issueReviewSprintFilter = '__all__';
-      select.innerHTML = `<option value="__current__" ${hasLiveCycles ? '' : 'disabled'}>Current cycles</option><option value="__all__">All sprints &amp; history</option>` + [...sprints.entries()]
+      const orderedSprints = [...sprints.entries()]
         .sort((left, right) => {
           if (String(left[1].sprint_id || '') === 'legacy') return 1;
           if (String(right[1].sprint_id || '') === 'legacy') return -1;
           return String(right[1].sprint_id || '').localeCompare(String(left[1].sprint_id || ''), undefined, {numeric:true});
-        })
-        .map(([key, cycle]) => `<option value="${escapeHtml(key)}">${escapeHtml(cycle.sprint_name || cycle.sprint_id || 'Legacy / Unknown Sprint')} · ${escapeHtml(statusLabel(cycle.sprint_state || 'unknown'))}</option>`).join('');
+        });
+      const sprintOptions = orderedSprints
+        .filter(([, cycle]) => String(cycle.sprint_id || '') !== 'legacy')
+        .map(([key, cycle]) => `<option value="${escapeHtml(key)}">${escapeHtml(cycle.sprint_name || cycle.sprint_id)} · ${escapeHtml(statusLabel(cycle.sprint_state || 'unknown'))}</option>`).join('');
+      const legacyOptions = orderedSprints
+        .filter(([, cycle]) => String(cycle.sprint_id || '') === 'legacy')
+        .map(([key]) => `<option value="${escapeHtml(key)}">Legacy records · Sprint identity unavailable</option>`).join('');
+      select.innerHTML = `<optgroup label="View presets"><option value="__current__" ${hasLiveCycles ? '' : 'disabled'}>Current active cycles</option><option value="__all__">All cycles &amp; history</option></optgroup>`
+        + (sprintOptions ? `<optgroup label="Sprint cycles">${sprintOptions}</optgroup>` : '')
+        + (legacyOptions ? `<optgroup label="Legacy data">${legacyOptions}</optgroup>` : '');
       select.value = issueReviewSprintFilter;
       const selected = sprints.get(issueReviewSprintFilter);
       const currentOnly = issueReviewSprintFilter === '__current__';
       const allHistory = issueReviewSprintFilter === '__all__';
       const context = currentOnly ? 'live' : (allHistory ? 'historical' : (String(selected?.sprint_id || '') === 'legacy' ? 'legacy' : (selected?.cycle_closed_at ? 'historical' : 'live')));
       const contextLabel = currentOnly ? 'Live' : (allHistory ? 'All history' : (context === 'legacy' ? 'Legacy' : (context === 'historical' ? 'Historical' : 'Live Sprint')));
-      const contextMeta = currentOnly ? 'Current cycles only' : (allHistory ? 'Live and historical cycles' : (selected?.sprint_name || selected?.sprint_id || 'Cycle-scoped statistics'));
+      const contextMeta = currentOnly ? 'Current cycles only' : (allHistory ? 'Live and historical cycles' : (context === 'legacy' ? 'No persisted Sprint identity' : (selected?.sprint_name || selected?.sprint_id || 'Cycle-scoped statistics')));
       $('issueReviewContextSummary').innerHTML = `<span class="status-chip" data-context="${context}">${contextLabel}</span><span class="meta">${escapeHtml(contextMeta)}</span>`;
+      syncIssueReviewFilterSummary();
+    }
+
+    function syncIssueReviewFilterSummary() {
+      const search = ($('issueReviewSearch')?.value || '').trim();
+      const select = $('issueReviewSprintSelect');
+      const sprintLabel = select?.options[select.selectedIndex]?.textContent || '';
+      const parts = [];
+      if (issueReviewSprintFilter !== '__current__') parts.push(sprintLabel);
+      if (issueReviewApplicationFilter) parts.push(issueReviewApplicationFilter);
+      if (search) parts.push(`Search: ${search}`);
+      $('issueReviewScope').hidden = !parts.length;
+      $('issueReviewScope').textContent = parts.join(' · ');
+      $('resetIssueReviewFiltersBtn').hidden = !parts.length;
+    }
+
+    function resetIssueReviewFilters() {
+      const currentOption = [...$('issueReviewSprintSelect').options].find(option => option.value === '__current__');
+      issueReviewSprintFilter = currentOption && !currentOption.disabled ? '__current__' : '__all__';
+      issueReviewApplicationFilter = '';
+      selectedIssueReviewCycle = '';
+      selectedIssueReview = null;
+      $('issueReviewSearch').value = '';
+      syncIssueReviewContextControls();
+      renderIssueReviewOverview();
+      renderIssueReviews();
+      $('issueReviewDetail').innerHTML = '<div class="markdown-preview empty">Select an Issue in this Sprint to inspect its Cycle-scoped Review history.</div>';
     }
 
     function setIssueReviewView(view) {
@@ -12790,8 +12827,6 @@ function jiraKeyFromReportPath(reportPath) {
         selectedIssueReview = null;
         selectedIssueReviewCycle = '';
         $('issueReviewSearch').value = '';
-        $('issueReviewScope').hidden = false;
-        $('issueReviewScope').textContent = `${button.dataset.sprintLabel || 'Sprint'}${issueReviewApplicationFilter ? ` · ${issueReviewApplicationFilter}` : ''}`;
         syncIssueReviewContextControls();
         setIssueReviewView('issues');
         $('issueReviewDetail').innerHTML = '<div class="markdown-preview empty">Select an Issue in this Sprint to inspect its Cycle-scoped Review history.</div>';
@@ -13735,8 +13770,6 @@ function jiraKeyFromReportPath(reportPath) {
       issueReviewSprintFilter = event.target.value || '__current__';
       issueReviewApplicationFilter = '';
       selectedIssueReviewCycle = '';
-      $('issueReviewScope').hidden = issueReviewSprintFilter === '__current__';
-      $('issueReviewScope').textContent = event.target.options[event.target.selectedIndex]?.textContent || '';
       syncIssueReviewContextControls();
       renderIssueReviewOverview();
       renderIssueReviews();
@@ -13750,8 +13783,8 @@ function jiraKeyFromReportPath(reportPath) {
         }
       }
     });
+    $('resetIssueReviewFiltersBtn').addEventListener('click', resetIssueReviewFilters);
     $('issueReviewSearch').addEventListener('input', () => {
-      issueReviewApplicationFilter = '';
       selectedIssueReviewCycle = '';
       syncIssueReviewContextControls();
       renderIssueReviews();

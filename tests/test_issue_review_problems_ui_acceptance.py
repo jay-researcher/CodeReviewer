@@ -164,7 +164,7 @@ class IssueReviewProblemsUiAcceptanceTests(unittest.TestCase):
         self.assertRegex(page, r'sprint', re.I)
         self.assertIn('id="issueReviewSprintSelect"', page)
         self.assertIn('<option value="__current__">Current cycles</option>', page)
-        self.assertIn('All sprints &amp; history', page)
+        self.assertIn('All cycles &amp; history', page)
         self.assertIn("let issueReviewSprintFilter = '__current__';", page)
         self.assertIn('function issueCycleMatchesFilter', page)
         self.assertIn('class="issue-history-nav"', page)
@@ -172,6 +172,17 @@ class IssueReviewProblemsUiAcceptanceTests(unittest.TestCase):
         self.assertIn('id="issueReviewCycleSelect"', page)
         self.assertIn('Historical · read-only', page)
         self.assertIn('cycle_id:cycleId', page)
+
+    def test_issue_review_filters_are_grouped_aligned_and_resettable(self) -> None:
+        page = self.page
+        self.assertIn('grid-template-columns: auto minmax(280px, 340px) minmax(190px, auto)', page)
+        self.assertIn('<optgroup label="View presets">', page)
+        self.assertIn('<optgroup label="Sprint cycles">', page)
+        self.assertIn('<optgroup label="Legacy data">', page)
+        self.assertIn('Legacy records · Sprint identity unavailable', page)
+        self.assertIn('id="resetIssueReviewFiltersBtn"', page)
+        self.assertIn('function resetIssueReviewFilters()', page)
+        self.assertIn("Search: ${search}", page)
 
 
 if __name__ == "__main__":
