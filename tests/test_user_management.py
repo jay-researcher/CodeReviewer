@@ -41,6 +41,7 @@ class UserManagementTests(unittest.TestCase):
                     "role": "developer",
                     "active": True,
                     "responsible": ["team.one"],
+                    "responsible_scopes": [{"application": "WVAdmin", "responsibles": ["team.one"]}],
                     "revision": 1,
                 },
             }
@@ -82,6 +83,7 @@ class UserManagementTests(unittest.TestCase):
         self.assertNotEqual(temporary, record["password_hash"])
         self.assertTrue(web_app.verify_web_password(temporary, str(record["password_hash"])))
         self.assertEqual(["wen.yi", "kevin.tan"], record["responsible"])
+        self.assertTrue(record["responsible_scopes"])
         self.assertTrue(record["must_change_password"])
 
     def test_non_manager_cannot_manage_users(self) -> None:
@@ -145,6 +147,7 @@ class UserManagementTests(unittest.TestCase):
                 "role": "developer",
                 "active": True,
                 "responsibles": ["team.one"],
+                "responsible_scopes": [{"application": "WVAdmin", "responsibles": ["team.one"]}],
                 "revision": 1,
             },
         )
@@ -157,9 +160,76 @@ class UserManagementTests(unittest.TestCase):
                     "role": "auditor",
                     "active": True,
                     "responsibles": ["team.one"],
+                    "responsible_scopes": [{"application": "WVAdmin", "responsibles": ["team.one"]}],
                     "revision": 1,
                 },
             )
+
+    def test_application_scope_does_not_leak_same_responsible_to_other_app(self) -> None:
+        self.assertTrue(
+            web_app._application_responsible_allows(
+                "developer.one", {"WVAdmin"}, {"team.one"}
+            )
+        )
+        self.assertFalse(
+            web_app._application_responsible_allows(
+                "developer.one", {"Services Terminal"}, {"team.one"}
+            )
+        )
+
+    def test_issue_detail_only_exposes_authorized_application_runs(self) -> None:
+        detail = {
+            "issue": {"jira_key": "ECHNL-1", "responsible": "team.one"},
+            "selected_cycle": {"cycle_id": "cycle-1"},
+            "runs": [
+                {
+                    "id": "wv-run",
+                    "cycle_id": "cycle-1",
+                    "run_group_id": "group-1",
+                    "application": "WVAdmin",
+                    "responsible_scope": "team.one",
+                    "severity_counts": {"High": 1},
+                    "findings": [{"id": "visible", "run_id": "wv-run"}],
+                },
+                {
+                    "id": "terminal-run",
+                    "cycle_id": "cycle-1",
+                    "run_group_id": "group-1",
+                    "application": "Services Terminal",
+                    "responsible_scope": "team.one",
+                    "severity_counts": {"High": 1},
+                    "findings": [{"id": "hidden", "run_id": "terminal-run"}],
+                },
+            ],
+            "latest_run_group": {
+                "runs": [
+                    {
+                        "id": "wv-run",
+                        "application": "WVAdmin",
+                        "responsible_scope": "team.one",
+                        "severity_counts": {"High": 1},
+                        "findings": [{"id": "visible", "run_id": "wv-run"}],
+                    },
+                    {
+                        "id": "terminal-run",
+                        "application": "Services Terminal",
+                        "responsible_scope": "team.one",
+                        "severity_counts": {"High": 1},
+                        "findings": [{"id": "hidden", "run_id": "terminal-run"}],
+                    },
+                ]
+            },
+            "run_groups": [{"id": "group-1"}],
+            "discussions": [],
+            "passes": [],
+        }
+        visible, full_access = web_app._filter_issue_detail_for_user(detail, "developer.one")
+        self.assertFalse(full_access)
+        self.assertEqual(["wv-run"], [run["id"] for run in visible["runs"]])
+        self.assertEqual(
+            ["visible"],
+            [finding["id"] for finding in visible["latest_run_group"]["findings"]],
+        )
 
     def test_audit_failure_rolls_back_password_and_preserves_session(self) -> None:
         token = "session-before-failed-reset"
@@ -237,6 +307,8 @@ class UserManagementTests(unittest.TestCase):
             'id="userAdminRoleFilter"',
             'id="userAdminStatusFilter"',
             'id="managedResponsibleAdd"',
+            'id="managedApplicationScope"',
+            'id="managedResponsibleScopeSummary"',
             'id="resetManagedPasswordBtn"',
             'id="temporaryPasswordModal"',
             "'Idempotency-Key': adminRequestId('user-save')",

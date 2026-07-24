@@ -17,6 +17,7 @@ from code_reviewer.review_service import (
     run_review_from_payload,
     review_fingerprint_from_merge_requests,
     select_cycle_mr_revisions,
+    _jira_group_resume_key,
     _select_fetched_cycle_revisions,
 )
 
@@ -119,6 +120,13 @@ class SprintMembershipTests(unittest.TestCase):
 
 
 class RevisionBoundaryTests(unittest.TestCase):
+    def test_resume_key_is_scoped_to_sprint(self) -> None:
+        items = [{"project_path": "group/api", "mr_id": "7", "head_sha": "a" * 40}]
+        self.assertNotEqual(
+            _jira_group_resume_key("ECHNL-1", items, sprint="Sprint 1"),
+            _jira_group_resume_key("ECHNL-1", items, sprint="Sprint 2"),
+        )
+
     def test_review_fingerprint_changes_with_head_sha(self) -> None:
         base = {"mr_url": "https://gitlab.example/group/api/-/merge_requests/7", "head_sha": "a" * 40}
         changed = {**base, "head_sha": "b" * 40}
@@ -148,9 +156,12 @@ class RevisionBoundaryTests(unittest.TestCase):
     def test_service_selection_consumes_persisted_cycle_scope(self) -> None:
         class Store:
             def list_cycles(self, _jira_key):
-                return [{"cycle_id": "old", "mr_scope_json": [
+                return [{"cycle_id": "old", "sprint_name": "Sprint 1", "mr_scope_json": [
                     {"project_path": "group/api", "mr_id": "7", "head_sha": "a" * 40}
                 ]}]
+
+            def cycle_detail(self, _cycle_id):
+                return {"runs": [{"status": "completed"}]}
 
         old = ReviewInput(
             project="api", mr_id="7", mr_url="https://gitlab.example/group/api/-/merge_requests/7",
@@ -161,9 +172,48 @@ class RevisionBoundaryTests(unittest.TestCase):
             commit="b" * 40, metadata={"gitlab_project_path": "group/api"},
         )
         with patch("code_reviewer.workflow_store.workflow_store", return_value=Store()):
-            selected, excluded = _select_fetched_cycle_revisions("ECHNL-1", [old, changed])
+            selected, excluded = _select_fetched_cycle_revisions(
+                "ECHNL-1",
+                [old, changed],
+                sprint="Sprint 1",
+            )
         self.assertEqual([item.commit for item in selected], ["b" * 40])
         self.assertEqual(excluded[0]["selection_reason"], "reviewed-unchanged-revision")
+
+    def test_empty_cycle_and_other_sprint_are_not_review_evidence(self) -> None:
+        class Store:
+            def list_cycles(self, _jira_key):
+                return [
+                    {
+                        "cycle_id": "empty-current",
+                        "sprint_name": "Sprint 2",
+                        "mr_scope_json": [{"project_path": "group/api", "mr_id": "7", "head_sha": "a" * 40}],
+                    },
+                    {
+                        "cycle_id": "legacy-run",
+                        "sprint_name": "Legacy / Unknown Sprint",
+                        "mr_scope_json": [{"project_path": "group/api", "mr_id": "7", "head_sha": "a" * 40}],
+                    },
+                ]
+
+            def cycle_detail(self, cycle_id):
+                return {"runs": []} if cycle_id == "empty-current" else {"runs": [{"status": "completed"}]}
+
+        candidate = ReviewInput(
+            project="api",
+            mr_id="7",
+            mr_url="https://gitlab.example/group/api/-/merge_requests/7",
+            commit="a" * 40,
+            metadata={"gitlab_project_path": "group/api"},
+        )
+        with patch("code_reviewer.workflow_store.workflow_store", return_value=Store()):
+            selected, excluded = _select_fetched_cycle_revisions(
+                "ECHNL-1",
+                [candidate],
+                sprint="Sprint 2",
+            )
+        self.assertEqual([candidate], selected)
+        self.assertEqual([], excluded)
 
     def test_deferred_reconciliation_limits_release_scope_and_head_revision(self) -> None:
         current = {

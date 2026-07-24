@@ -56,6 +56,9 @@ class WebRolesWorkflowTests(unittest.TestCase):
             with patch(
                 "code_reviewer.web_app._web_user_responsibles",
                 return_value=["wen.yi"],
+            ), patch(
+                "code_reviewer.web_app._web_user_responsible_scopes",
+                return_value={"wvadmin": {"wen.yi"}},
             ), patch("code_reviewer.web_app._web_user_role", return_value="auditor"):
                 self.assertTrue(_can_access_report(base, report, "auditor", metadata=metadata))
 

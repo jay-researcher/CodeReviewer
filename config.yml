@@ -607,12 +607,14 @@ wvadmin-repository:
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/momd
   low_code_designable:
+    application: AOP
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/low-code-designable.git
     responsible: "victorcz.xu"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/low_code_designable
   low_code_renderable:
+    application: AOP
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/low-code-renderable.git
     responsible: "victorcz.xu"
     llm_model: "gpt-5.6-sol"
@@ -631,18 +633,21 @@ wvadmin-repository:
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/workflow_app
   low_code_application:
+    application: AOP
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/low-code-application.git
     responsible: "victorcz.xu"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/low_code_application
   trade_middle_office:
+    application: Services Terminal
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/trade-middle-office.git
     responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/trade_middle_office
   account_middle_office:
+    application: AOP
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/account-middle-office.git
     responsible: "victorcz.xu"
     llm_model: "gpt-5.6-sol"
@@ -661,6 +666,7 @@ wvadmin-repository:
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/common
   form_designable:
+    application: AOP
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/form-app-designable.git
     responsible: "victorcz.xu"
     llm_model: "gpt-5.6-sol"

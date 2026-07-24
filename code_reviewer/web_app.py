@@ -215,6 +215,7 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
                     "users": list_managed_web_users(),
                     "roles": ["developer", "auditor", "manager"],
                     "responsible_options": managed_responsible_options(),
+                    "application_options": managed_application_options(),
                 }
             )
             return
@@ -359,12 +360,16 @@ class CodeReviewerHandler(BaseHTTPRequestHandler):
                 if not detail:
                     self._send_json({"ok": False, "error": "Issue review was not found."}, status=HTTPStatus.NOT_FOUND)
                 else:
+                    detail, full_cycle_access = _filter_issue_detail_for_user(detail, user)
                     _enrich_issue_review_finding_details(detail)
+                    permissions = _web_user_permissions(user)
+                    if not full_cycle_access:
+                        permissions = {**permissions, "manual_pass": False}
                     self._send_json({
                         "ok": True,
                         **detail,
                         "jira_url": _jira_issue_url(jira_key),
-                        "permissions": _web_user_permissions(user),
+                        "permissions": permissions,
                         "role": _web_user_role(user),
                     })
             except PermissionError as exc:
@@ -2067,7 +2072,7 @@ def _report_matches_search(relative: str, name: str, responsible: str, search: s
     return all(token in haystack for token in tokens)
 
 
-REVIEW_APPLICATION_ORDER = ("WVAdmin", "iTrade Client", "Services Terminal", "DPS", "Unmapped")
+REVIEW_APPLICATION_ORDER = ("WVAdmin", "AOP", "iTrade Client", "Services Terminal", "DPS", "Unmapped")
 
 
 def _coverage_issue_row(jira_key: str, summary: str = "", jira_status: str = "") -> dict[str, object]:
@@ -2241,7 +2246,7 @@ def build_review_coverage(
         review_scope = _review_scope_from_discovery(item)
         if (
             _web_user_role(user) != "manager"
-            and not _can_access_project_responsible(responsible, user)
+            and not _can_access_project_responsible(responsible, user, review_scope.application)
             and not _review_domain_allows(user, [review_scope.application])
         ):
             continue
@@ -2262,6 +2267,13 @@ def build_review_coverage(
         if project_path:
             row["project_paths"].add(project_path)
         row["mr_count"] = int(row.get("mr_count") or 0) + 1
+
+    if _web_user_role(user) != "manager":
+        issue_rows = {
+            key: row
+            for key, row in issue_rows.items()
+            if int(row.get("mr_count") or 0) > 0 or _issue_access_allowed(user, key)
+        }
 
     if _web_user_role(user) == "manager":
         for item in discovery.get("issues_without_mrs") or []:
@@ -3413,7 +3425,7 @@ def list_gitlab_projects_for_user(user: str) -> list[dict[str, object]]:
     projects: list[dict[str, object]] = []
     seen: set[tuple[str, str, str]] = set()
     for entry in git_tools_project_entries():
-        if not _can_access_project_responsible(entry.responsible, user):
+        if not _can_access_project_responsible(entry.responsible, user, entry.application):
             continue
         key = (entry.group, entry.module, entry.project_path)
         if key in seen:
@@ -3460,18 +3472,23 @@ def _can_access_report(
         parts = report_path.resolve().relative_to(base.resolve()).parts
     except ValueError:
         return False
-    responsible = parts[0] if len(parts) > 1 else "__root__"
-    if _can_access_responsible(responsible, user):
-        return True
     metadata = metadata if metadata is not None else _read_report_metadata(report_path)
     if _review_domain_allows(user, _metadata_applications(metadata)):
         return True
+    responsible = parts[0] if len(parts) > 1 else "__root__"
     report_people = {
         item.casefold()
         for item in scope_people(metadata.get("responsible_scope") or metadata.get("responsible"))
     }
-    allowed = {item.casefold() for item in _web_user_responsibles(user)}
-    return bool(report_people & allowed)
+    applications = _metadata_applications(metadata)
+    if applications:
+        return _application_responsible_allows(user, applications, report_people)
+    # Old reports without application metadata retain the legacy Responsible
+    # check. They cannot be widened to an application because the evidence is
+    # absent.
+    return _can_access_responsible(responsible, user) or bool(
+        report_people & {item.casefold() for item in _web_user_responsibles(user)}
+    )
 
 
 def _read_report_metadata(path: Path, max_chars: int = 65536) -> dict[str, object]:
@@ -3493,9 +3510,11 @@ def _can_access_responsible(responsible: str, user: str) -> bool:
     return bool(allowed.intersection(item.lower() for item in _split_people(normalized)))
 
 
-def _can_access_project_responsible(responsible: str, user: str) -> bool:
+def _can_access_project_responsible(responsible: str, user: str, application: str = "") -> bool:
     if _web_user_role(user) == "manager":
         return True
+    if application:
+        return _application_responsible_allows(user, {application}, scope_people(responsible))
     allowed = {item.lower() for item in _web_user_responsibles(user)}
     return bool(allowed.intersection(item.lower() for item in _split_people(responsible)))
 
@@ -3546,6 +3565,75 @@ def _web_user_responsibles(user: str) -> list[str]:
     else:
         values = _split_people(str(configured or ""))
     return values or [(user or "").strip()]
+
+
+def _normalize_application_name(value: object) -> str:
+    requested = str(value or "").strip()
+    if not requested:
+        return ""
+    return next(
+        (item for item in managed_application_options() if item.casefold() == requested.casefold()),
+        requested,
+    )
+
+
+def _infer_responsible_scopes(responsibles: list[str]) -> list[dict[str, object]]:
+    requested = {item.casefold(): item for item in responsibles if item}
+    grouped: dict[str, set[str]] = {}
+    for entry in git_tools_project_entries():
+        application = _normalize_application_name(entry.application)
+        if not application:
+            continue
+        for person in scope_people(entry.responsible):
+            canonical = requested.get(person.casefold())
+            if canonical:
+                grouped.setdefault(application, set()).add(canonical)
+    return [
+        {"application": application, "responsibles": sorted(values, key=str.casefold)}
+        for application, values in sorted(grouped.items(), key=lambda item: item[0].casefold())
+    ]
+
+
+def _record_responsible_scopes(record: dict[str, object]) -> tuple[list[dict[str, object]], bool]:
+    configured = record.get("responsible_scopes")
+    if isinstance(configured, list):
+        return _normalize_managed_responsible_scopes(configured), False
+    flat = record.get("responsible") or record.get("responsibles")
+    responsibles = (
+        [str(item).strip() for item in flat if str(item).strip()]
+        if isinstance(flat, list)
+        else _split_people(str(flat or ""))
+    )
+    return _infer_responsible_scopes(responsibles), bool(responsibles)
+
+
+def _web_user_responsible_scopes(user: str) -> dict[str, set[str]]:
+    scopes, _ = _record_responsible_scopes(_web_user_record(user))
+    return {
+        str(item["application"]).casefold(): {
+            str(person).casefold() for person in item.get("responsibles") or []
+        }
+        for item in scopes
+        if str(item.get("application") or "").strip()
+    }
+
+
+def _application_responsible_allows(
+    user: str,
+    applications: object,
+    responsibles: object,
+) -> bool:
+    if _web_user_role(user) == "manager":
+        return True
+    app_values = applications if isinstance(applications, (set, list, tuple)) else []
+    people_values = responsibles if isinstance(responsibles, (set, list, tuple)) else []
+    people = {str(item).strip().casefold() for item in people_values if str(item).strip()}
+    scopes = _web_user_responsible_scopes(user)
+    return any(
+        bool(scopes.get(str(application).strip().casefold(), set()) & people)
+        for application in app_values
+        if str(application).strip()
+    )
 
 
 def _web_user_review_applications(user: str) -> set[str]:
@@ -3621,19 +3709,135 @@ def _issue_access_allowed(user: str, jira_key: str) -> bool:
     if not detail:
         return False
     issue = detail.get("issue") if isinstance(detail.get("issue"), dict) else {}
-    owners = {
-        item.casefold()
-        for item in scope_people(issue.get("responsible_scope") or issue.get("responsible"))
-    }
-    allowed = {item.casefold() for item in _web_user_responsibles(user)}
-    if owners & allowed:
+    runs = [run for run in (detail.get("runs") or []) if isinstance(run, dict)]
+    applications = {str(run.get("application") or "").strip() for run in runs if str(run.get("application") or "").strip()}
+    if _review_domain_allows(user, applications):
         return True
-    applications = {
-        str(run.get("application") or "").strip()
-        for run in (detail.get("runs") or [])
-        if isinstance(run, dict) and str(run.get("application") or "").strip()
+    if any(_issue_run_access_allowed(user, run, issue) for run in runs):
+        return True
+    owners = scope_people(issue.get("responsible_scope") or issue.get("responsible"))
+    summary_context = {
+        **issue,
+        "cycles": detail.get("cycles") or [],
+        "current_cycle": detail.get("selected_cycle") or {},
     }
-    return _review_domain_allows(user, applications)
+    summary_applications = _issue_summary_applications(summary_context)
+    for cycle in detail.get("cycles") or []:
+        if not isinstance(cycle, dict):
+            continue
+        scope = cycle.get("mr_scope") or cycle.get("mr_scope_json") or []
+        for item in scope if isinstance(scope, list) else []:
+            if not isinstance(item, dict):
+                continue
+            application = review_scope_for_merge_request(item).application
+            if _review_domain_allows(user, {application}) or _application_responsible_allows(
+                user,
+                {application},
+                scope_people(item.get("responsible") or owners),
+            ):
+                return True
+    if summary_applications and _application_responsible_allows(user, summary_applications, owners):
+        return True
+    # Legacy issues with neither Run nor application scope keep the old,
+    # explicitly unscoped Responsible check.
+    if not applications and not summary_applications:
+        allowed = {item.casefold() for item in _web_user_responsibles(user)}
+        return bool(allowed & {item.casefold() for item in owners})
+    return False
+
+
+def _issue_run_access_allowed(
+    user: str,
+    run: dict[str, object],
+    issue: dict[str, object] | None = None,
+) -> bool:
+    if _web_user_permissions(user)["view_all"]:
+        return True
+    application = str(run.get("application") or "").strip()
+    if not application:
+        return False
+    if _review_domain_allows(user, {application}):
+        return True
+    issue = issue or {}
+    return _application_responsible_allows(
+        user,
+        {application},
+        scope_people(
+            run.get("responsible_scope")
+            or issue.get("responsible_scope")
+            or issue.get("responsible")
+        ),
+    )
+
+
+def _filter_issue_detail_for_user(
+    detail: dict[str, object],
+    user: str,
+) -> tuple[dict[str, object], bool]:
+    """Restrict a shared Jira Issue to application/report scopes visible to user.
+
+    The Issue remains a single workflow entity, while Run evidence is filtered
+    by the same Application AND Responsible rule used by Reports and Projects.
+    ``full_cycle_access`` controls whole-Cycle actions such as Manual Pass.
+    """
+    if _web_user_permissions(user)["view_all"]:
+        return detail, True
+    issue = detail.get("issue") if isinstance(detail.get("issue"), dict) else {}
+    all_runs = [run for run in (detail.get("runs") or []) if isinstance(run, dict)]
+    allowed_runs = [run for run in all_runs if _issue_run_access_allowed(user, run, issue)]
+    allowed_run_ids = {str(run.get("id") or "") for run in allowed_runs}
+    allowed_group_ids = {str(run.get("run_group_id") or "") for run in allowed_runs}
+    visible = dict(detail)
+    visible["runs"] = allowed_runs
+    visible["run_groups"] = [
+        row for row in (detail.get("run_groups") or [])
+        if isinstance(row, dict) and str(row.get("id") or "") in allowed_group_ids
+    ]
+    latest = detail.get("latest_run_group") if isinstance(detail.get("latest_run_group"), dict) else {}
+    latest_runs = [
+        run for run in (latest.get("runs") or [])
+        if isinstance(run, dict) and str(run.get("id") or "") in allowed_run_ids
+    ]
+    latest_findings = [
+        finding
+        for run in latest_runs
+        for finding in (run.get("findings") or [])
+        if isinstance(finding, dict)
+    ]
+    latest_severity: dict[str, int] = {}
+    for run in latest_runs:
+        for severity, count in (run.get("severity_counts") or {}).items():
+            latest_severity[str(severity)] = latest_severity.get(str(severity), 0) + int(count or 0)
+    visible["latest_run_group"] = (
+        {
+            **latest_runs[0],
+            "runs": latest_runs,
+            "run_count": len(latest_runs),
+            "findings": latest_findings,
+            "finding_count": len(latest_findings),
+            "severity_counts": latest_severity,
+        }
+        if latest_runs
+        else {}
+    )
+    for key in ("discussions", "passes"):
+        visible[key] = [
+            row for row in (detail.get(key) or [])
+            if isinstance(row, dict)
+            and (not str(row.get("run_id") or "") or str(row.get("run_id") or "") in allowed_run_ids)
+        ]
+    selected_cycle = detail.get("selected_cycle") if isinstance(detail.get("selected_cycle"), dict) else {}
+    selected_cycle_id = str(selected_cycle.get("cycle_id") or "")
+    current_runs = [run for run in all_runs if str(run.get("cycle_id") or "") == selected_cycle_id]
+    full_cycle_access = bool(current_runs) and all(
+        str(run.get("id") or "") in allowed_run_ids for run in current_runs
+    )
+    visible["access_scope"] = {
+        "mode": "full-cycle" if full_cycle_access else "application-scoped",
+        "visible_run_count": len(allowed_runs),
+        "total_run_count": len(all_runs),
+    }
+    return visible, full_cycle_access
 
 
 def _require_issue_access(user: str, jira_key: str) -> None:
@@ -3646,16 +3850,64 @@ def _workflow_issues_for_user(user: str) -> list[dict[str, object]]:
     if permissions["view_all"]:
         return workflow_store().list_issues(view_all=True)
     issues = workflow_store().list_issues(view_all=True)
-    allowed_owners = {item.casefold() for item in _web_user_responsibles(user)}
-    return [
-        issue
-        for issue in issues
-        if allowed_owners.intersection(
-            item.casefold()
-            for item in scope_people(issue.get("responsible_scope") or issue.get("responsible"))
-        )
-        or _review_domain_allows(user, _issue_summary_applications(issue))
-    ]
+    visible: list[dict[str, object]] = []
+    for issue in issues:
+        scoped_issue = _filter_issue_summary_for_user(issue, user)
+        if scoped_issue is not None:
+            visible.append(scoped_issue)
+    return visible
+
+
+def _filter_issue_summary_for_user(
+    issue: dict[str, object],
+    user: str,
+) -> dict[str, object] | None:
+    owners = scope_people(issue.get("responsible_scope") or issue.get("responsible"))
+    cycles = [cycle for cycle in (issue.get("cycles") or []) if isinstance(cycle, dict)]
+    allowed_by_cycle: dict[str, set[str]] = {}
+    for cycle in cycles:
+        allowed_applications: set[str] = set()
+        scope = cycle.get("mr_scope") or cycle.get("mr_scope_json") or []
+        for item in scope if isinstance(scope, list) else []:
+            if not isinstance(item, dict):
+                continue
+            application = review_scope_for_merge_request(item).application
+            responsible = scope_people(item.get("responsible") or owners)
+            if _review_domain_allows(user, {application}) or _application_responsible_allows(
+                user, {application}, responsible
+            ):
+                allowed_applications.add(application)
+        if not scope:
+            for progress in cycle.get("application_progress") or []:
+                if not isinstance(progress, dict):
+                    continue
+                application = str(progress.get("application") or "").strip()
+                if _review_domain_allows(user, {application}) or _application_responsible_allows(
+                    user, {application}, owners
+                ):
+                    allowed_applications.add(application)
+        allowed_by_cycle[str(cycle.get("cycle_id") or "")] = allowed_applications
+    if not any(allowed_by_cycle.values()) and not _issue_access_allowed(
+        user, str(issue.get("jira_key") or "")
+    ):
+        return None
+    filtered_cycles: list[dict[str, object]] = []
+    for cycle in cycles:
+        allowed = allowed_by_cycle.get(str(cycle.get("cycle_id") or ""), set())
+        filtered = dict(cycle)
+        filtered["application_progress"] = [
+            row for row in (cycle.get("application_progress") or [])
+            if isinstance(row, dict) and str(row.get("application") or "") in allowed
+        ]
+        filtered_cycles.append(filtered)
+    result = dict(issue)
+    result["cycles"] = filtered_cycles
+    current_cycle_id = str(issue.get("current_cycle_id") or "")
+    result["current_cycle"] = next(
+        (cycle for cycle in filtered_cycles if str(cycle.get("cycle_id") or "") == current_cycle_id),
+        {},
+    )
+    return result
 
 
 def recent_workflow_sprints(query: str = "", limit: int = 30) -> list[dict[str, str]]:
@@ -4281,11 +4533,16 @@ def _public_web_user(username: str, record: dict[str, object]) -> dict[str, obje
         else _split_people(str(configured or ""))
     )
     role = str(record.get("role") or _default_web_user_role(username)).lower()
+    effective_responsibles = responsibles or ([] if role == "manager" else [username])
+    scope_record = record if responsibles or role == "manager" else {**record, "responsible": effective_responsibles}
+    responsible_scopes, migration_required = _record_responsible_scopes(scope_record)
     return {
         "username": username,
         "role": role,
         "active": record.get("active") is not False,
-        "responsibles": responsibles or ([] if role == "manager" else [username]),
+        "responsibles": effective_responsibles,
+        "responsible_scopes": [] if role == "manager" else responsible_scopes,
+        "responsible_scope_migration_required": role != "manager" and migration_required,
         "must_change_password": bool(record.get("must_change_password")),
         "created_at": str(record.get("created_at") or ""),
         "updated_at": str(record.get("updated_at") or record.get("password_changed_at") or record.get("created_at") or ""),
@@ -4296,8 +4553,15 @@ def _public_web_user(username: str, record: dict[str, object]) -> dict[str, obje
 
 def list_managed_web_users() -> list[dict[str, object]]:
     users = ensure_web_users()
+    configured = _configured_web_user_profiles()
     return [
-        _public_web_user(username, record)
+        _public_web_user(
+            username,
+            {
+                **(configured.get(username) if isinstance(configured.get(username), dict) else {}),
+                **record,
+            },
+        )
         for username, record in sorted(users.items(), key=lambda item: item[0].casefold())
         if isinstance(record, dict)
     ]
@@ -4320,6 +4584,17 @@ def managed_responsible_options() -> list[str]:
     return sorted((item for item in values if item), key=str.casefold)
 
 
+def managed_application_options() -> list[str]:
+    values = {
+        str(entry.application).strip()
+        for entry in git_tools_project_entries()
+        if str(entry.application or "").strip()
+    }
+    values.update(item for item in REVIEW_APPLICATION_ORDER if item != "Unmapped")
+    order = {item: index for index, item in enumerate(REVIEW_APPLICATION_ORDER)}
+    return sorted(values, key=lambda item: (order.get(item, len(order)), item.casefold()))
+
+
 def _normalize_managed_responsibles(value: object) -> list[str]:
     raw = value if isinstance(value, list) else _split_people(str(value or ""))
     result = list(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
@@ -4329,6 +4604,30 @@ def _normalize_managed_responsibles(value: object) -> list[str]:
         if len(item) > 80 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", item):
             raise ValueError(f"Invalid responsible identifier: {item}")
     return result
+
+
+def _normalize_managed_responsible_scopes(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    grouped: dict[str, set[str]] = {}
+    valid_applications = {item.casefold(): item for item in managed_application_options()}
+    for row in value:
+        if not isinstance(row, dict):
+            raise ValueError("Each Responsible scope must include an application and Responsible identifiers.")
+        requested_application = str(row.get("application") or "").strip()
+        application = valid_applications.get(requested_application.casefold())
+        if not application:
+            raise ValueError(f"Invalid application scope: {requested_application or '(empty)'}")
+        responsibles = _normalize_managed_responsibles(row.get("responsibles"))
+        grouped.setdefault(application, set()).update(responsibles)
+    normalized = [
+        {"application": application, "responsibles": sorted(responsibles, key=str.casefold)}
+        for application, responsibles in grouped.items()
+        if responsibles
+    ]
+    if sum(len(item["responsibles"]) for item in normalized) > 100:
+        raise ValueError("Responsible per Application Scope supports at most 100 mappings.")
+    return sorted(normalized, key=lambda item: managed_application_options().index(str(item["application"])))
 
 
 def _revoke_web_user_sessions(username: str) -> None:
@@ -4350,7 +4649,20 @@ def save_managed_web_user(actor: str, payload: dict[str, object]) -> dict[str, o
         raise ValueError("Role must be Developer, Auditor, or Manager.")
     active_value = payload.get("active", True)
     active = active_value if isinstance(active_value, bool) else str(active_value).strip().lower() not in {"0", "false", "no", "off"}
-    responsibles = _normalize_managed_responsibles(payload.get("responsibles"))
+    responsible_scopes = _normalize_managed_responsible_scopes(payload.get("responsible_scopes"))
+    responsibles = _normalize_managed_responsibles(
+        [
+            person
+            for scope in responsible_scopes
+            for person in (scope.get("responsibles") or [])
+        ]
+        or payload.get("responsibles")
+    )
+    if role != "manager" and not responsible_scopes and responsibles:
+        # Compatibility for API clients that have not yet adopted the
+        # application-scoped contract. Infer the least-privilege project
+        # mappings instead of treating the identifiers as global.
+        responsible_scopes = _infer_responsible_scopes(responsibles)
     now = datetime.now().isoformat(timespec="seconds")
     with WEB_USERS_LOCK:
         ensure_web_users()
@@ -4379,8 +4691,8 @@ def save_managed_web_user(actor: str, payload: dict[str, object]) -> dict[str, o
                 expected_revision = int(payload.get("revision") or 0)
                 if expected_revision <= 0 or expected_revision != current_revision:
                     raise ValueError("This user was updated by another session. Refresh and try again.")
-            if role != "manager" and not responsibles:
-                raise ValueError("Developer and Auditor accounts require at least one Responsible mapping.")
+            if role != "manager" and not responsible_scopes:
+                raise ValueError("Developer and Auditor accounts require at least one Responsible per Application Scope mapping.")
             temporary_password = ""
             if creating:
                 temporary_password = generate_strong_password(14)
@@ -4395,6 +4707,7 @@ def save_managed_web_user(actor: str, payload: dict[str, object]) -> dict[str, o
             record["role"] = role
             record["active"] = active
             record["responsible"] = [] if role == "manager" else responsibles
+            record["responsible_scopes"] = [] if role == "manager" else responsible_scopes
             record["updated_at"] = now
             record["updated_by"] = actor_name
             if active:
@@ -4415,6 +4728,10 @@ def save_managed_web_user(actor: str, payload: dict[str, object]) -> dict[str, o
                 "role": {"from": previous.get("role"), "to": role},
                 "active": {"from": previous.get("active", True), "to": active},
                 "responsibles": {"from": previous.get("responsible") or previous.get("responsibles") or [], "to": record["responsible"]},
+                "responsible_scopes": {
+                    "from": previous.get("responsible_scopes") or [],
+                    "to": record["responsible_scopes"],
+                },
             }
             _write_web_users(users)
             try:
@@ -4844,7 +5161,7 @@ def save_web_configuration(actor: str, payload: dict[str, object]) -> dict[str, 
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("Repository URL must be a credential-free HTTPS URL.")
     if path[-1] == "application" and value not in REVIEW_APPLICATION_ORDER:
-        raise ValueError("Application must be WVAdmin, iTrade Client, Services Terminal, DPS, or Unmapped.")
+        raise ValueError("Application must be WVAdmin, AOP, iTrade Client, Services Terminal, DPS, or Unmapped.")
     overrides = load_web_config_overrides()
     _set_nested_override(overrides, path, value)
     store = EffectiveConfigStore()
@@ -8631,7 +8948,8 @@ def render_index(user: str = "") -> str:
       line-height: 1.5;
     }
     .user-responsible-fieldset.manager-global .user-responsible-add,
-    .user-responsible-fieldset.manager-global #managedResponsibleSearch,
+    .user-responsible-fieldset.manager-global .user-scope-toolbar,
+    .user-responsible-fieldset.manager-global .user-scope-summary,
     .user-responsible-fieldset.manager-global .user-responsible-options,
     .user-responsible-fieldset.manager-global #managedResponsibleAddError { display: none; }
     .user-active-control {
@@ -8650,6 +8968,13 @@ def render_index(user: str = "") -> str:
     .user-responsible-fieldset legend { padding: 0 6px; font-weight: 700; }
     .user-responsible-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; }
     .user-responsible-add button { min-width: 76px; }
+    .user-scope-toolbar { display: grid; grid-template-columns: minmax(190px, .8fr) minmax(240px, 1.2fr); gap: 9px; margin-top: 10px; }
+    .user-scope-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .user-scope-chip {
+      display: inline-flex; align-items: center; min-height: 26px; padding: 4px 8px;
+      border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); border-radius: 999px;
+      background: color-mix(in srgb, var(--accent) 5%, var(--panel)); color: var(--text); font-size: 12px;
+    }
     .user-responsible-options {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
@@ -8688,6 +9013,7 @@ def render_index(user: str = "") -> str:
     .credential-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
     .user-reset-confirmation { margin-top: 12px; }
     .user-reset-confirmation input { margin-top: 7px; }
+    @media (max-width: 800px) { .user-scope-toolbar { grid-template-columns: 1fr; } }
     @media (max-width: 900px) {
       .issue-history-nav { align-items: stretch; flex-wrap: wrap; gap: 4px 12px; padding-top: 7px; }
       .issue-context-bar { width: 100%; height: auto; margin-left: 0; grid-template-columns: auto minmax(220px, 1fr); justify-content: stretch; padding: 7px 0; }
@@ -8927,11 +9253,15 @@ __ADMIN_TRACE_SECTION__
             <label class="user-active-control"><input id="managedActive" type="checkbox"><span><strong>Active account</strong><span class="field-help">Suspending an account revokes its active sessions.</span></span></label>
             <fieldset id="managedResponsibleFieldset" class="user-responsible-fieldset" aria-describedby="managedResponsiblesHelp managedResponsiblesError">
               <legend><span id="managedResponsibleLegend">Responsible scope</span> <span id="managedResponsibleRequired" class="required-mark" aria-hidden="true">*</span></legend>
-              <span id="managedResponsiblesHelp" class="field-help"><strong>Access scope, not a reporting line.</strong> It matches Responsible identifiers on reports and Jira Issues. Developer and Auditor require at least one scope; Manager has global access and ignores mappings.</span>
+              <span id="managedResponsiblesHelp" class="field-help"><strong>Least-privilege access.</strong> Select an Application, then assign the Responsible identifiers this user may review in that Application. Manager remains global.</span>
+              <div class="user-scope-toolbar">
+                <label><span class="field-label">Application Scope</span><select id="managedApplicationScope" aria-label="Application Scope"></select></label>
+                <label><span class="field-label">Find a Responsible</span><input id="managedResponsibleSearch" class="search-input" type="search" placeholder="Filter Responsible options" aria-label="Filter Responsible mappings"></label>
+              </div>
               <div class="user-responsible-add"><input id="managedResponsibleAdd" maxlength="80" placeholder="Add Responsible identifier" aria-describedby="managedResponsibleAddError"><button id="addManagedResponsibleBtn" class="secondary" type="button">Add</button></div>
               <span id="managedResponsibleAddError" class="field-message" role="alert"></span>
-              <input id="managedResponsibleSearch" class="search-input" type="search" placeholder="Filter Responsible options" aria-label="Filter Responsible mappings">
               <div id="managedResponsibleOptions" class="user-responsible-options"></div>
+              <div id="managedResponsibleScopeSummary" class="user-scope-summary" aria-live="polite"></div>
               <span id="managedResponsiblesError" class="field-message" role="alert"></span>
             </fieldset>
             <div id="userAdminSaveStatus" class="status" role="status" aria-live="polite"></div>
@@ -9272,6 +9602,8 @@ __ADMIN_TRACE_SECTION__
     let managedUsers = [];
     let managedUserRoles = ['developer', 'auditor', 'manager'];
     let managedResponsibleOptions = [];
+    let managedApplicationOptions = [];
+    let managedResponsibleScopes = {};
     let selectedManagedUsername = '';
     let managedUserCreating = false;
     let userAdminReturnFocus = null;
@@ -9547,31 +9879,59 @@ __ADMIN_TRACE_SECTION__
       $('userAdminCount').textContent = String(rows.length);
       $('userAdminList').innerHTML = rows.length ? rows.map(user => {
         const selected = String(user.username || '').toLowerCase() === selectedManagedUsername.toLowerCase() ? ' selected' : '';
-        const scope = (user.responsibles || []).slice(0, 2).join(', ');
-        const extra = Math.max(0, (user.responsibles || []).length - 2);
-        const allScopes = (user.responsibles || []).join(', ');
-        const scopeDisplay = allScopes ? `${scope}${extra ? ` +${extra}` : ''}` : (user.role === 'manager' ? 'Global scope' : 'Not assigned');
+        const scopeRows = (user.responsible_scopes || []).map(item => `${item.application} · ${(item.responsibles || []).join(', ')}`);
+        const allScopes = scopeRows.join(' | ');
+        const inferredPrefix = user.responsible_scope_migration_required ? 'Migration required · ' : '';
+        const scopeDisplay = scopeRows.length
+          ? `${inferredPrefix}${scopeRows.slice(0, 2).join(' | ')}${scopeRows.length > 2 ? ` +${scopeRows.length - 2}` : ''}`
+          : (user.role === 'manager' ? 'Global scope' : 'Not assigned');
         const statusValue = managedUserStatus(user);
         return `<button class="user-admin-card${selected}" type="button" data-managed-user="${escapeHtml(user.username)}" aria-pressed="${selected ? 'true' : 'false'}">
-          <span class="user-admin-card-head"><strong>${escapeHtml(user.username)}</strong><span class="status-chip user-status-chip" data-status="${statusValue}">${escapeHtml(managedUserStatusLabel(user))}</span></span>
-          <span class="user-admin-card-meta"><span class="handling-chip">${escapeHtml(statusLabel(user.role || ''))}</span><span class="user-admin-scope-label">${user.role === 'manager' && !allScopes ? '' : 'Responsible ·'}</span><span class="user-admin-scope-value" title="${escapeHtml(allScopes || scopeDisplay)}">${escapeHtml(scopeDisplay)}</span></span>
+          <span class="user-admin-card-head"><strong>${escapeHtml(user.username)}</strong><span>${user.responsible_scope_migration_required ? '<span class="status-chip" data-status="pending">Migration required</span> ' : ''}<span class="status-chip user-status-chip" data-status="${statusValue}">${escapeHtml(managedUserStatusLabel(user))}</span></span></span>
+          <span class="user-admin-card-meta"><span class="handling-chip">${escapeHtml(statusLabel(user.role || ''))}</span><span class="user-admin-scope-label">${user.role === 'manager' && !allScopes ? '' : 'Scope ·'}</span><span class="user-admin-scope-value" title="${escapeHtml(allScopes || scopeDisplay)}">${escapeHtml(scopeDisplay)}</span></span>
         </button>`;
       }).join('') : '<div class="user-admin-empty">No users match the selected filters.</div>';
       $('userAdminList').querySelectorAll('[data-managed-user]').forEach(button => button.addEventListener('click', () => editManagedUser(button.dataset.managedUser || '')));
     }
 
-    function selectedManagedResponsibles() {
-      return Array.from($('managedResponsibleOptions').querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value);
+    function currentManagedApplication() {
+      return $('managedApplicationScope')?.value || managedApplicationOptions[0] || '';
     }
 
-    function renderManagedResponsibleOptions(query = '', selectedValues = null) {
-      const selected = new Set(selectedValues || selectedManagedResponsibles());
+    function selectedManagedResponsibleScopes() {
+      return managedApplicationOptions.map(application => ({
+        application,
+        responsibles: Array.from(managedResponsibleScopes[application] || []).sort((a, b) => a.localeCompare(b, undefined, {sensitivity:'base'}))
+      })).filter(item => item.responsibles.length);
+    }
+
+    function selectedManagedResponsibles() {
+      return Array.from(new Set(selectedManagedResponsibleScopes().flatMap(item => item.responsibles)));
+    }
+
+    function renderManagedResponsibleScopeSummary() {
+      const scopes = selectedManagedResponsibleScopes();
+      $('managedResponsibleScopeSummary').innerHTML = scopes.length
+        ? scopes.map(item => `<span class="user-scope-chip"><strong>${escapeHtml(item.application)}</strong>&nbsp;·&nbsp;${escapeHtml(item.responsibles.join(', '))}</span>`).join('')
+        : '<span class="meta">No application-scoped access assigned.</span>';
+    }
+
+    function renderManagedResponsibleOptions(query = '') {
+      const application = currentManagedApplication();
+      const selected = managedResponsibleScopes[application] || new Set();
       const needle = String(query || '').trim().toLowerCase();
       const options = managedResponsibleOptions.filter(item => !needle || item.toLowerCase().includes(needle));
       $('managedResponsibleOptions').innerHTML = options.length ? options.map((item, index) => {
         const id = `managed-responsible-${index}`;
         return `<label class="user-responsible-option" for="${id}"><input id="${id}" type="checkbox" value="${escapeHtml(item)}" ${selected.has(item) ? 'checked' : ''}><span>${escapeHtml(item)}</span></label>`;
       }).join('') : '<div class="meta">No Responsible options match.</div>';
+      $('managedResponsibleOptions').querySelectorAll('input[type="checkbox"]').forEach(input => input.addEventListener('change', () => {
+        const values = managedResponsibleScopes[application] || new Set();
+        if (input.checked) values.add(input.value); else values.delete(input.value);
+        if (values.size) managedResponsibleScopes[application] = values; else delete managedResponsibleScopes[application];
+        renderManagedResponsibleScopeSummary();
+      }));
+      renderManagedResponsibleScopeSummary();
     }
 
     function addManagedResponsible() {
@@ -9587,7 +9947,8 @@ __ADMIN_TRACE_SECTION__
         field.focus();
         return;
       }
-      const selected = new Set(selectedManagedResponsibles());
+      const application = currentManagedApplication();
+      const selected = managedResponsibleScopes[application] || new Set();
       const existing = managedResponsibleOptions.find(item => item.toLowerCase() === value.toLowerCase());
       const canonical = existing || value;
       if (!existing) {
@@ -9595,8 +9956,9 @@ __ADMIN_TRACE_SECTION__
         managedResponsibleOptions.sort((a, b) => a.localeCompare(b, undefined, {sensitivity:'base'}));
       }
       selected.add(canonical);
+      managedResponsibleScopes[application] = selected;
       $('managedResponsibleSearch').value = '';
-      renderManagedResponsibleOptions('', selected);
+      renderManagedResponsibleOptions('');
       field.value = '';
       field.focus();
     }
@@ -9622,7 +9984,7 @@ __ADMIN_TRACE_SECTION__
       $('managedResponsibleLegend').textContent = manager ? 'Access scope · Global' : 'Responsible scope';
       $('managedResponsiblesHelp').innerHTML = manager
         ? '<strong>Global access.</strong> Manager can view and operate all Responsible scopes; mappings are not applied.'
-        : '<strong>Access scope, not a reporting line.</strong> It matches Responsible identifiers on report folders and Jira Issues. Select at least one scope.';
+        : '<strong>Responsible per Application Scope.</strong> Access requires both the selected Application and one matching Responsible identifier. Reviewer grants remain separate.';
       if (manager) {
         $('managedResponsiblesError').textContent = '';
         $('managedResponsiblesError').className = 'field-message';
@@ -9636,16 +9998,24 @@ __ADMIN_TRACE_SECTION__
       $('userAdminForm').hidden = false;
       $('userAdminFormTitle').textContent = user ? `Edit ${user.username}` : 'Create user';
       $('userAdminFormMeta').textContent = user
-        ? `Revision ${user.revision || 1} · Updated ${formatDateTime(user.updated_at)}`
+        ? `Revision ${user.revision || 1} · Updated ${formatDateTime(user.updated_at)}${user.responsible_scope_migration_required ? ' · Migration confirmation required' : ''}`
         : 'A strong temporary password will be generated after the account is created.';
       $('managedUsername').value = user ? user.username : '';
       $('managedUsername').readOnly = Boolean(user);
       $('managedRole').value = user ? user.role : 'developer';
       updateManagedResponsibleMode();
+      if (user?.responsible_scope_migration_required && user.role !== 'manager') {
+        $('managedResponsiblesHelp').innerHTML += '<br><strong>Migration required.</strong> These least-privilege mappings were inferred from project configuration. Review and Save to confirm them.';
+      }
       $('managedActive').checked = user ? user.active !== false : true;
       $('userAdminForm').dataset.revision = String(user ? (user.revision || 1) : 0);
-      const selected = new Set(user ? (user.responsibles || []) : []);
-      renderManagedResponsibleOptions('', selected);
+      managedResponsibleScopes = {};
+      for (const scope of (user?.responsible_scopes || [])) {
+        if (!scope?.application) continue;
+        managedResponsibleScopes[scope.application] = new Set(scope.responsibles || []);
+      }
+      $('managedApplicationScope').innerHTML = managedApplicationOptions.map(application => `<option value="${escapeHtml(application)}">${escapeHtml(application)}</option>`).join('');
+      renderManagedResponsibleOptions('');
       $('managedResponsibleSearch').value = '';
       $('managedResponsibleAdd').value = '';
       $('resetManagedPasswordBtn').hidden = !user;
@@ -9667,6 +10037,7 @@ __ADMIN_TRACE_SECTION__
       const username = $('managedUsername').value.trim();
       const role = $('managedRole').value;
       const responsibles = selectedManagedResponsibles();
+      const responsibleScopes = selectedManagedResponsibleScopes();
       const errors = [];
       const setError = (fieldId, errorId, message) => {
         $(fieldId)?.setAttribute('aria-invalid', 'true');
@@ -9680,9 +10051,9 @@ __ADMIN_TRACE_SECTION__
         setError('managedUsername', 'managedUsernameError', 'This username already exists.');
       }
       if (!managedUserRoles.includes(role)) setError('managedRole', 'managedRoleError', 'Select Developer, Auditor, or Manager.');
-      if (role !== 'manager' && !responsibles.length) {
+      if (role !== 'manager' && !responsibleScopes.length) {
         $('managedResponsiblesError').className = 'field-message error';
-        $('managedResponsiblesError').textContent = 'Select at least one Responsible mapping.';
+        $('managedResponsiblesError').textContent = 'Assign at least one Responsible inside an Application Scope.';
         errors.push({fieldId: 'managedResponsibleSearch', message: 'Responsible mapping is required.'});
       }
       if (errors.length) {
@@ -9697,6 +10068,7 @@ __ADMIN_TRACE_SECTION__
         role,
         active: $('managedActive').checked,
         responsibles,
+        responsible_scopes: responsibleScopes,
         revision: Number($('userAdminForm').dataset.revision || 0)
       };
     }
@@ -9727,6 +10099,7 @@ __ADMIN_TRACE_SECTION__
       managedUsers = Array.isArray(data.users) ? data.users : [];
       managedUserRoles = Array.isArray(data.roles) ? data.roles : managedUserRoles;
       managedResponsibleOptions = Array.isArray(data.responsible_options) ? data.responsible_options : [];
+      managedApplicationOptions = Array.isArray(data.application_options) ? data.application_options : [];
       renderManagedUsers();
       if (selectedManagedUsername) {
         const selected = managedUserByName(selectedManagedUsername);
@@ -9971,7 +10344,7 @@ __ADMIN_TRACE_SECTION__
     function configurationInputMarkup(editor, index) {
       const value = editor.value;
       if (editor.path?.at(-1) === 'application') {
-        const options = ['WVAdmin', 'iTrade Client', 'Services Terminal', 'DPS', 'Unmapped'];
+        const options = ['WVAdmin', 'AOP', 'iTrade Client', 'Services Terminal', 'DPS', 'Unmapped'];
         return `<select id="configurationInput${index}">${options.map(option => `<option value="${escapeHtml(option)}" ${value === option ? 'selected' : ''}>${escapeHtml(option)}</option>`).join('')}</select>`;
       }
       if (editor.type === 'boolean') {
@@ -10030,7 +10403,7 @@ __ADMIN_TRACE_SECTION__
           <div class="configuration-project-create-grid">
             <label><span class="field-label">Group <span class="required-mark" aria-hidden="true">*</span></span><select id="newConfigurationProjectGroup">${groups.map(group => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`).join('')}</select></label>
             <label><span class="field-label">Module key <span class="required-mark" aria-hidden="true">*</span></span><input id="newConfigurationProjectModule" maxlength="80" placeholder="module-name"></label>
-            <label><span class="field-label">Application <span class="required-mark" aria-hidden="true">*</span></span><select id="newConfigurationProjectApplication">${['WVAdmin','iTrade Client','Services Terminal','DPS'].map(item => `<option>${escapeHtml(item)}</option>`).join('')}</select></label>
+            <label><span class="field-label">Application <span class="required-mark" aria-hidden="true">*</span></span><select id="newConfigurationProjectApplication">${['WVAdmin','AOP','iTrade Client','Services Terminal','DPS'].map(item => `<option>${escapeHtml(item)}</option>`).join('')}</select></label>
             <label style="grid-column:span 2"><span class="field-label">Repository URL <span class="required-mark" aria-hidden="true">*</span></span><input id="newConfigurationProjectUrl" placeholder="https://gitlab.example.com/group/project.git"></label>
             <label><span class="field-label">Responsible</span><input id="newConfigurationProjectResponsible" placeholder="kevin.tan+wen.yi"></label>
             <label><span class="field-label">Project type</span><select id="newConfigurationProjectType"><option value="">Inherited / unspecified</option><option value="frontend">Frontend</option><option value="backend">Backend</option><option value="build">Build</option></select></label>
@@ -13012,6 +13385,7 @@ function jiraKeyFromReportPath(reportPath) {
 
     function renderIssueReviewDetail(data) {
       const issue = data.issue || {};
+      const accessScope = data.access_scope || {mode:'full-cycle', visible_run_count:0, total_run_count:0};
       const runs = data.runs || [];
       const latest = data.latest_run_group || runs[0] || { findings: [] };
       const findings = latest.findings || [];
@@ -13081,7 +13455,7 @@ function jiraKeyFromReportPath(reportPath) {
         <section class="issue-overview" aria-label="Issue review overview">
         <header class="issue-review-header">
           <div class="issue-review-primary">
-            <div class="issue-review-identity"><div class="issue-review-title-line"><h2>${jiraUrl ? `<a class="jira-issue-link" href="${escapeHtml(jiraUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(issue.jira_key)} in Jira (new tab)">${escapeHtml(issue.jira_key)} <span aria-hidden="true">↗</span></a>` : escapeHtml(issue.jira_key)}</h2><span class="info-hint"><button class="information-icon" type="button" aria-label="Issue overview guidance" aria-expanded="false" aria-controls="issueOverviewHintPopover">i</button><span id="issueOverviewHintPopover" class="information-hint-popover" role="tooltip" hidden>Every status, metric and action uses the selected Cycle only. Historical Runs stay available from the Cycle selector.</span></span></div><p class="issue-review-summary-title" title="${escapeHtml(issue.summary || 'Issue Review')}">${escapeHtml(issue.summary || 'Issue Review')}</p><div class="meta issue-hero-meta"><span>Responsible: ${escapeHtml(issue.responsible || '-')}</span><span>${hasCompletedRun ? `Run ${escapeHtml(latest.run_number || '-')}` : 'No Run in this Cycle'}</span><span>Updated ${escapeHtml(formatDateTime(selectedCycle.updated_at || issue.updated_at))}</span></div></div>
+            <div class="issue-review-identity"><div class="issue-review-title-line"><h2>${jiraUrl ? `<a class="jira-issue-link" href="${escapeHtml(jiraUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(issue.jira_key)} in Jira (new tab)">${escapeHtml(issue.jira_key)} <span aria-hidden="true">↗</span></a>` : escapeHtml(issue.jira_key)}</h2><span class="info-hint"><button class="information-icon" type="button" aria-label="Issue overview guidance" aria-expanded="false" aria-controls="issueOverviewHintPopover">i</button><span id="issueOverviewHintPopover" class="information-hint-popover" role="tooltip" hidden>Every status, metric and action uses the selected Cycle only. Historical Runs stay available from the Cycle selector.</span></span></div><p class="issue-review-summary-title" title="${escapeHtml(issue.summary || 'Issue Review')}">${escapeHtml(issue.summary || 'Issue Review')}</p><div class="meta issue-hero-meta"><span>Responsible: ${escapeHtml(issue.responsible || '-')}</span><span>${hasCompletedRun ? `Run ${escapeHtml(latest.run_number || '-')}` : 'No Run in this Cycle'}</span><span>Updated ${escapeHtml(formatDateTime(selectedCycle.updated_at || issue.updated_at))}</span>${accessScope.mode === 'application-scoped' ? `<span class="status-chip">Scoped view · ${escapeHtml(accessScope.visible_run_count || 0)}/${escapeHtml(accessScope.total_run_count || 0)} reports</span>` : ''}</div></div>
             <div class="issue-review-controls"><div class="issue-review-actions"><span class="status-chip" data-status="${escapeHtml(cycleStatus)}">${escapeHtml(statusLabel(cycleStatus))}</span>${canReview ? `<button id="issueRescanBtn" class="secondary" type="button">${hasCompletedRun ? 'Re-scan Issue' : (noReviewRequired ? 'Check Again' : 'Run Review')}</button>` : ''}${canPass && !noReviewRequired ? `<button id="issuePassBtn" type="button" ${readiness.ready ? '' : `disabled title="${escapeHtml(readiness.message || 'Complete the current Cycle review first.')}"`}>Manual Pass</button>` : ''}</div></div>
           </div>
           <div class="issue-review-context">
@@ -13726,6 +14100,10 @@ function jiraKeyFromReportPath(reportPath) {
     $('userAdminRoleFilter').addEventListener('change', renderManagedUsers);
     $('userAdminStatusFilter').addEventListener('change', renderManagedUsers);
     $('managedRole').addEventListener('change', updateManagedResponsibleMode);
+    $('managedApplicationScope').addEventListener('change', () => {
+      $('managedResponsibleSearch').value = '';
+      renderManagedResponsibleOptions('');
+    });
     $('managedResponsibleSearch').addEventListener('input', event => {
       const query = String(event.target.value || '').trim().toLowerCase();
       $('managedResponsibleOptions').querySelectorAll('.user-responsible-option').forEach(option => {

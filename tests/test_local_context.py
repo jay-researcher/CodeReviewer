@@ -1278,6 +1278,7 @@ group:
             ("dps11!4", "DPS", "11.2.84", "group/dps11/api", "backend"),
             ("wvadmin!5", "WVAdmin", "1.0.84", "group/wvadmin", "frontend"),
             ("terminal!6", "Services Terminal", "5.0.63", "group/services-terminal", "frontend"),
+            ("aop!8", "AOP", "1.0.84", "group/account-middle-office", "frontend"),
             ("alpha!7", "", "main", "group/alpha", "frontend"),
             ("beta!8", "", "main", "group/beta", "backend"),
         ]
@@ -1312,7 +1313,7 @@ group:
         )
 
         split = split_result_by_responsible(result)
-        self.assertEqual(8, len(split))
+        self.assertEqual(9, len(split))
         scopes = {
             (
                 item.review_input.metadata["application"],
@@ -1326,6 +1327,7 @@ group:
         self.assertIn(("DPS", "DPS9", "DPS9"), scopes)
         self.assertIn(("DPS", "DPS11", "DPS11"), scopes)
         self.assertIn(("WVAdmin", "1.0", "WVAdmin"), scopes)
+        self.assertIn(("AOP", "1.0", "AOP"), scopes)
         self.assertIn(("Services Terminal", "5.0", "Services-Terminal"), scopes)
         unmapped = [scope for scope in scopes if scope[0] == "Unmapped"]
         self.assertEqual(2, len(unmapped))

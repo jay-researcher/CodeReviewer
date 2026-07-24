@@ -1410,13 +1410,22 @@ def _mr_resume_key(mr_url: str) -> str:
     return stable_resume_key("mr-url", mr_url)
 
 
-def _jira_group_resume_key(issue_key: str, items: list[dict[str, Any]]) -> str:
+def _jira_group_resume_key(
+    issue_key: str,
+    items: list[dict[str, Any]],
+    sprint: str = "",
+) -> str:
     revisions = sorted(
         mr_revision_identity(item)["revision_key"] or str(item.get("mr_url") or "")
         for item in items
         if item.get("mr_url") or item.get("project_path")
     )
-    return stable_resume_key("jira-consolidated-mrs", issue_key.upper(), revisions)
+    return stable_resume_key(
+        "jira-consolidated-mrs",
+        issue_key.upper(),
+        str(sprint or "").strip().casefold(),
+        revisions,
+    )
 
 
 def _issue_branch_resume_key(item: dict[str, Any], jira_key: str) -> str:
@@ -1950,7 +1959,7 @@ def _review_issue_collection_merge_requests(
             _print_failed(issue_index, len(grouped_items), issue_key, error)
             _progress(progress, "failed", f"{issue_key}: {error}", index=issue_index, total=len(grouped_items), jira_key=issue_key, error=error)
             continue
-        resume_key = _jira_group_resume_key(issue.key, issue_items)
+        resume_key = _jira_group_resume_key(issue.key, issue_items, sprint=sprint)
         resume_item = {
             "jira_key": issue.key,
             "jira_summary": issue.summary,
@@ -2033,7 +2042,11 @@ def _review_issue_collection_merge_requests(
         except KeyboardInterrupt:
             tracker.mark_interrupted(resume_key, resume_item)
             raise
-        fetched_inputs, cycle_exclusions = _select_fetched_cycle_revisions(issue.key, fetched_inputs)
+        fetched_inputs, cycle_exclusions = _select_fetched_cycle_revisions(
+            issue.key,
+            fetched_inputs,
+            sprint=sprint,
+        )
         if cycle_exclusions:
             excluded_cycle_revision_mrs.extend(cycle_exclusions)
             issue_excluded_count += len(cycle_exclusions)
@@ -2446,20 +2459,46 @@ def select_cycle_mr_revisions(
     }
 
 
-def previously_reviewed_cycle_revisions(jira_key: str) -> list[dict[str, Any]]:
-    """Load immutable MR revision identities already persisted for older/current Cycles.
+def previously_reviewed_cycle_revisions(
+    jira_key: str,
+    sprint: str = "",
+) -> list[dict[str, Any]]:
+    """Load MR revisions backed by a persisted Review Run in the same Sprint.
 
     The import stays local so the CLI review service remains usable without
     initializing workflow storage until cycle-aware selection is required.
+
+    A discovered Cycle alone is not review evidence. Sprint scanning creates
+    empty Cycles before any report exists, and treating their MR scope as
+    reviewed makes the subsequent review silently produce no report. Likewise,
+    a Legacy Cycle must not suppress a named Sprint review.
     """
     try:
         from .workflow_store import workflow_store
 
-        cycles = workflow_store().list_cycles((jira_key or "").strip().upper())
+        store = workflow_store()
+        cycles = store.list_cycles((jira_key or "").strip().upper())
     except Exception:
         return []
+    requested_sprint = str(sprint or "").strip().casefold()
     revisions: list[dict[str, Any]] = []
     for cycle in cycles:
+        if requested_sprint:
+            cycle_sprint_values = {
+                str(cycle.get("sprint_id") or "").strip().casefold(),
+                str(cycle.get("sprint_name") or "").strip().casefold(),
+            }
+            if requested_sprint not in cycle_sprint_values:
+                continue
+        try:
+            detail = store.cycle_detail(str(cycle.get("cycle_id") or "")) or {}
+        except Exception:
+            detail = {}
+        if not [
+            run for run in (detail.get("runs") or [])
+            if isinstance(run, dict) and str(run.get("status") or "completed") == "completed"
+        ]:
+            continue
         scope = cycle.get("mr_scope_json") or cycle.get("mr_scope") or []
         if not isinstance(scope, list):
             continue
@@ -2476,8 +2515,9 @@ def _select_fetched_cycle_revisions(
     jira_key: str,
     fetched_inputs: list[ReviewInput],
     decisions: dict[str, str] | None = None,
+    sprint: str = "",
 ) -> tuple[list[ReviewInput], list[dict[str, Any]]]:
-    previous = previously_reviewed_cycle_revisions(jira_key)
+    previous = previously_reviewed_cycle_revisions(jira_key, sprint=sprint)
     candidates: list[dict[str, Any]] = []
     by_key: dict[str, ReviewInput] = {}
     for review_input in fetched_inputs:
@@ -2836,7 +2876,7 @@ def review_jira_issue_merge_requests(
         target_output_dir,
         {"jira_key": issue.key, "state": state, "limit": limit},
     )
-    resume_key = _jira_group_resume_key(issue.key, discovered["mrs"])
+    resume_key = _jira_group_resume_key(issue.key, discovered["mrs"], sprint=issue.sprint)
     resume_item = {
         "jira_key": issue.key,
         "jira_summary": issue.summary,
@@ -2907,7 +2947,11 @@ def review_jira_issue_merge_requests(
             raise
 
     if not reviewed and fetched_inputs:
-        fetched_inputs, excluded_cycle_revision_mrs = _select_fetched_cycle_revisions(issue.key, fetched_inputs)
+        fetched_inputs, excluded_cycle_revision_mrs = _select_fetched_cycle_revisions(
+            issue.key,
+            fetched_inputs,
+            sprint=issue.sprint,
+        )
         if excluded_cycle_revision_mrs:
             issue_excluded_count += len(excluded_cycle_revision_mrs)
             _progress(

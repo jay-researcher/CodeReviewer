@@ -19,6 +19,8 @@ class ReviewScope:
 
     @property
     def filename_component(self) -> str:
+        if self.application == "AOP" and self.release_line != UNMAPPED_RELEASE_LINE:
+            return "AOP"
         if self.application == "WVAdmin" and self.release_line != UNMAPPED_RELEASE_LINE:
             return "WVAdmin"
         if self.application == "Services Terminal" and self.release_line != UNMAPPED_RELEASE_LINE:
@@ -100,6 +102,8 @@ def _application(value: object, identity: str) -> str:
         "itrade": "iTrade Client",
         "itradeclient": "iTrade Client",
         "wvadmin": "WVAdmin",
+        "aop": "AOP",
+        "accountopeningsystem": "AOP",
         "serviceterminal": "Services Terminal",
         "servicesterminal": "Services Terminal",
         "dps": "DPS",
@@ -114,6 +118,8 @@ def _application(value: object, identity: str) -> str:
     # so its more specific identity must win over the iTrade token.
     if re.search(r"\bservices?-terminal\b", identity):
         return "Services Terminal"
+    if re.search(r"\b(?:account-middle-office|low-code-(?:application|designable|renderable)|form-app-designable|aop)\b", identity):
+        return "AOP"
     if re.search(r"\bwvadmin\b", identity):
         return "WVAdmin"
     if re.search(r"\bdps(?:9|11)?\b", identity):
@@ -154,6 +160,8 @@ def _release_line(
             ),
         )
     if application == "WVAdmin":
+        return _normalized_single_release(explicit, "1.0")
+    if application == "AOP":
         return _normalized_single_release(explicit, "1.0")
     if application == "Services Terminal":
         return _normalized_single_release(explicit, "5.0")
