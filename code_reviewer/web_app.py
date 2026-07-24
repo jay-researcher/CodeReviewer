@@ -1482,6 +1482,13 @@ def _run_coverage_job(job_id: str, scope: dict[str, str], user: str) -> None:
                 jira_filter=scope["jira_filter"],
                 progress=lambda event: _coverage_job_progress(job_id, event),
             )
+            warnings = list(result.get("warnings") or [])
+            completion_message = (
+                f"Coverage scan completed with {len(warnings)} warning(s) "
+                f"for {len(result.get('issues') or [])} issue(s)."
+                if warnings
+                else f"Coverage scan completed for {len(result.get('issues') or [])} issue(s)."
+            )
             _update_coverage_job(
                 job_id,
                 status="done",
@@ -1489,13 +1496,18 @@ def _run_coverage_job(job_id: str, scope: dict[str, str], user: str) -> None:
                 finished_at=time.time(),
                 progress={
                     "event": "completed",
-                    "message": f"Coverage scan completed for {len(result.get('issues') or [])} issue(s).",
+                    "message": completion_message,
                     "current": len(result.get("issues") or []),
                     "total": len(result.get("issues") or []),
                     "percent": 100,
                 },
             )
-            _append_coverage_event(job_id, "completed", "Coverage scan completed.", {"percent": 100})
+            _append_coverage_event(
+                job_id,
+                "completed-warning" if warnings else "completed",
+                completion_message,
+                {"percent": 100, "warning_count": len(warnings)},
+            )
     except Exception as exc:
         _update_coverage_job(
             job_id,
@@ -1519,6 +1531,8 @@ def _coverage_job_progress(job_id: str, event: dict[str, object]) -> None:
     total = int(event.get("total") or 0)
     if event_name == "start":
         percent = 5
+    elif event_name in {"jira-comments", "jira-comments-warning"}:
+        percent = 6 + round((max(0, current) / max(1, total)) * 6)
     elif event_name == "jira":
         percent = 12
     elif event_name == "discovery-issue":
@@ -1540,6 +1554,7 @@ def _coverage_job_progress(job_id: str, event: dict[str, object]) -> None:
         "total": total,
         "percent": max(0, min(percent, 99)),
         "jira_key": str(event.get("jira_key") or ""),
+        "stage": str(event.get("stage") or ""),
     }
     _update_coverage_job(job_id, progress=progress)
     _append_coverage_event(job_id, event_name, progress["message"], progress)
@@ -2442,6 +2457,8 @@ def build_review_coverage(
         "application_progress": application_progress,
         "issues": rows,
         "discovery_errors": discovery.get("discovery_errors") or [],
+        "warnings": discovery.get("jira_warnings") or [],
+        "partial": bool(discovery.get("partial") or discovery.get("jira_warnings")),
         "scope_reconciliation": scope_reconciliation,
     }
 
@@ -7374,6 +7391,7 @@ def render_index(user: str = "") -> str:
     .status.running { color: var(--accent-strong); }
     .status.error { color: var(--danger); }
     .status.ok { color: var(--ok); }
+    .status.warning { color: #a85b00; }
     .progress-panel {
       margin-top: 16px;
       flex: 1 1 auto;
@@ -10354,12 +10372,15 @@ __ADMIN_TRACE_SECTION__
         started: 'Loading review scope',
         start: 'Loading review scope',
         jira: 'Loading Jira issues',
+        'jira-comments': 'Loading Jira comments',
+        'jira-comments-warning': 'Loading Jira comments with warnings',
         'discovery-issue': 'Matching merge requests',
         discover: 'Merge request discovery completed',
         'coverage-reports': 'Checking generated reports',
         'coverage-workflow': 'Checking Review handling',
         'coverage-finalizing': 'Calculating application readiness',
         completed: 'Coverage scan completed',
+        'completed-warning': 'Coverage scan partially completed',
         failed: 'Coverage scan failed'
       };
       $('coverageProgressBar').style.width = `${percent}%`;
@@ -10374,12 +10395,24 @@ __ADMIN_TRACE_SECTION__
       $('coverageProgress').classList.toggle('long-running', coverageJobIsActive(job) && coverageElapsedSeconds(job) >= COVERAGE_LONG_SCAN_SECONDS);
       $('coverageStatus').className = status === 'failed' ? 'status error' : (status === 'done' ? 'status ok' : 'status');
       if (status === 'done') {
-        renderCoverage(job.result || {});
-        const issueCount = Array.isArray(job.result?.issues) ? job.result.issues.length : 0;
-        $('coverageScanSummary').textContent = `${coverageScopeLabel(scope)} · ${options.reused ? 'Recent result' : 'Completed'} · ${issueCount} issue(s)`;
-        $('coverageStatus').textContent = options.reused
-          ? `Recent coverage result restored · ${issueCount} issue(s)`
-          : `Coverage scan completed · ${issueCount} issue(s)`;
+        const coverageResult = job.result || {};
+        const warnings = Array.isArray(coverageResult.warnings) ? coverageResult.warnings : [];
+        renderCoverage(coverageResult);
+        const issueCount = Array.isArray(coverageResult.issues) ? coverageResult.issues.length : 0;
+        const completionLabel = warnings.length ? 'Partially completed' : (options.reused ? 'Recent result' : 'Completed');
+        $('coverageScanSummary').textContent = `${coverageScopeLabel(scope)} · ${completionLabel} · ${issueCount} issue(s)`;
+        if (warnings.length) {
+          $('coverageStatus').className = 'status warning';
+          const warningDetails = warnings.map((item) => {
+            const context = [item.jira_key, item.stage, item.endpoint].filter(Boolean).join(' · ');
+            return `${context}: ${item.error || 'Jira auxiliary data unavailable'}`;
+          }).join('; ');
+          $('coverageStatus').textContent = `Coverage scan partially completed · ${warnings.length} warning(s) · ${warningDetails}`;
+        } else {
+          $('coverageStatus').textContent = options.reused
+            ? `Recent coverage result restored · ${issueCount} issue(s)`
+            : `Coverage scan completed · ${issueCount} issue(s)`;
+        }
         setCoverageScanCollapsed(true);
       } else if (status === 'failed') {
         $('coverageScanSummary').textContent = `${coverageScopeLabel(scope)} · Scan failed`;
@@ -11911,6 +11944,7 @@ function jiraKeyFromReportPath(reportPath) {
       const summary = result.summary || {};
       const items = Array.isArray(summary.items) ? summary.items : [];
       const errors = Array.isArray(summary.errors) ? summary.errors : [];
+      const jiraWarnings = Array.isArray(summary.jira_warnings) ? summary.jira_warnings : [];
       const counts = result.severity_counts || {};
       const severityText = ['Critical', 'High', 'Medium', 'Low', 'Warning'].map((key) => `${key}: ${counts[key] || 0}`).join(' · ');
       const reviewed = summary.reviewed || summary.processed || items.length || 0;
@@ -11953,6 +11987,10 @@ function jiraKeyFromReportPath(reportPath) {
           ${result.report ? `<div>Report: ${escapeHtml(result.report)}</div>` : ''}
           ${renderGateResult(result.release_gate || {})}
           ${renderReleaseGateHandoff(job)}
+          ${jiraWarnings.length ? `<div class="status warning">Partially completed: ${escapeHtml(jiraWarnings.map((item) => {
+            const context = [item.jira_key, item.stage, item.endpoint].filter(Boolean).join(' · ');
+            return `${context}: ${item.error || 'Jira auxiliary data unavailable'}`;
+          }).join('; '))}</div>` : ''}
           ${errors.length ? `<div class="status error">Errors: ${escapeHtml(errors.map((item) => item.error || JSON.stringify(item)).join('; '))}</div>` : ''}
           ${job.error ? `<div class="status error">${escapeHtml(job.error)}</div>` : ''}
         </div>

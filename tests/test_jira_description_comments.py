@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import urllib.error
+from unittest.mock import patch
 
 from code_reviewer.jira_client import JiraClient, JiraIssue, _jira_issue_from_item, is_description_template_comment
 from code_reviewer.llm_provider import _review_prompt
@@ -44,6 +46,22 @@ class _FakeJiraClient(JiraClient):
     def _request_json(self, path: str, method: str = 'GET', payload: dict | None = None):
         self.paths.append(path)
         return self.responses.pop(0)
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self) -> bytes:
+        import json
+
+        return json.dumps(self.payload).encode("utf-8")
 
 
 class JiraDescriptionCommentTests(unittest.TestCase):
@@ -119,6 +137,64 @@ class JiraDescriptionCommentTests(unittest.TestCase):
         prompt = _review_prompt(review_input)
         self.assertIn('Final Jira issue description', prompt)
         self.assertIn('Follow-up requirement', prompt)
+
+    def test_get_request_retries_once_with_endpoint_and_attempt_context(self) -> None:
+        client = JiraClient("https://jira.example.com", "reviewer", "token")
+        with (
+            patch(
+                "code_reviewer.jira_client.urllib.request.urlopen",
+                side_effect=[
+                    urllib.error.URLError(TimeoutError("read operation timed out")),
+                    _FakeResponse({"ok": True}),
+                ],
+            ) as urlopen,
+            patch("code_reviewer.jira_client.time.sleep") as sleep,
+        ):
+            result = client._request_json("/rest/api/3/issue/ECHNL-1/comment")
+
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(2, urlopen.call_count)
+        sleep.assert_called_once()
+
+    def test_get_request_reports_final_attempt_and_endpoint(self) -> None:
+        client = JiraClient("https://jira.example.com", "reviewer", "token")
+        with (
+            patch(
+                "code_reviewer.jira_client.urllib.request.urlopen",
+                side_effect=urllib.error.URLError(TimeoutError("read operation timed out")),
+            ),
+            patch("code_reviewer.jira_client.time.sleep"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"GET /rest/api/3/issue/ECHNL-1/comment failed at request attempt 2/2",
+            ):
+                client._request_json("/rest/api/3/issue/ECHNL-1/comment")
+
+    def test_comment_failure_is_a_warning_and_does_not_drop_sprint_issue(self) -> None:
+        client = JiraClient("https://jira.example.com", "reviewer", "token")
+        issues = [
+            JiraIssue("ECHNL-1", "One", "Description", "Owner", "Done", "Sprint", "Story", []),
+            JiraIssue("ECHNL-2", "Two", "Description", "Owner", "Done", "Sprint", "Story", []),
+        ]
+        events: list[dict] = []
+
+        def fetch(issue_key: str, _issue_type: str = "") -> list[str]:
+            if issue_key == "ECHNL-2":
+                raise RuntimeError("Jira API GET comment failed at request attempt 2/2")
+            return ["Formal requirement update"]
+
+        with patch.object(client, "fetch_description_template_comments", side_effect=fetch):
+            warnings = client._load_description_comments(issues, progress=events.append)
+
+        self.assertEqual(["Formal requirement update"], issues[0].description_comments)
+        self.assertEqual([], issues[1].description_comments)
+        self.assertEqual("ECHNL-2", warnings[0]["jira_key"])
+        self.assertEqual("jira-comments", warnings[0]["stage"])
+        self.assertIn("/rest/api/3/issue/ECHNL-2/comment", warnings[0]["endpoint"])
+        self.assertEqual(2, events[-1]["current"])
+        self.assertEqual(2, events[-1]["total"])
+        self.assertTrue(any(event["event"] == "jira-comments-warning" for event in events))
 
 
 if __name__ == '__main__':

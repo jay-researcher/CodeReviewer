@@ -1,4 +1,4 @@
-- 修复与改善Sprint Review “The read operation timed out”：Jira GET 请求增加有限重试，例如最多 2 次并采用短退避。单个 Issue Comment 超时后记录 warning 并继续扫描，不阻断整个 Sprint。Comment 请求并发化，但限制为 4–6 个并发，避免冲击 Jira。错误信息加入 Jira Key、接口和阶段。Progress 展示 Loading Jira comments 12/30 等实际进度。只有 Sprint 搜索本身失败时才判定整个 Scan 失败；辅助 Comment 失败应返回“部分完成 + 警告”。
+- [本机已完成，待部署] 修复与改善 Sprint Review “The read operation timed out”：Jira GET 请求最多尝试 2 次并采用短退避；单个 Issue Comment 超时记录 warning 后继续扫描；Comment 请求默认 5 并发且限制为 4–6；错误包含 Jira Key、接口及阶段；Progress 展示 `Loading Jira comments 12/30` 等实际进度。只有 Sprint 搜索本身失败时才判定整个 Scan 失败，辅助 Comment 失败返回“部分完成 + 警告”。
 - User Management：responsible per application scope ![alt text](image-33.png)
 
 ## 7.2.16+b202607241318 功能清单

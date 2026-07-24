@@ -1759,7 +1759,12 @@ def review_sprint_merge_requests(
     limit = int(limit or app_config_int("review.mr_limit", "SPRINT_MR_LIMIT", 200))
     _progress(progress, "start", f"Loading Jira sprint {sprint}", sprint=sprint)
     jira = JiraClient()
-    issues = jira.search_issues_by_sprint(sprint, project_key=jira_project_key)
+    issues = jira.search_issues_by_sprint(
+        sprint,
+        project_key=jira_project_key,
+        progress=progress,
+    )
+    jira_warnings = list(getattr(jira, "warnings", []))
     issues, skipped_issues = _filter_reviewable_jira_issues(issues)
     _progress(
         progress,
@@ -1768,6 +1773,8 @@ def review_sprint_merge_requests(
         sprint=sprint,
         issue_count=len(issues),
         skipped_issue_count=len(skipped_issues),
+        warning_count=len(jira_warnings),
+        partial=bool(jira_warnings),
     )
     return _review_issue_collection_merge_requests(
         issues=issues,
@@ -1787,6 +1794,8 @@ def review_sprint_merge_requests(
             "sprint": sprint,
             "jira_project_key": jira_project_key,
             "skipped_status_issues": skipped_issues,
+            "jira_warnings": jira_warnings,
+            "partial": bool(jira_warnings),
             "workflow_review_mode": workflow_review_mode,
         },
         sprint=sprint,
@@ -1812,7 +1821,12 @@ def review_jira_filter_merge_requests(
     state = state or app_config_str("review.mr_states", "SPRINT_MR_STATE", "opened,merged")
     limit = int(limit or app_config_int("review.mr_limit", "SPRINT_MR_LIMIT", 200))
     max_issues = app_config_int("jira.filter_max_issues", "JIRA_FILTER_MAX_ISSUES", 500)
-    issues = jira.search_issues_by_filter_id(value, max_issues=max_issues)
+    issues = jira.search_issues_by_filter_id(
+        value,
+        max_issues=max_issues,
+        progress=progress,
+    )
+    jira_warnings = list(getattr(jira, "warnings", []))
     issues, skipped_issues = _filter_reviewable_jira_issues(issues)
     _progress(
         progress,
@@ -1821,6 +1835,8 @@ def review_jira_filter_merge_requests(
         jira_filter=value,
         issue_count=len(issues),
         skipped_issue_count=len(skipped_issues),
+        warning_count=len(jira_warnings),
+        partial=bool(jira_warnings),
     )
     return _review_issue_collection_merge_requests(
         issues=issues,
@@ -1839,6 +1855,8 @@ def review_jira_filter_merge_requests(
         source_metadata={
             "jira_filter": value,
             "skipped_status_issues": skipped_issues,
+            "jira_warnings": jira_warnings,
+            "partial": bool(jira_warnings),
         },
     )
 

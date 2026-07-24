@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from base64 import b64encode
@@ -102,6 +104,7 @@ class JiraClient:
         self.base_url = (base_url or os.getenv("JIRA_URL", "")).rstrip("/")
         self.username = username or os.getenv("JIRA_USERNAME", "")
         self.api_token = api_token or os.getenv("JIRA_TOKEN", "")
+        self.warnings: list[dict[str, str]] = []
 
         if not all([self.base_url, self.username, self.api_token]):
             raise ValueError(
@@ -122,7 +125,12 @@ class JiraClient:
         issue.description_comments = self.fetch_description_template_comments(issue.key, issue.issue_type)
         return issue
 
-    def search_issues_by_sprint(self, sprint_name: str, project_key: str = "") -> list[JiraIssue]:
+    def search_issues_by_sprint(
+        self,
+        sprint_name: str,
+        project_key: str = "",
+        progress: Any = None,
+    ) -> list[JiraIssue]:
         """Search for issues in a sprint by sprint ID or sprint name."""
         sprint_value = (sprint_name or "").strip()
         jql_sprint = sprint_value if re.fullmatch(r"\d+", sprint_value) else f'"{sprint_value}"'
@@ -131,18 +139,32 @@ class JiraClient:
             jql = f'project = {project_key} AND {jql}'
 
         max_issues = app_config_int("jira.sprint_max_issues", "JIRA_SPRINT_MAX_ISSUES", 500)
-        return self.search_issues_by_jql(jql, max_issues=max_issues)
+        return self.search_issues_by_jql(jql, max_issues=max_issues, progress=progress)
 
-    def search_issues_by_filter_id(self, filter_id: str, max_issues: int | None = None) -> list[JiraIssue]:
+    def search_issues_by_filter_id(
+        self,
+        filter_id: str,
+        max_issues: int | None = None,
+        progress: Any = None,
+    ) -> list[JiraIssue]:
         """Search for issues returned by a saved Jira filter ID."""
         value = (filter_id or "").strip()
         if not value:
             raise ValueError("Jira filter ID is required.")
         jql_filter = value if re.fullmatch(r"\d+", value) else f'"{value}"'
         max_results = max_issues if max_issues is not None else app_config_int("jira.filter_max_issues", "JIRA_FILTER_MAX_ISSUES", 500)
-        return self.search_issues_by_jql(f"filter = {jql_filter}", max_issues=max_results)
+        return self.search_issues_by_jql(
+            f"filter = {jql_filter}",
+            max_issues=max_results,
+            progress=progress,
+        )
 
-    def search_issues_by_jql(self, jql: str, max_issues: int) -> list[JiraIssue]:
+    def search_issues_by_jql(
+        self,
+        jql: str,
+        max_issues: int,
+        progress: Any = None,
+    ) -> list[JiraIssue]:
         """Search Jira issues by JQL with Jira Cloud enhanced-search support."""
         search_api = os.getenv("JIRA_SEARCH_API", "auto").strip().lower()
         if search_api == "legacy":
@@ -155,8 +177,7 @@ class JiraClient:
                     issues = self._search_issues_legacy(jql, max_issues)
                 else:
                     raise
-        for issue in issues:
-            issue.description_comments = self.fetch_description_template_comments(issue.key, issue.issue_type)
+        self.warnings = self._load_description_comments(issues, progress=progress)
         return issues
 
     def sprint_preflight(self, sprint: str, project_key: str = "") -> dict[str, Any]:
@@ -216,7 +237,69 @@ class JiraClient:
             "empty": not issue_rows,
             "issues": issue_rows,
             "not_development_done_issues": not_done,
+            "warnings": list(getattr(self, "warnings", [])),
+            "partial": bool(getattr(self, "warnings", [])),
         }
+
+    def _load_description_comments(
+        self,
+        issues: list[JiraIssue],
+        *,
+        progress: Any = None,
+    ) -> list[dict[str, str]]:
+        total = len(issues)
+        if not total:
+            return []
+        workers = max(
+            4,
+            min(6, app_config_int("jira.comment_workers", "JIRA_COMMENT_WORKERS", 5)),
+        )
+        warnings: list[dict[str, str]] = []
+        with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+            futures = {
+                pool.submit(
+                    self.fetch_description_template_comments,
+                    issue.key,
+                    issue.issue_type,
+                ): issue
+                for issue in issues
+            }
+            for completed, future in enumerate(as_completed(futures), 1):
+                issue = futures[future]
+                comment_failed = False
+                try:
+                    issue.description_comments = future.result()
+                except Exception as exc:
+                    comment_failed = True
+                    issue.description_comments = []
+                    warning = {
+                        "jira_key": issue.key,
+                        "stage": "jira-comments",
+                        "endpoint": f"/rest/api/3/issue/{issue.key}/comment",
+                        "error": str(exc),
+                    }
+                    warnings.append(warning)
+                if callable(progress):
+                    event = "jira-comments-warning" if comment_failed else "jira-comments"
+                    message = (
+                        f"Loading Jira comments {completed}/{total} · warning for {issue.key}"
+                        if event == "jira-comments-warning"
+                        else f"Loading Jira comments {completed}/{total}"
+                    )
+                    try:
+                        progress(
+                            {
+                                "event": event,
+                                "message": message,
+                                "current": completed,
+                                "total": total,
+                                "jira_key": issue.key,
+                                "stage": "jira-comments",
+                            }
+                        )
+                    except Exception:
+                        pass
+        return warnings
 
     def fetch_description_template_comments(self, issue_key: str, issue_type: str = "") -> list[str]:
         """Fetch all chronological comments containing the formal issue-description table."""
@@ -396,14 +479,38 @@ class JiraClient:
             method=method,
         )
 
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"Jira API error {exc.code}: {body}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Jira API connection failed: {exc}") from exc
+        configured_attempts = app_config_int("jira.get_max_attempts", "JIRA_GET_MAX_ATTEMPTS", 2)
+        attempts = max(1, min(3, configured_attempts)) if method.upper() == "GET" else 1
+        backoff = max(
+            0.0,
+            min(
+                2.0,
+                app_config_int("jira.retry_backoff_ms", "JIRA_RETRY_BACKOFF_MS", 350) / 1000,
+            ),
+        )
+        for attempt in range(1, attempts + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="ignore")
+                transient = exc.code == 429 or 500 <= exc.code < 600
+                if transient and attempt < attempts:
+                    time.sleep(backoff * attempt)
+                    continue
+                raise RuntimeError(
+                    f"Jira API {method.upper()} {path} failed at request "
+                    f"attempt {attempt}/{attempts}: HTTP {exc.code}: {body}"
+                ) from exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if attempt < attempts:
+                    time.sleep(backoff * attempt)
+                    continue
+                raise RuntimeError(
+                    f"Jira API {method.upper()} {path} failed at request "
+                    f"attempt {attempt}/{attempts}: {exc}"
+                ) from exc
+        raise RuntimeError(f"Jira API {method.upper()} {path} failed without a response.")
 
     @staticmethod
     def _extract_sprint_name(sprint_field: Any) -> str:

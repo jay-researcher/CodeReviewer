@@ -13,6 +13,7 @@ from code_reviewer.models import ChangedFile, ReviewInput
 from code_reviewer.review_service import (
     deferred_release_resource_identity,
     reconcile_deferred_release_resources,
+    review_sprint_merge_requests,
     run_review_from_payload,
     review_fingerprint_from_merge_requests,
     select_cycle_mr_revisions,
@@ -74,6 +75,47 @@ class SprintMembershipTests(unittest.TestCase):
         self.assertEqual(preview["review_mode"], "batch-preview")
         self.assertTrue(preview["requires_confirmation"])
         self.assertEqual(preview["not_development_done_issues"][0]["jira_key"], "ECHNL-2")
+
+    def test_sprint_review_preserves_comment_warnings_as_partial_result(self) -> None:
+        progress_events: list[dict] = []
+
+        class Client:
+            warnings = [
+                {
+                    "jira_key": "ECHNL-2",
+                    "stage": "jira-comments",
+                    "endpoint": "/rest/api/3/issue/ECHNL-2/comment",
+                    "error": "timed out",
+                }
+            ]
+
+            def search_issues_by_sprint(self, sprint, project_key="", progress=None):
+                self.sprint = sprint
+                self.project_key = project_key
+                if progress:
+                    progress(
+                        {
+                            "event": "jira-comments-warning",
+                            "message": "Loading Jira comments 2/2 · warning for ECHNL-2",
+                            "current": 2,
+                            "total": 2,
+                            "jira_key": "ECHNL-2",
+                        }
+                    )
+                return [_issue("ECHNL-1", "Development Done"), _issue("ECHNL-2", "Development Done")]
+
+        with (
+            patch("code_reviewer.review_service.JiraClient", return_value=Client()),
+            patch(
+                "code_reviewer.review_service._review_issue_collection_merge_requests",
+                side_effect=lambda **kwargs: kwargs["source_metadata"],
+            ),
+        ):
+            result = review_sprint_merge_requests("Sprint 1", progress=progress_events.append)
+
+        self.assertTrue(result["partial"])
+        self.assertEqual("ECHNL-2", result["jira_warnings"][0]["jira_key"])
+        self.assertTrue(any(event["event"] == "jira-comments-warning" for event in progress_events))
 
 
 class RevisionBoundaryTests(unittest.TestCase):
