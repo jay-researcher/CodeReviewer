@@ -29,6 +29,31 @@ def _put(payload: dict[str, object], path: tuple[str, ...], value: dict[str, obj
 
 
 class DeploymentConfigMergeTests(unittest.TestCase):
+    def test_wvadmin_repository_responsible_boundaries(self) -> None:
+        if not hasattr(yaml, "safe_load"):
+            self.skipTest("PyYAML is unavailable")
+        template = yaml.safe_load(
+            (Path(__file__).resolve().parents[1] / "config.yml").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual("wen.yi", template["build-repository"]["wvadmin"]["responsible"])
+        expected = {
+            "momd": "hieut.tran",
+            "trade_middle_office": "hieut.tran",
+            "low_code_designable": "victorcz.xu",
+            "low_code_renderable": "victorcz.xu",
+            "low_code_application": "victorcz.xu",
+            "account_middle_office": "victorcz.xu",
+            "form_designable": "victorcz.xu",
+            "coms": "wen.yi",
+            "workflow_app": "wen.yi",
+            "base": "wen.yi",
+            "common": "wen.yi",
+        }
+        actual = template["wvadmin-repository"]
+        for module, responsible in expected.items():
+            self.assertEqual(responsible, actual[module]["responsible"], module)
+
     def test_release_template_exposes_required_review_policy(self) -> None:
         if not hasattr(yaml, "safe_load"):
             self.skipTest("PyYAML is unavailable")
