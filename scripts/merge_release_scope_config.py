@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 
 
-SCOPE_KEYS = ("application", "release_line", "release_lines")
+SCOPE_KEYS = ("application", "release_line", "release_lines", "responsible")
 APP_POLICY_KEYS = ("review_domains",)
 LLM_POLICY_KEYS = (
     "codex_activity_timeout_seconds",

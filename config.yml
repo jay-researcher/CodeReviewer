@@ -541,7 +541,7 @@ build-repository:
     release_line: "1.0"
     type: frontend
     repository_url: https://gitlab.tx-tech.com/web-sv-build/webfe/wvadmin.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     project_name: "wvadmin#build"
     branch: "1.0.*"
@@ -602,67 +602,67 @@ wvadmin-repository:
   type: frontend
   momd:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/momd.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/momd
   low_code_designable:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/low-code-designable.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/low_code_designable
   low_code_renderable:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/low-code-renderable.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/low_code_renderable
   coms:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/coms.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/coms
   workflow_app:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/workflow-app.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/workflow_app
   low_code_application:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/low-code-application.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/low_code_application
   trade_middle_office:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/trade-middle-office.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/trade_middle_office
   account_middle_office:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/sub/account-middle-office.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/account_middle_office
   base:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/base.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/base
   common:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/common.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/common
   form_designable:
     repository_url: https://gitlab.tx-tech.com/wvp-sv/wvadm/micromod/form-app-designable.git
-    responsible: "wen.yi"
+    responsible: "hieut.tran"
     llm_model: "gpt-5.6-sol"
     branch: "1.0.*"
     local_working_copy: D:/TTL/vibe-coding/git-tools/git-repos/wvadmin-repository/form_designable

@@ -625,7 +625,25 @@ def split_result_by_review_scope(result: ReviewResult) -> list[ReviewResult]:
         ]
         metadata = copy.deepcopy(result.review_input.metadata)
         metadata["related_merge_requests"] = [copy.deepcopy(item) for item in items]
-        responsible_scope = _responsible_scope_from_related_mrs(items)
+        # A Jira Component-driven delivery owner is authoritative for the
+        # application scope.  related_merge_requests still carry the Git Tools
+        # project fallback owner, so rebuilding the scope from those records
+        # here previously changed WVAdmin reports from hieut.tran/victorcz.xu
+        # back to the Web reviewer (wen.yi) during the final save split.
+        if metadata.get("scope_responsible"):
+            responsible_scope = _unique_sorted_people(
+                [
+                    str(person).strip()
+                    for person in (
+                        metadata.get("responsible_scope")
+                        if isinstance(metadata.get("responsible_scope"), list)
+                        else [metadata.get("scope_responsible")]
+                    )
+                    if str(person or "").strip()
+                ]
+            )
+        else:
+            responsible_scope = _responsible_scope_from_related_mrs(items)
         metadata["responsible_scope"] = responsible_scope
         metadata["responsible_people"] = responsible_scope
         metadata["responsible"] = "+".join(metadata["responsible_people"])

@@ -17,7 +17,14 @@ from code_reviewer.gitlab_client import GitLabClient
 from code_reviewer.jira_client import JiraIssue
 from code_reviewer.models import ChangedFile, Finding, ReviewInput, ReviewResult
 from code_reviewer.project_context import build_project_context
-from code_reviewer.report import _responsible_output_dir, render_markdown, save_report, save_reports, split_result_by_responsible
+from code_reviewer.report import (
+    _responsible_output_dir,
+    render_markdown,
+    save_report,
+    save_reports,
+    split_result_by_responsible,
+    split_result_by_review_scope,
+)
 from code_reviewer.repository_sync import RepositorySyncResult, _attach_codebase_memory
 from code_reviewer.resource_optimizer import optimize_prompt_diff
 from code_reviewer.review_service import (
@@ -58,6 +65,49 @@ class LocalContextTests(unittest.TestCase):
             {"responsible": "hieut.tran", "responsible_people": ["hieut.tran"], "web_report_owner": "wen.yi"},
         )
         self.assertEqual(target, Path("reports") / "hieut.tran")
+
+    def test_scope_responsible_survives_final_report_scope_split(self) -> None:
+        review_input = ReviewInput(
+            project="wvp-sv/wvadm/sub/momd",
+            mr_id="106",
+            jira_key="ECHNL-5749",
+            changed_files=[
+                ChangedFile(
+                    path="wvp-sv/wvadm/sub/momd!106/src/configuration.ts",
+                    diff="+export const value = 1",
+                )
+            ],
+            metadata={
+                "application": "WVAdmin",
+                "release_line": "1.0",
+                "responsible": "hieut.tran",
+                "responsible_people": ["hieut.tran"],
+                "responsible_scope": ["hieut.tran"],
+                "scope_responsible": "hieut.tran",
+                "web_report_owner": "wen.yi",
+                "related_merge_requests": [
+                    {
+                        "project_path": "wvp-sv/wvadm/sub/momd",
+                        "mr_id": "106",
+                        "file_prefix": "wvp-sv/wvadm/sub/momd!106",
+                        "application": "WVAdmin",
+                        "release_line": "1.0",
+                        "responsible": "wen.yi",
+                    }
+                ],
+            },
+        )
+        split = split_result_by_review_scope(
+            ReviewResult(review_input, [], "Pass", [], [])
+        )
+
+        self.assertEqual(1, len(split))
+        self.assertEqual("hieut.tran", split[0].review_input.metadata["responsible"])
+        self.assertEqual(["hieut.tran"], split[0].review_input.metadata["responsible_scope"])
+        self.assertEqual(
+            Path("reports") / "hieut.tran",
+            _responsible_output_dir(Path("reports"), split[0].review_input.metadata),
+        )
 
     def test_issue_review_creates_wvadmin_and_deferred_dps11_reports(self) -> None:
         issue = JiraIssue(

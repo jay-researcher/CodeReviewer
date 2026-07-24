@@ -94,12 +94,22 @@ class DeploymentConfigMergeTests(unittest.TestCase):
             _put(
                 production,
                 path,
-                {"application": "Old", "release_line": "old", "branch": "/production/path"},
+                {
+                    "application": "Old",
+                    "release_line": "old",
+                    "responsible": "legacy.owner",
+                    "branch": "/production/path",
+                },
             )
             _put(
                 template,
                 path,
-                {"application": "New", "release_line": "new", "branch": "windows-template"},
+                {
+                    "application": "New",
+                    "release_line": "new",
+                    "responsible": "release.owner",
+                    "branch": "windows-template",
+                },
             )
 
         merged = merge_release_scopes(production, template)
@@ -126,6 +136,7 @@ class DeploymentConfigMergeTests(unittest.TestCase):
                 current = current[segment]  # type: ignore[index]
             self.assertEqual("New", current["application"])
             self.assertEqual("new", current["release_line"])
+            self.assertEqual("release.owner", current["responsible"])
             self.assertEqual("/production/path", current["branch"])
 
 
