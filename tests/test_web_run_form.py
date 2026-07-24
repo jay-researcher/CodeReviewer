@@ -134,14 +134,19 @@ class WebRunFormTests(unittest.TestCase):
         self.assertIn("classList.toggle('complete', status === 'done')", page)
         self.assertIn('.coverage-scan-panel.complete {', page)
 
-    def test_review_progress_pauses_auto_scroll_for_sixty_seconds_after_manual_input(self) -> None:
+    def test_review_progress_waits_for_drag_release_then_pauses_for_sixty_seconds(self) -> None:
         page = render_index("admin")
 
         self.assertIn("const jobAutoScrollResumeTimers = new Map();", page)
-        self.assertIn("events.addEventListener('wheel', pauseAutoScroll", page)
-        self.assertIn("events.addEventListener('pointerdown', pauseAutoScroll", page)
-        self.assertIn("events.addEventListener('pointerup', pauseAutoScroll", page)
-        self.assertIn("events.addEventListener('touchstart', pauseAutoScroll", page)
+        self.assertIn("const jobAutoScrollDragPointers = new Map();", page)
+        self.assertIn("events.addEventListener('wheel', pauseForOneMinute", page)
+        self.assertIn("events.addEventListener('pointerdown', event => {", page)
+        self.assertIn("jobAutoScrollDragPointers.set(event.pointerId, jobId);", page)
+        self.assertIn("document.addEventListener('pointerup', finishJobAutoScrollDrag, true);", page)
+        self.assertIn("document.addEventListener('pointercancel', finishJobAutoScrollDrag, true);", page)
+        self.assertIn("if (Array.from(jobAutoScrollDragPointers.values()).includes(jobId)) return;", page)
+        self.assertIn("jobAutoScrollDragPointers.delete(event.pointerId);", page)
+        self.assertIn("scheduleJobAutoScrollResume(jobId);", page)
         self.assertIn("}, 60000);", page)
         self.assertIn('class="job-events" tabindex="0" aria-label="Review job event stream"', page)
 

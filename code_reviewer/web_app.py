@@ -9281,10 +9281,13 @@ __ADMIN_TRACE_SECTION__
     const submissionFlights = new Map();
     const jobAutoScroll = new Map();
     const jobAutoScrollResumeTimers = new Map();
+    const jobAutoScrollDragPointers = new Map();
     const maximizedJobs = new Set();
     const activeJobStatuses = new Set(['queued', 'running', 'pausing', 'paused', 'stopping']);
     let reviewLifecycleActive = false;
     let lastReviewPayload = null;
+    document.addEventListener('pointerup', finishJobAutoScrollDrag, true);
+    document.addEventListener('pointercancel', finishJobAutoScrollDrag, true);
     const sidebars = {
       projects: { panel: 'projectsAside', toggle: 'projectsToggle', mainClass: 'projects-collapsed', showTitle: 'Show projects', hideTitle: 'Hide projects' },
       history: { panel: 'historyAside', toggle: 'historyToggle', mainClass: 'history-collapsed', showTitle: 'Show report history', hideTitle: 'Hide report history' }
@@ -12011,13 +12014,9 @@ function jiraKeyFromReportPath(reportPath) {
         button.addEventListener('click', () => {
           const jobId = button.dataset.job || '';
           if (button.dataset.action === 'jump') {
-            if (jobAutoScrollResumeTimers.has(jobId)) {
-              window.clearTimeout(jobAutoScrollResumeTimers.get(jobId));
-              jobAutoScrollResumeTimers.delete(jobId);
-            }
+            cancelJobAutoScrollResume(jobId);
             jobAutoScroll.set(jobId, true);
-            const events = card.querySelector('.job-events');
-            if (events) events.scrollTop = events.scrollHeight;
+            scrollCurrentJobToLatest(jobId);
             return;
           }
           if (maximizedJobs.has(jobId)) {
@@ -12034,29 +12033,58 @@ function jiraKeyFromReportPath(reportPath) {
       if (events) {
         const jobId = card.id.replace(/^job-/, '');
         if (!jobAutoScroll.has(jobId)) jobAutoScroll.set(jobId, true);
-        const pauseAutoScroll = () => {
-          jobAutoScroll.set(jobId, false);
-          if (jobAutoScrollResumeTimers.has(jobId)) {
-            window.clearTimeout(jobAutoScrollResumeTimers.get(jobId));
-          }
-          const timer = window.setTimeout(() => {
-            jobAutoScrollResumeTimers.delete(jobId);
-            jobAutoScroll.set(jobId, true);
-            if (document.contains(events)) events.scrollTop = events.scrollHeight;
-          }, 60000);
-          jobAutoScrollResumeTimers.set(jobId, timer);
+        const pauseForOneMinute = () => {
+          pauseJobAutoScroll(jobId);
+          scheduleJobAutoScrollResume(jobId);
         };
-        events.addEventListener('wheel', pauseAutoScroll, {passive:true});
-        events.addEventListener('pointerdown', pauseAutoScroll, {passive:true});
-        events.addEventListener('pointerup', pauseAutoScroll, {passive:true});
-        events.addEventListener('touchstart', pauseAutoScroll, {passive:true});
+        events.addEventListener('wheel', pauseForOneMinute, {passive:true});
+        events.addEventListener('pointerdown', event => {
+          pauseJobAutoScroll(jobId);
+          jobAutoScrollDragPointers.set(event.pointerId, jobId);
+        }, {passive:true});
+        events.addEventListener('touchstart', pauseForOneMinute, {passive:true});
+        events.addEventListener('touchend', pauseForOneMinute, {passive:true});
         events.addEventListener('keydown', event => {
-          if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) pauseAutoScroll();
+          if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) pauseForOneMinute();
         });
       }
       for (const button of card.querySelectorAll('.gate-handoff')) {
         button.addEventListener('click', () => prepareReleaseGate(button.dataset.mrUrl || '', button.dataset.sprint || '', button.dataset.jobId || ''));
       }
+    }
+
+    function cancelJobAutoScrollResume(jobId) {
+      if (!jobAutoScrollResumeTimers.has(jobId)) return;
+      window.clearTimeout(jobAutoScrollResumeTimers.get(jobId));
+      jobAutoScrollResumeTimers.delete(jobId);
+    }
+
+    function pauseJobAutoScroll(jobId) {
+      jobAutoScroll.set(jobId, false);
+      cancelJobAutoScrollResume(jobId);
+    }
+
+    function scrollCurrentJobToLatest(jobId) {
+      const events = document.getElementById(jobCardId(jobId))?.querySelector('.job-events');
+      if (events) events.scrollTop = events.scrollHeight;
+    }
+
+    function scheduleJobAutoScrollResume(jobId) {
+      cancelJobAutoScrollResume(jobId);
+      const timer = window.setTimeout(() => {
+        jobAutoScrollResumeTimers.delete(jobId);
+        if (Array.from(jobAutoScrollDragPointers.values()).includes(jobId)) return;
+        jobAutoScroll.set(jobId, true);
+        scrollCurrentJobToLatest(jobId);
+      }, 60000);
+      jobAutoScrollResumeTimers.set(jobId, timer);
+    }
+
+    function finishJobAutoScrollDrag(event) {
+      const jobId = jobAutoScrollDragPointers.get(event.pointerId);
+      if (!jobId) return;
+      jobAutoScrollDragPointers.delete(event.pointerId);
+      scheduleJobAutoScrollResume(jobId);
     }
 
     async function controlReviewJob(jobId, action) {
